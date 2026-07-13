@@ -53,7 +53,7 @@ VERDICT_SCHEMA = ROOT / "scripts" / "verdict.schema.json"
 VENV_PY = ROOT / ".venv" / "bin" / "python"
 
 # Concurrency bound (Gate 3 part 3 mechanism: atomic slot claim + stale-base guard, unchanged).
-# Configurable via ORCH_MAX_PARALLEL; default 3 (Val, 2026-07-13). NOTE the real limiter is not the
+# Configurable via ORCH_MAX_PARALLEL; default 3 (the operator, 2026-07-13). NOTE the real limiter is not the
 # box — a worker is API-latency-bound (~200-300MB, mostly waiting on the model). It is the shared
 # Codex/Claude quota + rate-limits, and the stale-base rebase churn that grows with parallelism. On
 # THIS box (2 vCPU, 3.7GB, NO swap) 3 is safe for light specs; heavier real-product test suites/builds
@@ -253,7 +253,7 @@ def preflight(spec_id: str) -> dict:
     if errors:
         die("spec schema-invalid:\n  - " + "\n  - ".join(errors), 4)
 
-    # needs_network hard-refused (Val decision, residual risk 13-B).
+    # needs_network hard-refused (the operator decision, residual risk 13-B).
     if spec.get("needs_network", False):
         die("needs_network:true is REFUSED on this host: the Codex sandbox cannot restrict "
             "reads (risk 13-B), so a networked worker could exfiltrate credentials. Requires "
@@ -388,7 +388,7 @@ def _findings_key(f: dict) -> str:
 
 def escalate(spec_id: str, reason: str, evidence: dict) -> Path:
     """Durable escalation record (tracked provenance). Gate 4: limit exhausted / stop-early →
-    spec failed + escalation with the evidence trail. Val reviews after the fact."""
+    spec failed + escalation with the evidence trail. the operator reviews after the fact."""
     ESCALATIONS.mkdir(parents=True, exist_ok=True)
     path = ESCALATIONS / f"{spec_id}-{now().replace(':', '').replace('-', '')}.json"
     atomic_write(path, json.dumps({"spec_id": spec_id, "reason": reason,
@@ -404,12 +404,12 @@ def remediation_preflight(spec_id: str, spec: dict, digest: str, n: int) -> dict
     k = len(fails)
     risk = spec.get("risk_class", "default")
 
-    # High-risk specs require Val's explicit approval before EVERY dispatch, at every autonomy
+    # High-risk specs require the operator's explicit approval before EVERY dispatch, at every autonomy
     # level (Gate 4 §2) — a per-attempt artifact next to the spec approval, never implied.
     if risk == "high":
         pa = APPROVALS / f"{digest}.attempt-{n}.json"
         if not pa.exists():
-            die(f"high-risk spec: attempt {n} needs Val's per-dispatch approval artifact "
+            die(f"high-risk spec: attempt {n} needs the operator's per-dispatch approval artifact "
                 f"({pa}); refusing to launch.", 17)
 
     if k == 0:
@@ -484,13 +484,34 @@ def parse_attempt_id(attempt_id: str) -> tuple[str, int]:
 
 # ----------------------------------------------------- D5 worker isolation ----
 # The worker AND the gate test run worker-produced code. Run both as a dedicated `codex-worker`
-# UID in hardened transient SYSTEM services so FILESYSTEM PERMISSIONS separate them from val's
+# UID in hardened transient SYSTEM services so FILESYSTEM PERMISSIONS separate them from the operator's
 # credentials (risk 13-B: this host's Landlock backend can't restrict reads, so DAC is the boundary,
 # not Codex's sandbox). Setup: scripts/setup-worker-user.sh. Proven by tests/worker_isolation.sh.
+def _resolve_operator() -> "tuple[str, Path]":
+    """The human operator this instance runs as (the box owner on the origin, anyone on a clone).
+    Resolved from the passwd database (NSS) — NOT $HOME, which is unreliable under systemd/sudo
+    (SOL). Override with ORCH_OPERATOR_USER. Never dies at import (tests import this module); strict
+    validation happens where it matters."""
+    import pwd
+    name = os.environ.get("ORCH_OPERATOR_USER")
+    if not name:
+        try:
+            name = pwd.getpwuid(os.getuid()).pw_name
+        except Exception:
+            name = "operator"
+    try:
+        home = Path(pwd.getpwnam(name).pw_dir)
+    except Exception:
+        home = Path(os.environ.get("HOME") or f"/home/{name}")
+    return name, home
+
+
+OPERATOR_USER, OPERATOR_HOME = _resolve_operator()
+
 WORKER_USER = "codex-worker"
 WORKER_HOME = Path("/home/codex-worker")
 ISO_WORKTREES = Path("/srv/codexwork/worktrees")
-CODEX_PKG = Path("/home/val/.local/lib/node_modules/@openai/codex")  # bind-mounted RO to /opt/codex
+CODEX_PKG = OPERATOR_HOME / ".local/lib/node_modules/@openai/codex"  # bind-mounted RO to /opt/codex
 
 
 def isolation_available() -> bool:
@@ -510,10 +531,11 @@ def worktree_root() -> Path:
 
 
 def grant_worker_acl(wt: Path) -> None:
-    """Let codex-worker read/write the worktree and val read worker-created files (independent of
-    val's session groups). Deny the worker the .git pointer (belt; its target is in /home/val)."""
-    run(["setfacl", "-R", "-m", f"u:{WORKER_USER}:rwX", "-m", "u:val:rwX", str(wt)])
-    run(["setfacl", "-R", "-d", "-m", f"u:{WORKER_USER}:rwX", "-d", "-m", "u:val:rwX", str(wt)])
+    """Let codex-worker read/write the worktree and the operator read worker-created files (independent of
+    the operator's session groups). Deny the worker the .git pointer (belt; its target is in the operator's home)."""
+    run(["setfacl", "-R", "-m", f"u:{WORKER_USER}:rwX", "-m", f"u:{OPERATOR_USER}:rwX", str(wt)])
+    run(["setfacl", "-R", "-d", "-m", f"u:{WORKER_USER}:rwX", "-d", "-m", f"u:{OPERATOR_USER}:rwX",
+         str(wt)])
     if (wt / ".git").exists():
         run(["setfacl", "-x", f"u:{WORKER_USER}", str(wt / ".git")])
 
@@ -521,13 +543,13 @@ def grant_worker_acl(wt: Path) -> None:
 def isolated_run(unit, argv, cwd, rw_paths, private_network, ceiling_s, stdout, stderr,
                  binds=None, env_extra=None):
     """Run argv as codex-worker in a hardened transient SYSTEM service; block for completion.
-    Writes are confined to rw_paths; /home/val is inaccessible; the gate test passes
+    Writes are confined to rw_paths; the operator's home is inaccessible; the gate test passes
     private_network=True (untrusted code, no API needed). The service is a system unit (own cgroup,
     own RuntimeMaxSec) — store `unit` so cancel/health can stop it independently of the outer unit."""
-    # NOTE: no ProtectHome — it would tmpfs-hide the worker's OWN CODEX_HOME (auth). /home/val is
+    # NOTE: no ProtectHome — it would tmpfs-hide the worker's OWN CODEX_HOME (auth). the operator's home is
     # blocked explicitly by InaccessiblePaths + DAC; the worker's own home stays accessible.
     props = ["--property=ProtectSystem=strict",
-             "--property=InaccessiblePaths=/home/val", "--property=PrivateTmp=yes",
+             f"--property=InaccessiblePaths={OPERATOR_HOME}", "--property=PrivateTmp=yes",
              "--property=NoNewPrivileges=yes", "--property=RestrictSUIDSGID=yes",
              "--property=UMask=0007", f"--property=RuntimeMaxSec={ceiling_s}"]
     for p in rw_paths:
@@ -551,7 +573,7 @@ def isolated_run(unit, argv, cwd, rw_paths, private_network, ceiling_s, stdout, 
 
 def last_agent_message(events_path: Path) -> str:
     """Recover the worker's final message from the JSONL stream (isolated workers can't write the
-    evidence dir under /home/val, so --output-last-message is unavailable)."""
+    evidence dir under the operator's home, so --output-last-message is unavailable)."""
     msg = ""
     try:
         for line in events_path.read_text().splitlines():
@@ -568,9 +590,9 @@ def last_agent_message(events_path: Path) -> str:
 
 
 def validate_worktree_safe(wt: Path) -> list[str]:
-    """Before the orchestrator (val) touches worker output: reject unsafe filesystem entries a
-    hostile patch could plant — symlinks, FIFOs, sockets, devices — so no later val-context step
-    follows a link into val's files. Skips .git. Returns a list of offending repo-relative paths."""
+    """Before the orchestrator (the operator) touches worker output: reject unsafe filesystem entries a
+    hostile patch could plant — symlinks, FIFOs, sockets, devices — so no later operator-context step
+    follows a link into the operator's files. Skips .git. Returns a list of offending repo-relative paths."""
     bad = []
     for p in wt.rglob("*"):
         rel = p.relative_to(wt)
@@ -621,7 +643,7 @@ def cmd_launch(spec_id: str) -> None:
             die(f"worktree {wt} already exists (attempt not unique?)", 9)
         git("worktree", "add", "--quiet", "-b", branch, str(wt), base_sha)
         if iso:
-            grant_worker_acl(wt)   # D5: worker (codex-worker) rwx; val reads output; .git denied
+            grant_worker_acl(wt)   # D5: worker (codex-worker) rwx; the operator reads output; .git denied
     except SystemExit:
         write_state(spec_id, {**read_state(spec_id), "status": "error_launch",
                               "error_class": ERR_LAUNCH,
@@ -651,7 +673,7 @@ def cmd_launch(spec_id: str) -> None:
         "systemd-run", "--user", f"--unit={unit}", "--collect",
         f"--property=Description=Codex worker {attempt_id}",
         f"--property=RuntimeMaxSec={ceiling_s}",   # hard ceiling (D10), default-on
-        "--setenv=HOME=" + os.environ.get("HOME", "/home/val"),
+        "--setenv=HOME=" + os.environ.get("HOME", str(OPERATOR_HOME)),
         "--setenv=PATH=" + os.environ.get("PATH", "/usr/bin:/bin"),
         "--setenv=XDG_RUNTIME_DIR=" + os.environ.get("XDG_RUNTIME_DIR", ""),
         str(ROOT / "scripts" / "dispatch"), "_run", attempt_id,
@@ -681,8 +703,8 @@ def _run(attempt_id: str) -> None:
             "attempt_id": attempt_id, "spec_id": spec_id, "attempt": n,
             "spec_digest": lc["spec_digest"], "base_sha": lc["base_sha"],
             "worker_model": lc["worker_model"], "reviewer_model": lc["reviewer_model"],
-            "isolation": ("D5: codex-worker uid, systemd-hardened, /home/val inaccessible, test "
-                          "phase network-off" if lc.get("isolation") else "same-user (val) fallback, "
+            "isolation": ("D5: codex-worker uid, systemd-hardened, the operator's home inaccessible, test "
+                          "phase network-off" if lc.get("isolation") else "same-user (the operator) fallback, "
                           "codex bwrap sandbox"),
             "test_command": lc["test_command"], "status": status,
             "error_class": err_class, "commit_policy": "orchestrator-commits (G1-A/C)",
@@ -745,8 +767,8 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
         if iso:
             # D5: worker runs as codex-worker in a hardened system service. Codex's own sandbox is
             # OFF (-s danger-full-access) because it won't construct under the bind-mounted UID;
-            # ProtectSystem=strict + ReadWritePaths confine writes and InaccessiblePaths=/home/val
-            # + DAC confine reads. --output-last-message is dropped (worker can't write /home/val);
+            # ProtectSystem=strict + ReadWritePaths confine writes and InaccessiblePaths=the operator's home
+            # + DAC confine reads. --output-last-message is dropped (worker can't write the operator's home);
             # the final message is recovered from the JSONL stream.
             argv = ["/usr/bin/node", "/opt/codex/bin/codex.js", *codex_args,
                     "-s", "danger-full-access", prompt]
@@ -758,9 +780,9 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
         else:
             # Fallback (fresh box / CI): same-user launch with Codex's bwrap sandbox.
             scrubbed = {
-                "HOME": os.environ.get("HOME", "/home/val"), "USER": "val", "LOGNAME": "val",
-                "PATH": "/home/val/.local/bin:/usr/bin:/bin", "CODEX_HOME": "/home/val/.codex",
-                "TERM": "dumb", "LANG": "C.UTF-8",
+                "HOME": str(OPERATOR_HOME), "USER": OPERATOR_USER, "LOGNAME": OPERATOR_USER,
+                "PATH": f"{OPERATOR_HOME}/.local/bin:/usr/bin:/bin",
+                "CODEX_HOME": f"{OPERATOR_HOME}/.codex", "TERM": "dumb", "LANG": "C.UTF-8",
             }
             worker_cmd = ["codex", *codex_args, "--sandbox", "workspace-write",
                           "--output-last-message", str(raw / "worker-last-message.txt"), prompt]
@@ -793,8 +815,8 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
         finish("failed_worker_error", ec, worker_exit=wc.returncode,
                detail=f"worker error class={ec}")
 
-    # --- D5 path-safety gate: reject planted symlinks/special files BEFORE any val-context step
-    # touches worker output (no later val process should be able to follow a link into val's files).
+    # --- D5 path-safety gate: reject planted symlinks/special files BEFORE any operator-context step
+    # touches worker output (no later the operator process should be able to follow a link into the operator's files).
     unsafe = validate_worktree_safe(wt)
     if unsafe:
         finish("failed_scope", ERR_SCOPE, worker_exit=wc.returncode,
@@ -833,8 +855,8 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
 
     # --- step 7: test ----------------------------------------------------------
     # The test_command runs WORKER-PRODUCED code — the real exfiltration path (SOL, D5). Under D5 it
-    # runs as codex-worker with PrivateNetwork=yes (no API needed) and /home/val inaccessible, so a
-    # malicious test can neither read val's creds nor phone home. Otherwise it runs as val (fallback).
+    # runs as codex-worker with PrivateNetwork=yes (no API needed) and the operator's home inaccessible, so a
+    # malicious test can neither read the operator's creds nor phone home. Otherwise it runs as the operator (fallback).
     if iso:
         with open(att / "test.log", "w") as tl:
             tcp = isolated_run(
@@ -1005,10 +1027,10 @@ def review(att: Path, spec_id: str, lc: dict, wc: str):
     )
     (att / "raw" / "review-request.txt").write_text(req)
     schema_obj = json.loads(VERDICT_SCHEMA.read_text())
-    # D5: the reviewer is a Claude process running as val, judging WORKER-CONTROLLED diff text — a
+    # D5: the reviewer is a Claude process running as the operator, judging WORKER-CONTROLLED diff text — a
     # confused-deputy risk (SOL). It gets the full spec + diff + evidence in the prompt and needs NO
     # host filesystem access, so ALL tools (incl. Read/Grep/Glob) are denied: a prompt-injected
-    # reviewer cannot browse val's files. Nothing to inspect beyond what the orchestrator provided.
+    # reviewer cannot browse the operator's files. Nothing to inspect beyond what the orchestrator provided.
     cmd = [
         "claude", "-p", "--output-format", "json", "--json-schema", json.dumps(schema_obj),
         "--model", lc["reviewer_model"].replace("claude-fable-5", "fable"),
@@ -1058,7 +1080,7 @@ def pr_body(spec_id: str, lc: dict, wc: str) -> str:
         f"| reviewer | `{lc['reviewer_model']}` → PASS (bound) |\n\n"
         f"Integrity/scope/test/review all PASS. Provenance under "
         f"`.orchestrator/attempts/{spec_id}/{lc['attempt']}/`. Draft: CI + branch protection are "
-        f"the hard gate; Val merges (D9/D12). Commit authored by the worker, packaged by the "
+        f"the hard gate; the operator merges (D9/D12). Commit authored by the worker, packaged by the "
         f"orchestrator (G1-A/C)."
     )
 
@@ -1253,7 +1275,7 @@ def _list_codex_units() -> list[str]:
 
 
 # ================================================================= merge =======
-# Plan-scoped autonomy (Level 1.5, ratified by Val 2026-07-13). The orchestrator may merge an
+# Plan-scoped autonomy (Level 1.5, ratified by the operator 2026-07-13). The orchestrator may merge an
 # attempt's PR to `integration` WITHOUT a per-PR human click — but ONLY through this fail-closed
 # path, and ONLY while the AUTONOMY grant is present. Every correctness gate still applies, plus the
 # merge-time base-check that closes the post-PR stale-base hole (SOL, G4-A): after a sibling PR

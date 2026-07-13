@@ -12,7 +12,7 @@ An orchestrator that dispatches Codex worker jobs from schema-validated specs, g
 
 - **Dispatcher:** Python 3 (`scripts/dispatch.py`), venv in `.venv/` (gitignored), deps pinned in
   `scripts/requirements.txt` (pyyaml, jsonschema). Thin bash wrapper `scripts/dispatch`.
-- **Codex runs in Fast mode** (Val, 2026-07-13): every Codex invocation passes
+- **Codex runs in Fast mode** (the operator, 2026-07-13): every Codex invocation passes
   `-c service_tier=priority` — the priority processing tier. This is a *speed* setting (faster
   wall-clock); it does **not** change the model or reasoning depth, which stay `gpt-5.6-sol` /
   `high` as the approval artifacts pin. The real config key is `service_tier`, not
@@ -26,13 +26,13 @@ An orchestrator that dispatches Codex worker jobs from schema-validated specs, g
 
 - Specs: `specs/SPEC-NNN.yaml`, schema `specs/spec.schema.json`. Immutable once approved;
   never regex-parsed. Approval artifacts in `.orchestrator/approvals/<digest>.json`.
-- Branches: worker branches `codex/SPEC-NNN-<attempt>`; PRs target `integration`; only Val
+- Branches: worker branches `codex/SPEC-NNN-<attempt>`; PRs target `integration`; only the operator
   promotes `integration` → `main`. Both protected (ruleset, not classic protection).
 - Worker isolation (D5): the worker + gate test run as the `codex-worker` UID in hardened
   `systemd-run --uid` system services; worktrees live under `/srv/codexwork/worktrees` (not in
-  `/home/val`), shared with `val` via POSIX ACLs. `scripts/setup-worker-user.sh` is the one-time
-  privileged setup; `tests/worker_isolation.sh` proves the boundary. `/home/val` (hence all of
-  val's credentials) is unreachable by workers.
+  `the operator's home`), shared with `the operator` via POSIX ACLs. `scripts/setup-worker-user.sh` is the one-time
+  privileged setup; `tests/worker_isolation.sh` proves the boundary. `the operator's home` (hence all of
+  the operator's credentials) is unreachable by workers.
 - Evidence: per-attempt under `.orchestrator/attempts/<id>/<n>/`. Manifests tracked; raw
   logs/events + worktrees gitignored, integrity provable via tracked sha256 hashes.
 - Consulting Codex SOL (`gpt-5.6-sol`, high reasoning): **never cap the run at minutes.** These
