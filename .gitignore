@@ -27,3 +27,6 @@ __pycache__/
 # Per-operator identity + local autonomy override (never shared; make copied approvals fail on clones)
 .orchestrator/instance.json
 .orchestrator/AUTONOMY.local.json
+
+# SOL consultation raw event-logs — verbose machine logs; keep prompt+response+DECISION+sha256 only
+.orchestrator/decisions/**/sol-events.jsonl

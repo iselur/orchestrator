@@ -84,7 +84,9 @@ check("advanced base -> stale, reports new tip", (moved2 is True) and cur2 == ne
 
 # --- Guard 3: autonomy grant loader (Level 1.5 auto-merge is gated on it) ----------------------
 import os
-d.AUTONOMY = pathlib.Path(tempfile.mkdtemp()) / "AUTONOMY.json"
+_atmp = pathlib.Path(tempfile.mkdtemp())
+d.AUTONOMY = _atmp / "AUTONOMY.json"
+d.AUTONOMY_LOCAL = _atmp / "AUTONOMY.local.json"   # isolate the gitignored local override too
 check("no grant file -> autonomy off", d.load_autonomy() is None)
 d.AUTONOMY.write_text(json.dumps({"enabled": False, "target_branch": "integration"}))
 check("enabled:false -> autonomy off", d.load_autonomy() is None)
