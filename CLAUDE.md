@@ -19,6 +19,54 @@ Spec approval still binds each attempt to intent; the operator reviews results a
 everything. This grant is per-project and does NOT transfer to the eventual real-product repo, which
 gets its own explicit policy decision. Rationale + adversarial validation: `SETUP-REPORT.md` G4-A.
 
+## Execution split — delegate-first (Claude delegates, Codex executes most work)
+
+Ratified by the operator + dual-validated with SOL (BLOCK→PASS on conditions), 2026-07-13
+(`.orchestrator/decisions/REBALANCE-codex/`). **Default: substantive work is EXECUTED by Codex** (idle
+quota, separate rate/billing pool, uncorrelated errors). Claude delegates aggressively (MAX delegation)
+and is reserved for orchestration, final judgment/synthesis, dual-vendor reconciliation, and the
+INDEPENDENT review layer. This includes **orchestrator self-development** — its own non-trust-critical
+code changes are dispatched as Codex specs, not hand-edited by Claude. Three lanes:
+
+- **Ordinary delegated lane (default for most work):** Codex implements → deterministic fail-closed
+  gates → independent Claude review → PR → auto-merge to `integration`. Covers metrics/reporting,
+  non-normative docs, isolated helpers, ordinary product specs, and **research execution**.
+- **High-assurance delegated lane (trust-critical code):** Codex MAY author (delegate here too), but
+  the installed **parent** version validates the candidate; PLUS a pre-dispatch spec challenge (a fresh,
+  context-isolated critic surfaces abuse cases + invariant-level acceptance tests — never the
+  implementation conversation), mandatory human approval, an adversarial SOL design review, security
+  regression tests, and staged activation.
+- **Control-plane authorization lane (Claude + human, NEVER delegated):** policy/invariant changes,
+  trust classification, reviewer conclusions, merge authority, final synthesis, dual-vendor
+  reconciliation.
+
+**Binding invariants (SOL):**
+1. **Bootstrap:** a change to the trust boundary must never validate, approve, review-bind, or merge
+   ITSELF. The installed parent version runs all gates; the dispatcher never executes a candidate's own
+   modified gate/dispatch code to gate that candidate; a candidate activates only after separate
+   approval + install.
+2. **Classify by capability + transitive dependency, not path-touch.** A machine-enforced trust manifest
+   + dependency closure decides trust-critical status; any file in the trust closure OR any
+   unclassified/ambiguous file is forced **high-risk** (fail closed). Trust-critical = anything that can
+   affect dispatch authorization, sandbox construction, worker identity/env/PATH, worktree/network
+   policy, gate implementations (+ their libs/config), spec parse/schema/digest/approval/risk/test
+   selection, evidence gen/hash/store/diff-binding, reviewer prompt/schema/inputs/parsing/fail-closed
+   behavior, push/PR/merge/base-check/autonomy, CI + security-claim tests, and packaging/entrypoints/deps
+   for any of these.
+3. **Post-implementation review stays Claude-only** — never Codex-grades-Codex (cross-vendor
+   independence is the asset).
+4. **No single delegation-ratio TARGET** (perverse incentive to downgrade borderline work). Report
+   **risk-weighted work class**; fail closed on unclassified files; never set a quota target on the
+   trust-critical lane.
+
+**Codex toolkit / web search (operator, 2026-07-13):** the **research/consult lane runs Codex with the
+FULL toolkit incl. web search** (`codex exec --sandbox read-only`, network on) — it improves quality and
+runs no untrusted worker-authored code against our creds; require source capture + claim-level
+reconciliation (vendor diversity without evidence diversity is cosmetic). The **worker EXECUTION lane
+stays network-off** (`needs_network:true` still REFUSED) until the D5 credential residual (per-attempt
+UID / credential broker) is closed — enabling network there reopens token exfiltration and is a separate
+Critical decision, not a free flag. See [[delegate-heavy-work-to-codex]], dual-validated-planning above.
+
 ## Session-start ritual (Gate 3)
 
 Run **`./scripts/dispatch reconcile`** first thing. It reads `.orchestrator/state/*.json`, inspects

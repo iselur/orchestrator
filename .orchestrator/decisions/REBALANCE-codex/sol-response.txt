@@ -1,0 +1,52 @@
+VERDICT: BLOCK
+
+The direction is right, but the plan needs one hard bootstrap rule before self-development can safely enter the worker pipeline.
+
+**1. Dogfooding is a conditional trust gain**
+
+Dogfooding is better than unreviewed Claude-direct edits when Codex changes are evaluated by the **previously trusted pipeline**, not by machinery introduced or influenced by the candidate change.
+
+The missing invariant is:
+
+> A change to the orchestrator’s trust boundary must never validate, approve, review-bind, or merge itself.
+
+A worker may author such a change, but the installed parent version must perform isolation, integrity collection, scope enforcement, testing, review binding, push, and merge authorization. The candidate must not become active until separately approved and installed. Otherwise a patch can weaken a gate, evidence capture, or test harness and then benefit from that weakening during its own attempt.
+
+Your Claude-only line is both too path-oriented and slightly misdrawn. Classify by **capability and transitive dependency**, not “touches a trust-critical path.” Trust-critical includes:
+
+- Everything that can affect dispatch authorization, sandbox construction, worker identity, environment, executable lookup, worktree boundaries, or network policy.
+- Gate implementations and every library/configuration they consume.
+- Spec parsing, schema validation, digesting, approval lookup, risk classification, and test-command selection.
+- Evidence generation, serialization, hashing, storage, and diff/revision binding.
+- Reviewer prompt/schema construction, inputs, result parsing, and fail-open/fail-closed behavior.
+- Push, PR, merge, base verification, branch selection, and autonomy enforcement.
+- CI and regression tests that constitute security claims.
+- Packaging, installation, entrypoints, dependency pins, and update mechanisms for any of the above.
+
+Conversely, Claude need not **author** all trust-critical code. Codex can implement it, but it must use a distinct high-assurance lane: parent-version validation, mandatory human approval, adversarial SOL design review, and security regression tests. Reserve Claude-only for final authorization and independent review, not necessarily keystrokes. Metrics, reporting, clearly non-normative documentation, and isolated helper utilities can use the ordinary lane.
+
+A path-touch rule is inadequate: a supposedly harmless shared helper, configuration file, dependency update, test fixture, shell wrapper, or import can alter trusted behavior without modifying a named core path. Maintain a machine-enforced trust manifest plus dependency closure; unexpected ambiguity escalates to high risk.
+
+**2. The proposed loop has partial, not complete, independence**
+
+“Claude specifies → Codex implements → fresh Claude reviews” provides useful implementation diversity. It does not provide independent validation of the requirement itself. Both Claude stages can share the same omitted assumption, and a reviewer bound to an exact diff may diligently confirm conformance to a deficient spec.
+
+Human approval helps only if the approval artifact exposes security assumptions and negative requirements clearly. Add a pre-dispatch spec challenge for medium/high-risk work: a fresh, context-isolated critic should identify missing abuse cases and propose invariant-level acceptance tests. It can be SOL or Claude, but should not be the implementation conversation. Keep postimplementation review Claude-only to avoid Codex grading its own output.
+
+**3. Biggest underweighted risk: trust-boundary drift**
+
+The largest failure mode is not malicious Codex code; it is gradual expansion of “non-trust-critical” until shared helpers and configuration silently control trusted behavior. A delegation-ratio metric will create pressure to classify borderline work downward, turning a descriptive metric into a perverse target.
+
+Minimal mitigation: enforce a versioned trust manifest and transitive dependency check, fail closed on unclassified files, and report delegation by risk-weighted work class—not a single ratio. Never set a quota target for the trust-critical lane.
+
+**4. Better split**
+
+Use three lanes:
+
+- Ordinary delegated lane: Codex implementation, deterministic gates, independent Claude review.
+- High-assurance delegated lane: Codex may author, but parent pipeline validates; mandatory spec challenge, human approval, security tests, and staged activation.
+- Control-plane authorization lane: Claude/human judgment for policy changes, trust classification, reviewer conclusions, and merge authority.
+
+Research fan-out to Codex is sensible, but require source capture and claim-level reconciliation; vendor diversity without evidence diversity is cosmetic.
+
+The strongest counterargument is that direct Claude edits are already less controlled, so any dogfooding is an improvement. That is mostly true—but without parent-version validation and capability-based classification, dogfooding creates a route for one accepted change to weaken assurance for every later change. Add those invariants, and this becomes a PASS.
