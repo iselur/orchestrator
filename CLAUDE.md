@@ -5,7 +5,7 @@ log and findings live in `SETUP-REPORT.md`. On any conflict, `SETUP-BRIEF.md` in
 
 ## Autonomy level
 
-**Level 1.5 — plan-scoped autonomy (Val ratified 2026-07-13, THIS repo only).** Val agrees a plan
+**Level 1.5 — plan-scoped autonomy (the operator ratified 2026-07-13, THIS repo only).** the operator agrees a plan
 scope with the orchestrator, then the orchestrator may **merge in-scope PRs to `integration`
 autonomously** — no per-PR human click — via `./scripts/dispatch merge <attempt-id>`, which is
 fail-closed and enforces every gate: attempt `passed_pr_opened`; bound reviewer PASS; `ci` green;
@@ -13,7 +13,7 @@ PR head == the reviewed `worker_commit`; and the **merge-time base-check** (base
 `base_sha`, closing the post-PR stale-base hole). The grant lives in `.orchestrator/AUTONOMY.json`
 (`enabled`, `allowed_risk_class`, `needs_network_allowed`); delete it or set `enabled:false` to
 revert to Level 1. **`main` promotion stays human-only, permanently** — never auto-merged.
-Spec approval still binds each attempt to intent; Val reviews results after the fact; `HALT` pauses
+Spec approval still binds each attempt to intent; the operator reviews results after the fact; `HALT` pauses
 everything. This grant is per-project and does NOT transfer to the eventual real-product repo, which
 gets its own explicit policy decision. Rationale + adversarial validation: `SETUP-REPORT.md` G4-A.
 
@@ -23,7 +23,7 @@ Run **`./scripts/dispatch reconcile`** first thing. It reads `.orchestrator/stat
 real unit state (`systemctl --user`), and flips any attempt whose state is `running` but whose unit
 is gone (orchestrator/box restart) to `interrupted` — resumable ONLY as a fresh attempt (never
 hand-finish a partial worktree; see quota/degradation policy). Then resume from the recorded next
-action. Never ask Val to reconstruct context these files already hold.
+action. Never ask the operator to reconstruct context these files already hold.
 
 ## Health monitoring (Gate 3 — soft-alert, confirm-then-cancel)
 
@@ -48,7 +48,7 @@ evidence paths. **"Should work" is never evidence.**
   the SPECIFIC findings of the last failure. Two consecutive identical findings = stop-early. Limit
   exhausted or stop-early → spec `failed_remediation_exhausted` + a tracked escalation record in
   `.orchestrator/escalations/` — never an infinite loop, never silent success.
-- **High-risk specs need Val's per-dispatch approval artifact** (`approvals/<digest>.attempt-<n>.json`)
+- **High-risk specs need the operator's per-dispatch approval artifact** (`approvals/<digest>.attempt-<n>.json`)
   before EVERY dispatch, at every autonomy level.
 - **`./scripts/integrate <attempt-id>…`** is the deterministic integration step: merges in
   `depends_on` order via the base-checked `dispatch merge`, re-runs the suite after every merge,
@@ -70,7 +70,7 @@ evidence paths. **"Should work" is never evidence.**
 ## Dual-validated planning (control-plane / decision layer)
 
 Governs the DECISION layer, not worker implementation; does NOT add a plan-conformance gate to the
-worker pipeline (the Planning policy below stays fully intact). Ratified by Val + validated with SOL,
+worker pipeline (the Planning policy below stays fully intact). Ratified by the operator + validated with SOL,
 2026-07-13 (`.orchestrator/decisions/PLAN-dual-validation/`).
 
 **Rule:** before a non-trivial control-plane action or a durable recommendation, Claude prepares a
@@ -88,7 +88,7 @@ alone never count):
 4. affects behavior beyond one approved spec's allowed paths + acceptance/test scope;
 5. a research/review deliverable that recommends or authorizes any of the above.
 
-**Worked examples (Val, 2026-07-13):** a new **business idea / research** deliverable → the
+**Worked examples (the operator, 2026-07-13):** a new **business idea / research** deliverable → the
 *recommendation* is non-trivial (dual-validated); the read-only investigation feeding it is exempt.
 A **high-level spec / requirements set for a new feature, or a non-trivial bug fix** → non-trivial,
 dual-validated at the requirements/design level. The routine low-level specs that then implement
@@ -106,7 +106,7 @@ material change to approach/scope/risk/validation/rollback after PASS — requir
 *Critical* (governing policy/invariants, trust/security boundaries, approval/autonomy, gates/evidence
 integrity, protected branch/release, multi-job shared contracts, or irreversible/production
 consequences) → Claude+SOL iterate on the SAME revision until both explicitly report no unresolved
-blocker; unresolved disagreement goes to Val, never silently resolved.
+blocker; unresolved disagreement goes to the operator, never silently resolved.
 
 **Decision-complete plan** (what earns the round-trip): decision + non-goals; current-state evidence
 + assumptions; alternatives + why this one; affected boundaries/consumers; failure modes + blast
@@ -117,7 +117,7 @@ don't split to evade review or bundle unrelated decisions to amortize it.
 **Quota/availability:** consults and workers share ONE Codex budget. One initial consult per
 decision; never interrupt a running worker to consult; run detached with no minute-scale timeout. If
 SOL or quota is unavailable the decision stays **PENDING** (exempt work continues) — skipping SOL is
-non-compliant, never a silent Claude-only fallback. Only Val may authorize a scoped, recorded waiver
+non-compliant, never a silent Claude-only fallback. Only the operator may authorize a scoped, recorded waiver
 (rationale/scope/expiry); emergency pre-validation action is limited to minimum reversible
 containment of active harm.
 
@@ -154,7 +154,7 @@ dispatch — workers are judged only by spec/scope/tests/diff/review/CI, never b
   credentials and pushes/opens PRs (D11).
 - **Worker isolation is D5, LANDED (not deferred).** The worker AND the gate `test_command` (both
   run worker-produced code) execute as the dedicated `codex-worker` UID in hardened `systemd-run
-  --uid` system services: `/home/val` is inaccessible (DAC + `InaccessiblePaths`), writes are
+  --uid` system services: `the operator's home` is inaccessible (DAC + `InaccessiblePaths`), writes are
   confined to the worktree (`ProtectSystem=strict`+`ReadWritePaths`), and the test phase has
   `PrivateNetwork=yes`. This is what actually closes risk 13-B — on this host Codex's sandbox can't
   restrict reads (Landlock), so DAC is the boundary. The reviewer runs with ALL tools denied (no
