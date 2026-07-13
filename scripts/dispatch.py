@@ -1118,6 +1118,22 @@ def cmd_merge(attempt_id: str) -> None:
     if pv.returncode != 0:
         die(f"gh pr view {pr} failed: {pv.stderr.strip()}", 14)
     info = json.loads(pv.stdout)
+    # Idempotent recovery: if a previous run merged the PR but died before recording it (observed
+    # live: gh's --delete-branch failed on the worktree-held local branch AFTER the merge landed,
+    # exiting before atomic_write), a re-run must record the merge, not refuse it. Only for the
+    # exact reviewed commit — anything else is still refused below.
+    if info.get("state") == "MERGED" and info.get("headRefOid") == worker_commit:
+        merge_tip = _base_tip(base_branch)
+        result = {**result, "merged": True, "merged_pr": pr, "merged_at": now(),
+                  "merge_base_tip": merge_tip,
+                  "merged_by": "orchestrator (AUTONOMY grant; recorded on re-run)"}
+        atomic_write(rp, json.dumps(result, indent=2))
+        write_state(spec_id, {**(read_state(spec_id) or {}), "status": "passed_pr_opened",
+                              "merged": True, "merged_pr": pr})
+        print(json.dumps({"attempt_id": attempt_id, "merged_pr": pr,
+                          "base_branch": base_branch, "new_tip": merge_tip,
+                          "note": "already merged; recorded"}, indent=2))
+        return
     if info.get("state") != "OPEN":
         die(f"PR #{pr} state={info.get('state')} (not OPEN); refuse.", 14)
     if info.get("baseRefName") != base_branch:
@@ -1145,7 +1161,11 @@ def cmd_merge(attempt_id: str) -> None:
     # All gates green and base current — merge (un-draft first if needed).
     if info.get("isDraft"):
         run(["gh", "pr", "ready", pr])
-    mg = run(["gh", "pr", "merge", pr, "--merge", "--delete-branch"])
+    # No --delete-branch here: gh also deletes the LOCAL branch, which is still checked out in the
+    # attempt's worktree — that fails AFTER the merge lands, killing the run before it records the
+    # merge (observed live, SPEC-009). integrate's cleanup deletes the remote branch after the
+    # worktree is removed.
+    mg = run(["gh", "pr", "merge", pr, "--merge"])
     if mg.returncode != 0:
         die(f"gh pr merge #{pr} failed: {mg.stderr.strip()}", 16)
     merge_tip = _base_tip(base_branch)
@@ -1221,10 +1241,13 @@ def _commit_provenance(spec_ids: list[str]) -> str | None:
             die(f"provenance PR create failed: {pr.stderr.strip()}", 20)
         pr_url = (pr.stdout or "").strip().splitlines()[-1]
         prn = _pr_number(pr_url)
+        # Wait for a DEFINITIVE ci result. Before Actions picks the job up, `gh pr checks` can
+        # print an "expected"/empty rollup that contains no "pending" — breaking on that merges
+        # too early and the ruleset rejects it (observed live, provenance PR #19).
         for _ in range(30):
             ck = run(["gh", "pr", "checks", prn])
-            outp = (ck.stdout or "") + (ck.stderr or "")
-            if "pending" not in outp.lower() and outp.strip():
+            outp = ((ck.stdout or "") + (ck.stderr or "")).lower()
+            if re.search(r"\b(pass|fail)\b", outp):
                 break
             time.sleep(10)
         mg = run(["gh", "pr", "merge", prn, "--merge", "--delete-branch"])
@@ -1281,6 +1304,7 @@ def cmd_integrate(attempt_ids: list[str]) -> None:
         if wt.exists():
             run(["git", "worktree", "remove", "--force", str(wt)], cwd=str(ROOT))
         run(["git", "branch", "-D", f"codex/{aid}"], cwd=str(ROOT))
+        run(["git", "push", "-q", "origin", "--delete", f"codex/{aid}"], cwd=str(ROOT))
         report["integrated"].append(aid)
 
     report["provenance_pr"] = _commit_provenance(order)
