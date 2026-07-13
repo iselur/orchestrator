@@ -1,0 +1,19 @@
+{
+  "approver": "orchestrator-on-behalf-of-val (Level 1.5 grant; delegate-first dogfood #1, operator said 'Yes let's do it' 2026-07-13)",
+  "timestamp": "2026-07-13T20:59:01Z",
+  "spec_id": "SPEC-014",
+  "spec_digest": "a3e6144169553d5d7d98d982f8e5283a7263366361e52b972479038cf6ecaf68",
+  "spec_digest_method": "sha256(specs/SPEC-014.yaml)",
+  "instance_id": "8df1bb382ccf098793c4ba37e9b2ec32",
+  "risk_class": "low",
+  "approved_scope": [
+    "scripts/delegation_report.py",
+    "tests/delegation_report.sh"
+  ],
+  "worker_model": "gpt-5.6-sol",
+  "worker_reasoning_effort": "high",
+  "reviewer_model": "claude-fable-5",
+  "reviewer_effort": "high",
+  "base_branch": "integration",
+  "note": "First ordinary-lane dogfood spec under the ratified delegate-first execution split (REBALANCE-codex). Standalone read-only report; no trusted-code paths in scope."
+}
