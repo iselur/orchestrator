@@ -96,6 +96,16 @@ A **high-level spec / requirements set for a new feature, or a non-trivial bug f
 dual-validated at the requirements/design level. The routine low-level specs that then implement
 already-decided intent → exempt (gated by approval + reviewer + CI).
 
+**Idea/research stage — MAXIMUM effort, two independent vendors (the operator, 2026-07-13).** For any
+idea-stage / opportunity-evaluation / research deliverable, the read-only investigation itself must be
+done TWICE, independently, by two different vendors, then reconciled: (1) **Claude breadth research** —
+fan out parallel research agents (web); AND (2) an **independent from-scratch Codex/SOL research +
+ranking** that does NOT see Claude's output (no anchoring) — a full independent pass, not merely SOL
+critiquing Claude's summary. Reconcile: agreement → high confidence, disagreement → flag both views to
+the operator. The idea stage is the most crucial; spend maximum research effort here before choosing
+what to implement. This is IN ADDITION to the Standard/Critical validation of the resulting
+recommendation below. Record both passes under `.orchestrator/decisions/<id>/`.
+
 **Exempt (unless a trigger fires):** read-only diagnostics/status; clerical no-semantic changes;
 routine spec drafting that instantiates already-decided intent via established mechanisms; routine
 dispatch/monitor/retry/PR mechanics; worker/helper implementation bounded by an approved
