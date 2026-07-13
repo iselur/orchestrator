@@ -1,0 +1,18 @@
+# Orchestrator runtime — tracked vs untracked per SETUP-BRIEF.md §Control plane.
+# Approval artifacts and per-attempt manifests/results/reviews ARE tracked (provenance).
+# Raw logs, event streams, mutable state, and worktrees are NOT (size/secrets).
+
+# Per-attempt raw artifacts (integrity provable via tracked sha256 hashes)
+.orchestrator/attempts/**/events.jsonl
+.orchestrator/attempts/**/test.log
+.orchestrator/attempts/**/worker-last-message.txt
+.orchestrator/attempts/**/raw/
+
+# Mutable runtime state (atomic writes; not provenance)
+.orchestrator/state/
+
+# Kill switch is a local signal, not repo content
+.orchestrator/HALT
+
+# Per-attempt worktrees
+.worktrees/
