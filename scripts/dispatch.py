@@ -1282,14 +1282,19 @@ def _list_codex_units() -> list[str]:
 # integrates, a still-open parallel PR's reviewer verdict is bound to an obsolete base, and CI alone
 # does not repair that — so a moved base is refused here and the attempt is re-run fresh. `main`
 # promotion is NEVER done here (main stays human-only). Revoke autonomy by deleting AUTONOMY.json.
-AUTONOMY = ORCH / "AUTONOMY.json"
+AUTONOMY = ORCH / "AUTONOMY.json"                 # tracked: ships DISABLED (safe default)
+AUTONOMY_LOCAL = ORCH / "AUTONOMY.local.json"     # gitignored: the operator's real grant, if any
 
 
 def load_autonomy() -> dict | None:
-    if not AUTONOMY.exists():
+    """Safe by default (SOL, SHARE decision): the tracked AUTONOMY.json ships disabled, so a clone/
+    template is NOT autonomous. An operator opts in by creating the gitignored AUTONOMY.local.json,
+    which — being untracked — never travels with the repo. Local override wins if present."""
+    src = AUTONOMY_LOCAL if AUTONOMY_LOCAL.exists() else AUTONOMY
+    if not src.exists():
         return None
     try:
-        g = json.loads(AUTONOMY.read_text())
+        g = json.loads(src.read_text())
     except Exception:
         return None
     return g if g.get("enabled") is True else None
