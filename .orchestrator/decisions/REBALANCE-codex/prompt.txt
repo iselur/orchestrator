@@ -1,0 +1,48 @@
+You are SOL (gpt-5.6), doing an INDEPENDENT, adversarial design review. Form your own view; be
+decisive. Return an explicit verdict line "VERDICT: PASS" or "VERDICT: BLOCK" plus, for each material
+finding, the concrete risk and a fix. Concise (~500-800 words).
+
+=== CONTEXT: our system ===
+A trust-first agentic-coding orchestrator on one VPS. Claude (a session) ORCHESTRATES; Codex
+(`codex exec`, model gpt-5.6-sol) EXECUTES one schema-validated, human-approved spec per worker in a
+hardened `systemd-run` sandbox (dedicated codex-worker UID, operator home inaccessible, writes confined
+to a per-attempt git worktree, test phase network-off). The orchestrator then runs DETERMINISTIC
+fail-closed gates (integrity, NUL-safe scope check, exact test_command==0, an optional regression-proof
+gate) and an INDEPENDENT Claude reviewer (`claude -p`, schema-bound PASS/FAIL, bound to the exact diff,
+NO filesystem tools). Then push + draft PR + base-checked auto-merge to `integration` under a scoped
+autonomy grant; `main` is permanently human-only. Billing is FLAT-RATE subscription (Claude Max + Codex
+plan), so the scarce resource is QUOTA/rate-limits/latency, not dollars.
+
+=== THE PROBLEM ===
+The operator observes a bad work split: Codex weekly quota ~95% REMAINING (idle), while Claude does most
+of the actual work (research fan-outs run as Claude subagents; ALL orchestrator self-development —
+edits to the orchestrator's own dispatch.py/scripts/docs — is done directly by Claude, un-delegated).
+The operator wants MOST work delegated to Codex, with Claude delegating much more.
+
+=== THE PLAN TO REVIEW (attack it) ===
+Adopt a "delegate-first" split. By default substantive work → Codex; Claude reserved for a small,
+explicit allow-list. Concretely:
+1. DOGFOOD: dispatch orchestrator self-development to Codex workers — non-trivial changes to the
+   orchestrator's OWN non-trust-critical code get a spec → Codex worker → the SAME gates → independent
+   Claude reviewer → PR. The orchestrator eats its own dog food.
+2. Claude-only allow-list: (a) trust-critical core — gate logic, worker isolation, approval/autonomy,
+   evidence integrity, the reviewer, merge/branch protection; (b) the independent review layer (Claude
+   reviews Codex's code — never Codex-reviews-Codex); (c) final judgment/synthesis + reconciliation of
+   dual-vendor research; (d) trivial/urgent one-liners. A spec that TOUCHES a trust-critical path is
+   forced to high-risk → per-dispatch human approval + a SOL design review.
+3. Research defaults to Codex: breadth fan-outs run parallel `codex exec` (web search) workers; Claude
+   only reconciles + does the independent-diversity pass.
+4. Feedback loop: extend `dispatch metrics` with a delegation ratio (Codex worker-attempts vs.
+   direct-Claude control-plane commits) so the imbalance is measurable.
+5. Encode as a first-class CLAUDE.md operating rule, not a memory note.
+
+=== DELIVER ===
+1. Is DOGFOODING the orchestrator through its own worker pipeline a net trust GAIN (more code passes
+   gates+independent review vs. un-reviewed Claude-direct edits) or a net LOSS (a worker editing the
+   very tool that gates workers)? Where EXACTLY should the Claude-only line sit — is my trust-critical
+   list right, too big, or too small?
+2. Does "Claude authors spec → Codex executes → Claude reviews" preserve enough independence, or does it
+   re-introduce correlated blind spots (same vendor at both ends of the loop)?
+3. The single biggest risk or failure mode I'm UNDERWEIGHTING, and the minimal mitigation.
+4. Anything I should do DIFFERENTLY or a better split I'm missing.
+5. VERDICT: PASS or BLOCK, with the strongest counterargument addressed.
