@@ -69,3 +69,9 @@ evidence paths. **"Should work" is never evidence.**
 - Nothing activates with failing or partial tests. CI + branch protection are the hard merge gate.
 - Workers run with a scrubbed env, network off, sandboxed; only the orchestrator holds GitHub/SSH
   credentials and pushes/opens PRs (D11). `needs_network:true` is refused until the D5 endgame.
+- **Parallelism (Gate 3 part 3): `MAX_PARALLEL=2`.** The slot claim is atomic (`claim_slot`, under
+  the STATE lock): at most 2 live attempts, at most one live attempt per spec. Each attempt has a
+  unique branch/worktree. **Stale base is refused, never hand-rebased:** if the base branch advanced
+  while an attempt ran (a sibling integrated), the dispatcher records `stale_base` at push and opens
+  no PR; the orchestrator re-launches a **fresh** attempt off the new base so ALL gates re-run
+  against what would actually land. A reviewed verdict is only valid for the base it was bound to.

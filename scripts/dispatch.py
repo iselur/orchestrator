@@ -15,7 +15,9 @@ Invariants (SETUP-BRIEF.md):
     needs_network hard-refused (residual risk 13-B).
   - Orchestrator commits the worktree state (decision G1-A/C): the worker never touches git.
   - Immutable evidence: new attempt = new dir, never overwrite. Atomic state via tmp+rename+flock.
-  - Structured error classes. MAX_PARALLEL=1. No auto-remediation (a failure stops and reports).
+  - Structured error classes. MAX_PARALLEL=2 (Gate 3 part 3): unique branch/worktree per attempt,
+    atomic slot claim; a base that moved while an attempt ran (a sibling integrated) is refused at
+    push (stale_base) and re-run by the orchestrator as a fresh attempt. No auto-remediation.
   - Even a launch that crashes at startup leaves a durable record.
 """
 from __future__ import annotations
@@ -50,14 +52,15 @@ SPEC_SCHEMA = SPECS / "spec.schema.json"
 VERDICT_SCHEMA = ROOT / "scripts" / "verdict.schema.json"
 VENV_PY = ROOT / ".venv" / "bin" / "python"
 
-MAX_PARALLEL = 1
+MAX_PARALLEL = 2   # Gate 3 part 3 (both recovery drills passed 2026-07-13). Unique branch/worktree
+                   # per attempt; slot claim is atomic; a stale base is refused at push.
 DEFAULT_CEILING_HOURS = 2.0
 
 # Terminal vs live attempt statuses.
 TERMINAL = {
     "passed_pr_opened", "failed_worker_error", "failed_integrity",
     "failed_scope", "failed_test", "failed_review", "interrupted", "error_launch",
-    "spec_blocked",
+    "spec_blocked", "stale_base",
 }
 LIVE = {"launching", "running"}
 
@@ -72,6 +75,11 @@ ERR_SCOPE = "scope"
 ERR_REVIEW = "review"
 ERR_WORKER = "worker_nonzero"
 ERR_LAUNCH = "launch"
+# Gate 3 part 3: the base branch advanced while this attempt ran (a sibling attempt integrated).
+# The attempt was reviewed/tested against a base that is no longer the branch tip; integrating it
+# would land a combination no gate ever saw. Terminal, not a merit failure: re-launch a fresh
+# attempt off the new base (all gates re-run). Never hand-rebase a reviewed worktree.
+ERR_STALE_BASE = "stale_base"
 # policy-note item 2: worker signals the spec itself is unworkable; the old approval is void and a
 # spec revision + new approval digest is required. Not a worker failure.
 ERR_SPEC_BLOCKED = "spec_blocked"
@@ -221,13 +229,44 @@ def preflight(spec_id: str) -> dict:
             die(f"dependency {dep} not satisfied (state="
                 f"{st.get('status') if st else 'none'}).", 7)
 
-    # MAX_PARALLEL: refuse if any live attempt exists.
-    live = [s for s in all_states() if s.get("status") in LIVE]
-    if len(live) >= MAX_PARALLEL:
-        die(f"MAX_PARALLEL={MAX_PARALLEL} reached; live attempt(s): "
-            f"{[s.get('attempt_id') for s in live]}.", 8)
-
+    # NOTE: the MAX_PARALLEL concurrency check is NOT here — it must be atomic with the state
+    # write so two concurrent launches cannot both pass it. See claim_slot(), called from
+    # cmd_launch under the STATE lock.
     return {"spec": spec, "digest": digest, "approval": approval}
+
+
+def claim_slot(spec_id: str, launching_state: dict) -> None:
+    """Atomically enforce concurrency limits and record the 'launching' state, all under ONE
+    STATE lock so parallel launches (Gate 3 part 3) cannot over-subscribe. Two guards:
+      1. One spec has at most one live attempt at a time (attempts of a spec are sequential).
+         State files are keyed per-spec, so a second live attempt would clobber the first's
+         state — refuse it.
+      2. At most MAX_PARALLEL live attempts across all specs.
+    Dies with exit 8 if either is violated. On success the durable 'launching' record exists
+    before any unit starts (Appendix A: no untraceable launches)."""
+    STATE.mkdir(parents=True, exist_ok=True)
+    lock = STATE / ".lock"
+    with open(lock, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            states = []
+            for p in STATE.glob("*.json"):
+                try:
+                    states.append(json.loads(p.read_text()))
+                except Exception:
+                    pass
+            live = [s for s in states if s.get("status") in LIVE]
+            same = [s.get("attempt_id") for s in live if s.get("spec_id") == spec_id]
+            if same:
+                die(f"{spec_id} already has a live attempt {same}; attempts of one spec are "
+                    f"sequential (its state file is per-spec).", 8)
+            if len(live) >= MAX_PARALLEL:
+                die(f"MAX_PARALLEL={MAX_PARALLEL} reached; live attempt(s): "
+                    f"{[s.get('attempt_id') for s in live]}.", 8)
+            atomic_write(STATE / f"{spec_id}.json",
+                         json.dumps({**launching_state, "updated": now()}, indent=2))
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 # ------------------------------------------------------------------ units ----
@@ -275,9 +314,11 @@ def cmd_launch(spec_id: str) -> None:
     att_dir = ATTEMPTS / spec_id / str(n)
     (att_dir / "raw").mkdir(parents=True, exist_ok=True)
 
-    # Durable record BEFORE anything can crash (July lesson: untraceable launches).
+    # Atomic slot claim + durable 'launching' record BEFORE anything can crash (July lesson:
+    # untraceable launches). claim_slot enforces MAX_PARALLEL and one-live-attempt-per-spec under
+    # the STATE lock, so concurrent launches (Gate 3 part 3) cannot over-subscribe.
     base_sha = None
-    write_state(spec_id, {
+    claim_slot(spec_id, {
         "attempt_id": attempt_id, "spec_id": spec_id, "attempt": n,
         "spec_digest": digest, "status": "launching", "error_class": None,
         "unit": unit_name(spec_id, n), "created": now(),
@@ -304,6 +345,7 @@ def cmd_launch(spec_id: str) -> None:
     atomic_write(att_dir / "launch.json", json.dumps({
         "attempt_id": attempt_id, "spec_id": spec_id, "attempt": n,
         "spec_digest": digest, "base_sha": base_sha, "branch": branch,
+        "base_branch": approval.get("base_branch", "integration"),
         "worktree": str(wt), "worker_model": approval.get("worker_model", "gpt-5.6-sol"),
         "worker_effort": approval.get("worker_reasoning_effort", "high"),
         "reviewer_model": approval.get("reviewer_model", "claude-fable-5"),
@@ -472,6 +514,23 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
         finish("failed_review", ERR_REVIEW, worker_commit=worker_commit,
                review_verdict=(verdict or {}).get("verdict", "malformed"))
 
+    # --- step 8.5: stale-base guard (Gate 3 part 3 — parallelism safety) -------
+    # With MAX_PARALLEL>1 a sibling attempt can integrate while this one runs, advancing the base
+    # branch. This attempt was reviewed and tested against base_sha; integrating it onto a moved
+    # base would land a combination no gate ever saw. Refuse to push. The orchestrator re-launches
+    # a FRESH attempt off the new base (all gates re-run) — never a hand-rebase of a reviewed
+    # worktree (that would carry a stale review verdict). This is the last check before the attempt
+    # becomes visible, so the base cannot move between the check and the push in a way that matters.
+    base_branch = lc.get("base_branch", "integration")
+    current_base, moved = base_moved(wt, base_branch, lc["base_sha"])
+    if moved:
+        finish("stale_base", ERR_STALE_BASE, worker_commit=worker_commit,
+               base_branch=base_branch, base_moved_to=current_base,
+               detail=f"base branch '{base_branch}' advanced "
+                      f"{lc['base_sha'][:9]} -> {current_base[:9]} during this attempt "
+                      f"(a sibling integrated); re-launch a fresh attempt off the new base "
+                      f"(all gates re-run). No PR opened.")
+
     # --- step 9: push + draft PR (orchestrator only) --------------------------
     if git("rev-parse", "HEAD", cwd=wt) != worker_commit:
         finish("failed_integrity", ERR_INTEGRITY, worker_commit=worker_commit,
@@ -513,6 +572,16 @@ def classify_worker(exit_code: int, stderr: str, events_path: Path):
             return ERR_SANDBOX
         return ERR_WORKER
     return None
+
+
+def base_moved(wt: Path, base_branch: str, base_sha: str) -> tuple[str, bool]:
+    """Gate 3 part 3 stale-base guard. Fetch the base branch and compare its current tip to the
+    sha this attempt was built and reviewed against. Returns (current_tip, moved). `moved` True
+    means a sibling attempt integrated while this one ran, so its review/test verdict no longer
+    describes what would land — the attempt must be re-run fresh off the new base."""
+    git("fetch", "--quiet", "origin", base_branch, cwd=wt)
+    current = git("rev-parse", f"origin/{base_branch}", cwd=wt)
+    return current, current != base_sha
 
 
 def integrity(wt: Path, base: str, wc: str) -> tuple[dict, bool]:
