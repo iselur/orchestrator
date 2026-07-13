@@ -19,6 +19,27 @@ Spec approval still binds each attempt to intent; the operator reviews results a
 everything. This grant is per-project and does NOT transfer to the eventual real-product repo, which
 gets its own explicit policy decision. Rationale + adversarial validation: `SETUP-REPORT.md` G4-A.
 
+## NO SLIPPAGE — every operator task gets a highest-detail plan + a tracked ledger row (STRENGTHENED)
+
+Reinforced by the operator, 2026-07-13: "ensure EVERY TASK I GIVE YOU HAS THE SAME HIGHEST DETAILED
+PLAN CREATED AND YOU AND CODEX FOLLOW IT. NO MORE SLIPPAGE." (Trigger: the measurement-layer request
+was planned then silently dropped until the operator re-asked.) This is a HARD rule, above convenience.
+
+**Request ledger — mandatory.** Every operator request is appended as a row to
+`.orchestrator/REQUEST-LEDGER.md` at intake, BEFORE work: `id | date | request (verbatim intent) |
+lane | plan-ref | status (open/in-progress/blocked/done) | completion-evidence`. A task with no ledger
+row and no plan-ref may not proceed. At the END of every turn, reconcile: update each touched row, and
+scan for any `open`/`in-progress` row that stalled — a request that leaves the ledger without reaching
+`done` or an explicit operator deferral IS a process failure, surfaced to the operator, not swallowed.
+
+**Highest-detail plan for EVERY substantive task.** No "small task" exemption on plan EXISTENCE (only
+on plan LENGTH via `--small`). Codex drafts the plan (`scripts/codex-plan`), Claude challenges it in
+writing with ≥1 named objection, Claude authorizes it (digest-bound), and BOTH Claude and Codex then
+follow the authorized plan — deviations are reconciled at completion (followed / authorized-deviation /
+unauthorized-deviation), and repeated unauthorized deviation fails process review even with green tests.
+The only planless path is the narrow fast-path below. When uncertain whether something is substantive,
+it is — write the plan and the ledger row.
+
 ## Execution split — delegate-first (Claude delegates, Codex executes most work)
 
 Ratified by the operator + dual-validated with SOL (BLOCK→PASS on conditions), 2026-07-13
