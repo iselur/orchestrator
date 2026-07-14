@@ -5,7 +5,7 @@ plus Anthropic/OpenAI engineering posts. **Do NOT build these speculatively** �
 plane earns gates from real failures. This is the shopping list for WHEN the outer loop is rebuilt,
 so we don't reinvent what four teams already converged on.
 
-## The convergence (four independent harnesses, same answers)
+## The convergence (four independent harnesses, same answers) — CORROBORATED BY BOTH PASSES
 
 1. **Bash + one edit tool is the whole action space.** Everyone abandoned bespoke agent-computer
    interfaces — *including SWE-agent, the paper that coined the term*. Its own default config now
@@ -19,25 +19,54 @@ so we don't reinvent what four teams already converged on.
    finished well under budget — failure is not a budget problem.**
    (Our `remediation limits: low 5 / default 3 / high 1` is already in this range. Keep.)
 4. **The remaining alpha is per-episode SELECTION, not per-step interface.** Run the cheap loop N
-   times, spend the intelligence budget on choosing. SWE-agent's o1 chooser (10 attempts, $6 cap),
-   OpenHands' TD-trained critic (60.6% → 66.4% over 5 rollouts), Aider's architect/editor, Codex's
-   `approvals_reviewer = auto_review`.
+   times, spend the intelligence budget on choosing. Structurally corroborated by both passes across
+   SWE-agent (LLM chooser), OpenHands (trained critic), Aider (architect/editor) and Codex
+   (`auto_review`) — though the specific configs and score deltas are single-source.
 
-## The single biggest gap in OUR design: a STUCK DETECTOR
+5. **ERROR MESSAGES ARE PROMPTS.** Four harnesses converged on this independently and it is the
+   cheapest high-leverage thing in any loop: SWE-agent's linter *rejects the edit and shows what it
+   would have looked like*; Aider replies "here are the closest matching lines — resend only the
+   blocks that failed, the others already applied"; Codex treats a sandbox failure as an escalation
+   signal; Anthropic's guidance is to "replace opaque tracebacks with actionable improvements."
+   **Hobby loops feed back raw stderr. We feed back raw stderr.** (Our remediation prompt embeds the
+   specific findings of the last failure — that is the right shape; make the *gate* messages
+   actionable too.)
 
-OpenHands is the only harness with a specified one (`openhands/controller/stuck.py`), and its five
-scenarios map *exactly* onto failures we have already had or nearly had:
+6. **Budget in dollars, not steps** — and SWE-agent's data says raising the cap is the wrong reflex:
+   **93% of successes finished well under budget. Failure is not a budget problem.**
 
-| Scenario | Threshold | Our equivalent |
-|---|---|---|
-| same action + same observation | 4× | — |
-| same action → error observation | 3× | remediation loop with identical findings |
-| **monologue: ≥3 consecutive agent messages with NO observations between** | 3 | **this is the "silent no-op window" — our overnight failure** |
-| alternating (A,O,A',O') pattern | 3× | — |
-| **repeated condensation with nothing between** | — | the "compact → still too big → compact" spiral |
+## RELIABILITY WARNING (added after a second independent research pass)
 
-Everyone else — including Claude Code, which has open bugs for scenarios 1 and 3 — relies on a human
-noticing. **We relied on a human noticing. He noticed after a whole night.**
+Two independent passes over the same repos **disagreed**. Pass 1 supplied file paths, line numbers,
+and verbatim snippets; Pass 2 explicitly could not verify several of them. Plausible-looking line
+numbers are exactly what a confabulating extraction produces — so **anything marked SINGLE-SOURCE
+below is a lead to verify, not a fact to build on.** (This is the T1 discipline applied to our own
+research: a claim that did not get checked has not been verified.)
+
+**DO NOT CITE without opening the file yourself:** Codex's "90% hardcoded compaction ceiling";
+Codex Linux sandbox = bubblewrap vs Landlock (passes conflict); `with_escalated_permissions` being
+removed (Pass 2 found it live); `.git`/`.codex` read-only carve-outs; OpenHands having moved from
+code-as-action to native function calling; SWE-agent's exact "Review Heavy" config ($6 / 10 attempts
+/ o1 chooser — the *structure* is confirmed, the *numbers* are not); Codex `project_doc_max_bytes`
+= 32 KiB. OpenHands condenser defaults produced **three different numbers across three passes** —
+version-dependent; read the pinned version.
+
+## The single biggest gap in OUR design: a STUCK DETECTOR  [SINGLE-SOURCE — VERIFY FIRST]
+
+OpenHands is reportedly the only harness with a specified one (`openhands/controller/stuck.py`).
+The five scenarios below are **one pass's reading, unconfirmed by the second** — but the file is a
+single click to check, and the idea is the most valuable in the whole report. Verify before building.
+
+| Scenario (unverified thresholds) | Our equivalent |
+|---|---|
+| same action + same observation ×4 | — |
+| same action → error observation ×3 | remediation loop with identical findings |
+| **monologue: ≥3 consecutive agent messages with NO observations between** | **the "silent no-op window" — our overnight failure** |
+| alternating (A,O,A',O') pattern ×3 | — |
+| repeated condensation with nothing between | "compact → still too big → compact" spiral |
+
+Whatever the exact thresholds turn out to be, the principle is corroborated and damning: everyone
+else relies on a human noticing. **We relied on a human noticing. He noticed after a whole night.**
 
 ## Directly relevant corroborations of our own failures
 
