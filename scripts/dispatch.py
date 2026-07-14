@@ -89,6 +89,8 @@ ERR_TIMEOUT = "timeout"
 ERR_INTEGRITY = "integrity"
 ERR_TEST = "test"
 ERR_TEST_NOT_RUN = "test_did_not_run"   # T1/R26: a required test SKIPped or produced no result
+ERR_NO_ISOLATION = "isolation_unavailable"   # T2/R26: D5 absent and exposure not accepted
+ERR_NO_ISOLATION_RC = 12                     # exit code for the refusal
 ERR_SCOPE = "scope"
 ERR_REVIEW = "review"
 ERR_WORKER = "worker_nonzero"
@@ -537,8 +539,12 @@ def isolation_available() -> bool:
     return ISO_WORKTREES.exists() and run(["sudo", "-n", "true"]).returncode == 0
 
 
-def worktree_root() -> Path:
-    return ISO_WORKTREES if isolation_available() else WORKTREES
+def worktree_root(iso: bool | None = None) -> Path:
+    """T2: pass the FROZEN launch decision. The default recomputes only for read-only callers
+    (reconcile/health); the launch path must always pass its decision explicitly."""
+    if iso is None:
+        iso = isolation_available()
+    return ISO_WORKTREES if iso else WORKTREES
 
 
 def grant_worker_acl(wt: Path) -> None:
@@ -690,6 +696,31 @@ def cmd_launch(spec_id: str) -> None:
     ctx = preflight(spec_id)
     spec, digest, approval = ctx["spec"], ctx["digest"], ctx["approval"]
 
+    # T2 (decision R26) — ISOLATION FAILS CLOSED. Selected ONCE, here, before the slot claim, the
+    # attempt directory, the worktree, and any worker-controlled code. Everything downstream is
+    # handed this decision; nothing recomputes it (a recomputation is a downgrade path).
+    #
+    # The old behaviour silently fell back to running worker code as the operator whenever D5 was
+    # unavailable — with the operator's credentials, home, and network. That is the one catastrophe
+    # that is actually plausible on this box, and it was the DEFAULT on a fresh box or in CI.
+    #
+    # Break-glass is deliberately crude: an env var you type knowingly. No root secret, no
+    # single-use token, no sudoers helper, no redemption ledger — that machinery defends a
+    # single-tenant box from its own owner, and building it cost a day and shipped nothing.
+    iso = isolation_available()
+    exposed = os.environ.get("ORCH_ALLOW_UNISOLATED") == "1"
+    if not iso and not exposed:
+        die("REFUSING to launch: worker isolation (D5) is unavailable.\n"
+            "  Worker code would run as YOU — your home, your credentials, your network.\n"
+            "  Fix it:        ./scripts/setup-worker-user.sh\n"
+            "  Or accept it:  ORCH_ALLOW_UNISOLATED=1 ./scripts/dispatch launch " + spec_id + "\n"
+            "                 (that is FULL EXPOSURE, not a sandbox — it is recorded in the evidence)",
+            ERR_NO_ISOLATION_RC)
+    if not iso and exposed:
+        print("!!! UNISOLATED: worker code runs as the operator with full access to this host,\n"
+              "!!! its credentials and its network. You asked for this (ORCH_ALLOW_UNISOLATED=1).\n"
+              "!!! It is recorded in launch.json and in the reviewer's evidence.", file=sys.stderr)
+
     n = next_attempt(spec_id)
     # Gate 4: remediation budget + stop-early + high-risk per-dispatch approval. Dies (recording
     # failed_remediation_exhausted + escalation) if this launch is not permitted.
@@ -715,8 +746,9 @@ def cmd_launch(spec_id: str) -> None:
         git("fetch", "--quiet", "origin", approval.get("base_branch", "integration"))
         base_sha = git("rev-parse", f"origin/{approval.get('base_branch', 'integration')}")
         branch = f"codex/{attempt_id}"
-        iso = isolation_available()
-        wt = worktree_root() / attempt_id
+        # T2: use the FROZEN decision from preflight. Never recompute — a second call to
+        # isolation_available() here is exactly the downgrade path we are closing.
+        wt = worktree_root(iso) / attempt_id
         if wt.exists():
             die(f"worktree {wt} already exists (attempt not unique?)", 9)
         git("worktree", "add", "--quiet", "-b", branch, str(wt), base_sha)
@@ -744,7 +776,10 @@ def cmd_launch(spec_id: str) -> None:
         "regression_command": spec.get("regression_command"),
         "regression_test_paths": spec.get("regression_test_paths", []),
         "hard_ceiling_hours": ceiling_h, "remediation": remediation,
-        "isolation": iso, "worker_unit": f"codex-worker-{attempt_id}",
+        # T2: the frozen decision + why it was allowed. `exposure_accepted` is the operator's
+        # knowing "yes, run this as me" — provenance never overstates the boundary.
+        "isolation": iso, "exposure_accepted": (not iso and exposed),
+        "worker_unit": f"codex-worker-{attempt_id}",
         "test_unit": f"codex-test-{attempt_id}", "created": now(),
     }, indent=2))
 
@@ -836,7 +871,15 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
         )
     (raw / "worker-prompt.txt").write_text(prompt)
 
+    # T2: consume the FROZEN launch decision — never recompute isolation here. A launch record that
+    # says "unisolated" without a recorded operator acceptance is not a thing cmd_launch can produce,
+    # so if we see one, the record was tampered with or hand-edited: refuse rather than run worker
+    # code as the operator on the strength of a file.
     iso = lc.get("isolation", False)
+    if not iso and not lc.get("exposure_accepted"):
+        finish("failed_launch", ERR_NO_ISOLATION,
+               detail="launch record has isolation:false without a recorded operator exposure "
+                      "acceptance — refusing to run worker code as the operator")
     ceiling_s = int(float(lc.get("hard_ceiling_hours", DEFAULT_CEILING_HOURS)) * 3600)
     # Codex flags common to both paths. Fast mode (priority service tier): faster wall-clock at the
     # SAME model + reasoning depth. `service_tier` is the real key (`model_service_tier` is rejected).
