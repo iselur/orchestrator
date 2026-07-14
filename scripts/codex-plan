@@ -152,6 +152,16 @@ if ! grep -q '[^[:space:]]' "$stdout_path"; then
   exit 1
 fi
 
+# Hard size cap: a plan past this length is doing the work instead of describing it (the pre-reset
+# repo accumulated 2,200-line plans re-emitted almost verbatim across review rounds). Split the
+# task or use --small; raising the cap is a reviewed edit to this script, never drift.
+body_lines=$(wc -l < "$stdout_path")
+if ((body_lines > 150)); then
+  printf 'codex-plan: REFUSED — plan body is %d lines (cap 150). Split the task or use --small. Raw output retained at %s\n' \
+    "$body_lines" "$stdout_path" >&2
+  exit 1
+fi
+
 created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 task_summary="${task:0:200}"
 # JSON strings are valid YAML scalars and preserve newlines and punctuation.

@@ -28,16 +28,13 @@ __pycache__/
 .orchestrator/instance.json
 .orchestrator/AUTONOMY.local.json
 
-# SOL consultation raw event-logs — verbose machine logs; keep prompt+response+DECISION+sha256 only
-.orchestrator/decisions/**/sol-events.jsonl
-!.orchestrator/plans/PLAN-TEMPLATE.md
+# Process prose is transient: plans and review rounds are untracked working files, deleted after
+# the work ships. A decision that still binds gets one line in DECISIONS.md; arguments live in git
+# history and PR descriptions. tests/prose_cap.sh enforces this.
+.orchestrator/plans/
+.orchestrator/decisions/
+.orchestrator/reviews/
+
 # --- private: never publish (operator, 2026-07-13) ---
 .orchestrator/REQUEST-LEDGER.md
-.orchestrator/decisions/IDEAS-*/
-.orchestrator/decisions/SELF-REFLECT-*/
-.orchestrator/decisions/VERDICT-INTEGRITY/
-.orchestrator/decisions/REQUEST-AUDIT/
-.orchestrator/decisions/MEASUREMENT-layer/
-.orchestrator/continue-logs/
-.orchestrator/plans/drafts/
 .orchestrator/REQUEST-LEDGER.md.lock

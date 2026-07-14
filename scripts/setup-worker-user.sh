@@ -7,7 +7,7 @@
 # PERMISSIONS — not Codex's read-porous sandbox (13-B: the Landlock legacy backend cannot restrict
 # reads on this host) — separate worker actions from `the operator`'s credentials.
 #
-# Design: validated adversarially with Codex SOL (.orchestrator/decisions/D5-worker-isolation/),
+# Design: adversarially reviewed by Codex (record in git history),
 # then corrected against what THIS box can actually enforce and proven empirically:
 #   - dedicated system user `codex-worker` (no login, no sudo), private primary group, plus
 #     supplementary group `codexwork` (traverse the shared worktree root).

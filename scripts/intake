@@ -56,8 +56,18 @@ case "${1:-}" in
     echo "$id done"
     ;;
   stale)
-    if grep -E '^\| R[0-9]+ \|.*\| (open|in-progress) \|' "$LEDGER"; then
-      echo "^ rows that never reached done — surface to the operator (R29)" >&2
+    # A stalled row this check cannot SEE is worse than a stalled row: every ledger line must be
+    # the header, a separator, blank, or a well-formed row, or the check itself cannot be trusted.
+    # (The pre-reset ledger had rows appended outside the table and hand-written statuses this
+    # check silently missed — that is the failure this validation exists for.)
+    bad=$(grep -nvE '^\| id \||^\|[-| ]+\|$|^[[:space:]]*$|^\| R[0-9]+ \|.*\|$' "$LEDGER" || true)
+    if [ -n "$bad" ]; then
+      echo "LEDGER FORMAT ERROR — lines outside the table (fix these before trusting stale):" >&2
+      printf '%s\n' "$bad" >&2
+      exit 1
+    fi
+    if grep -E '^\| R[0-9]+ \|' "$LEDGER" | grep -v '| done |'; then
+      echo "^ rows that never reached done — surface to the operator" >&2
       exit 1
     fi
     echo "no open rows"
