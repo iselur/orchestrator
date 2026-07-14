@@ -107,20 +107,24 @@ case "${1:-}" in
     [ "${2:-}" = "--ids" ] && ids_mode=1
     rc=0
     out=$(awk -F'|' '
-      /^\| id \|/ || /^\|[-| ]+\|$/ || /^[[:space:]]*$/ { next }
+      /^\| id \|/ { header = 1; next }
+      /^\|[-| ]+\|$/ || /^[[:space:]]*$/ { next }
       {
         if ($0 !~ /^\| R[0-9]+ \|/ || NF != 9) { bad = 1; next }
         status = $7; gsub(/^[[:space:]]+|[[:space:]]+$/, "", status)
         if (status != "open" && status != "done") { bad = 1; next }
         lane = $5; gsub(/^[[:space:]]+|[[:space:]]+$/, "", lane)
-        if (status == "open" && lane != "observe") {
+        if (status == "open") {
+          # An observe lane counts as non-actionable ONLY with the owner-designation marker the
+          # observe subcommand writes; a bare hand-written lane fails closed to actionable.
+          if (lane == "observe" && index($8, "OBSERVE (owner):") > 0) next
           id = $2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", id)
           ids = ids " " id
         }
       }
       END {
-        if (bad)       { print "INDETERMINATE"; exit 3 }
-        if (ids != "") { print "PENDING" ids } else { print "IDLE" }
+        if (bad || !header) { print "INDETERMINATE"; exit 3 }
+        if (ids != "")      { print "PENDING" ids } else { print "IDLE" }
       }
     ' "$LEDGER") || rc=$?
     if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then out="INDETERMINATE"; rc=3; fi
@@ -130,19 +134,25 @@ case "${1:-}" in
   observe)
     id="${2:-}" evidence="${3:-}"
     [ -n "$id" ] || fail "observe needs an id: scripts/intake observe R40 \"<owner approval evidence>\""
+    printf '%s' "$id" | grep -qE '^R[0-9]+$' || fail "invalid id '$id' (Rn expected — it is used as an anchor when rewriting the row)"
     check_field "observation evidence" "$evidence"
+    case "$evidence" in *\\*) fail "observation evidence must not contain backslashes" ;; esac
     [ "${#evidence}" -ge 10 ] || fail "observation evidence too thin — name the external event and the owner approval"
     grep -q "^| $id " "$LEDGER" || fail "no ledger row for $id"
     grep -q "^| $id .*| open |" "$LEDGER" || fail "$id is not open (only open rows can become observation rows)"
     tmp=$(mktemp)
-    awk -F'|' -v OFS='|' -v id="$id" -v ev="$evidence" '
+    # Values reach awk via ENVIRON, never -v: gawk expands escape sequences in -v assignments, so
+    # a validated field containing literal backslash-n or backslash-174 could still become a
+    # newline or a '|' inside awk and forge cells (review finding). ENVIRON is verbatim.
+    OBS_ID="$id" OBS_EV="$evidence" awk -F'|' -v OFS='|' '
+      BEGIN { oid = ENVIRON["OBS_ID"]; oev = ENVIRON["OBS_EV"] }
       NF == 9 {
         cur = $2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", cur)
         st  = $7; gsub(/^[[:space:]]+|[[:space:]]+$/, "", st)
-        if (cur == id && st == "open") {
+        if (cur == oid && st == "open") {
           $5 = " observe "
           sub(/[[:space:]]+$/, "", $8)
-          $8 = $8 "; OBSERVE (owner): " ev " "
+          $8 = $8 "; OBSERVE (owner): " oev " "
         }
       }
       { print }
