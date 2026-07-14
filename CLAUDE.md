@@ -1,64 +1,80 @@
 # CLAUDE.md — operating rules
 
-This file is the whole rulebook and CI caps its size (tests/rulebook_cap.sh). A new rule is
-admitted only for a failure that real shipped work actually hit, and it must replace an existing
-line, never stack. Conventions and commands: AGENTS.md. Security model, honestly: SECURITY.md.
-Past decisions, one line each: DECISIONS.md. Everything else lives in git history.
+This file is the whole rulebook; CI caps its size. A new rule is admitted only for a failure real
+shipped work hit, and it REPLACES a line, never stacks. Roles here, never model names: **owner**
+(the human), **orchestrator**, **worker**, **reviewer** — AGENTS.md maps roles to today's models and
+holds the commands; SECURITY.md says what the protections do and do not prove.
 
 ## Working rules
 
-1. **Intake:** no task starts without a one-line goal and a checkable definition of done. If either
-   is missing, ask the operator — refusing to start is correct behavior. Log every task via
-   `scripts/intake` (ledger is private, untracked) BEFORE work; close it with evidence
-   (`scripts/intake close`); run `scripts/intake stale` at session end and surface any row that
-   never reached done.
-2. **One workstream:** one active execution stream at a time. New ideas go to
-   `.orchestrator/BACKLOG.md`, never into flight alongside current work. Backlog item #1 must be
-   a real product outside this repo — improving this system is never item #1.
-3. **Review cap:** draft → one adversarial review → one revision → one confirmation look at the
-   revision → ship or escalate to the operator. Never a third review round — `scripts/review`
-   counts rounds and refuses it. A trust-critical change with an unresolved critical finding stays
-   BLOCKED: escalate, never ship on cap exhaustion.
-4. **Communication:** max 5 bullets per update — Outcome / Verified / Not done / Risk / Next —
-   plus one cost line (tokens/quota used, both vendors). Plain language: a coined term is allowed
-   only if it names code that exists in this repo (CI enforces tests/plain_language.sh).
-5. **Big programs get ONE brief** (goal, staged gates, checkable acceptance criteria), reviewed
-   once, then run end to end; the operator arbitrates only at gates. Planning depth scales with
-   risk and reversibility. Plans are untracked working files, deleted after the work ships.
-6. **Cross-checking between Claude and Codex is spent where it earns its cost:** idea research,
-   the brief, and trust-critical code. Everywhere else, deterministic checks and tests outrank
-   model agreement — two models agreeing is not evidence.
-7. **Codex does most work** (research, drafts, implementation, tests); Claude orchestrates,
-   dispatches, reviews, and reports. Never Codex-grades-Codex, never self-review.
+1. **Intake:** no task starts without a one-line goal and a checkable definition of done; ask the
+   owner if either is missing. Log it with `scripts/intake` before work, close it with evidence, and
+   run `scripts/intake stale` at session end — anything that never reached done is raised with the
+   owner, never quietly dropped. The request ledger stays private, never in this repo.
+2. **One workstream:** one active execution stream. New ideas go to `.orchestrator/BACKLOG.md`, never
+   in beside current work. Business ideas stay private. A real product outside this repo is always
+   somewhere on that backlog — self-improvement may be scheduled first, but never be the only thing.
+3. **Review cap:** draft, one adversarial review, one revision, one confirmation look, then ship or
+   escalate to the owner. Never a third round — `scripts/review` refuses it. Trust-critical work
+   with an unresolved critical finding stays BLOCKED: escalate, never ship because the cap ran out.
+4. **Communication:** at most five plain bullets — Outcome / Verified / Not done / Risk / Next. A
+   coined term is allowed only when it names code that exists in this repo.
+5. **Every program gets ONE brief.** Pick the tier; when it could be two, take the higher one.
+   - *Small* — one change, in one place, easy to undo, nothing else depends on it: the intake gate
+     is enough. Any plan stays under 40 lines.
+   - *Standard* — a bigger job that is still one job: a plan settling what is in and out, the steps,
+     how it is checked, how it is undone. 100–150 lines, hard cap 250.
+   - *Full brief* — several jobs sharing one goal; work you must approve part-way through; anything
+     touching safety, credentials, money, live systems, or data that cannot be undone; or a design
+     decision that changes several parts at once. About 250 lines, hard cap 400. It says: what
+     exists at the end that does not now; what is deliberately not being done; the decisions you
+     already made and what would justify reopening one (a technical guess is never one of those — it
+     goes in the assumptions, with its evidence); the smallest end-to-end run that would prove the
+     whole approach wrong, done FIRST; each checkpoint with the command that proves it passed, who
+     decides, and what happens when it fails; how the work is verified; how it is undone; what is
+     left for later; and how anyone outside can tell it is done.
+   Reviewed once, then the program runs end to end — the owner steps in only at the checkpoints. One
+   brief per program: reference it, never copy it; what we learn later is added to it with a date and
+   reopens the checkpoints it touches. Plans and briefs are working files: delete them once the work
+   ships, git keeps them. `scripts/codex-plan` enforces the caps and sections. This tiering is a
+   hypothesis built on one success (the 235-line founding brief) — revisit after three programs.
+6. **Cross-checking earns its cost** on ideas, briefs, and trust-critical code. Everywhere else,
+   deterministic checks and tests outrank agreement between models — agreement is not evidence.
+7. **Maximal delegation:** the orchestrator delegates every delegable task to the worker, and works
+   directly only when no worker is available or the task is its own (dispatch, review, the trust
+   boundary). The reviewer is never the same vendor as the author, and nothing reviews its own work.
 
 ## Safety invariants (never violate)
 
-- `main` is human-only, permanently. `integration` changes only via PR with `ci` green.
-- Workers run isolated: dedicated `codex-worker` user, operator home unreachable, no network
-  during tests. No isolation → no launch, checked before any state is created.
-  `ORCH_ALLOW_UNISOLATED=1` is full, recorded exposure — never set it without the operator's
-  explicit instruction (it records use; it cannot prove who set it — SECURITY.md gap 2).
-- A test that did not RUN did not PASS. Required tests are restored from the orchestrator's own
-  checkout before grading; an empty required set fails. Worker prose is never a verdict. (This
-  gate stops accidental skips; the malicious-grader case is SECURITY.md gap 3, queued.)
-- High-risk specs need the operator's per-dispatch approval file. Claude never creates one.
-  Unclassified or ambiguous work is high-risk; no metric may reward downgrading it.
-- A trust-boundary change is never validated, approved, reviewed, or merged by its own candidate
-  code — the installed version runs every gate; the candidate activates only after separate
-  approval and install.
-- The reviewer sees only spec + diff + evidence (all tools denied) and its verdict binds. A verdict
-  is valid only for the base it was bound to: a stale base is refused, never hand-rebased.
-- Only the orchestrator holds the operator's credentials; workers get a scrubbed environment.
-  Known gaps in this story are listed in SECURITY.md and queued in the backlog — docs never claim
-  more than the tests prove.
-- Cancellation targets the systemd unit, never a recorded PID. Every launch leaves a durable
-  record. Nothing activates on failing, partial, or skipped tests. Interrupted work restarts as a
-  fresh attempt, never hand-finished.
-- Autonomy: OFF by default; granted only via untracked `AUTONOMY.local.json`; only
-  `./scripts/dispatch merge` (which enforces every gate) may use it; never extends to `main`.
+- Only the owner changes `main`. `integration` changes only through a pull request with `ci` green.
+- Workers run as a separate identity that cannot reach the owner's home, and their tests have no
+  network. No isolation means no launch: nothing is created, nothing runs. `ORCH_ALLOW_UNISOLATED=1`
+  is full exposure, needs the owner's explicit instruction, and its use is recorded — though the
+  record cannot prove who set it.
+- A test that did not run did not pass. Required tests are restored from the orchestrator's own copy
+  before grading; a skipped, missing, or empty result fails. A worker's prose is never a grade.
+- Every high-risk dispatch needs an approval file from the owner, which the orchestrator never
+  writes. An approval is tied to the exact wording of that spec and to this machine: edit the spec
+  and it is void, copy it from elsewhere and it authorizes nothing. Unclassified or ambiguous work
+  is high-risk, and nothing may reward calling it anything lighter.
+- A change to the safety machinery is never checked, approved, reviewed, or merged by the new
+  version of itself: the installed version runs every gate, and the new one goes live only after
+  separate approval and installation.
+- The reviewer sees only the spec, the diff, and the evidence — no tools — and its verdict binds. A
+  verdict holds only for the exact code it was shown: if the code has moved on, the review is run
+  again, never stretched to cover code nobody reviewed.
+- Only the orchestrator holds the owner's credentials; workers get a cleaned environment. Known
+  holes in that story are listed in SECURITY.md and queued in the backlog. Never claim more
+  protection than the tests prove.
+- Stop a job with `dispatch cancel` (it stops the job's own unit), never by killing a process number
+  we wrote down earlier — that once killed the wrong thing. Every launch leaves a durable record,
+  even one that dies on startup. Nothing goes live on failing, partial, or skipped tests, and
+  interrupted work restarts as a fresh attempt; it is never finished by hand.
+- Autonomy is off unless an untracked `AUTONOMY.local.json` grants it, only gated
+  `./scripts/dispatch merge` may use it, and it never reaches `main`. It is granted in this working
+  repo; the template ships with it disabled.
 
 ## Session start
 
-Run `./scripts/dispatch reconcile` first and resume from recorded state — never ask the operator
-to reconstruct what the state files already hold. Prefer a fresh session per workstream over
-marathon sessions. How to run Codex on this box: AGENTS.md.
+Run `./scripts/dispatch reconcile` first and resume from the recorded state — never ask the owner to
+reconstruct what the state files hold. Prefer a fresh session per workstream.

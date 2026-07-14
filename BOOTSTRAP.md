@@ -23,7 +23,7 @@ Python venv and install `scripts/requirements.txt`. Enable systemd linger for yo
 
 Run **`scripts/init-operator`**. It is safe by default: it refuses to run against the original
 template remote, generates a fresh per-instance identity, sets a **repo-local** git identity, leaves
-autonomy **disabled**, clears the example operator state, and ensures an `integration` branch exists.
+autonomy **disabled**, clears the example owner state, and ensures an `integration` branch exists.
 Review its output.
 
 ## 3. GitHub auth + CI (Claude, with human for the login)
