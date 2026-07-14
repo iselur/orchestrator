@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 WORKER=codex-worker
 if ! id "$WORKER" >/dev/null 2>&1 || ! sudo -n true 2>/dev/null; then
   echo "SKIP worker_isolation.sh: codex-worker user or passwordless sudo absent (box-only; run scripts/setup-worker-user.sh)"
-  exit 0
+  exit 77   # did NOT run — never a pass (T1/R26)
 fi
 
 fails=0

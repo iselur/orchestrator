@@ -88,6 +88,7 @@ ERR_SANDBOX = "sandbox_denial"
 ERR_TIMEOUT = "timeout"
 ERR_INTEGRITY = "integrity"
 ERR_TEST = "test"
+ERR_TEST_NOT_RUN = "test_did_not_run"   # T1/R26: a required test SKIPped or produced no result
 ERR_SCOPE = "scope"
 ERR_REVIEW = "review"
 ERR_WORKER = "worker_nonzero"
@@ -936,19 +937,40 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
     # The test_command runs WORKER-PRODUCED code — the real exfiltration path (SOL, D5). Under D5 it
     # runs as codex-worker with PrivateNetwork=yes (no API needed) and the operator's home inaccessible, so a
     # malicious test can neither read the operator's creds nor phone home. Otherwise it runs as the operator (fallback).
+    # T1 (R26): the runner writes a machine-readable PASS/SKIP/FAIL line per test to this path. The
+    # summary is written INSIDE the worktree (the worker's own writable area) but we only ever trust
+    # it to tell us what DIDN'T run — a worker that forges "PASS" for a test it deleted still fails,
+    # because the required set comes from the ORCHESTRATOR's checkout (required_tests()) and every
+    # required test must appear. The worker cannot add tests to our required list, only fail to
+    # satisfy it.
+    summary_path = wt / ".orch-test-summary"
+    test_env = {"ORCH_TEST_SUMMARY": str(summary_path)}
     if iso:
         with open(att / "test.log", "w") as tl:
             tcp = isolated_run(
                 lc["test_unit"], ["bash", "-c", lc["test_command"]], cwd=str(wt),
                 rw_paths=[str(wt)], private_network=True, ceiling_s=ceiling_s,
-                stdout=tl, stderr=subprocess.STDOUT)
+                env_extra=test_env, stdout=tl, stderr=subprocess.STDOUT)
         test_rc = tcp.returncode
     else:
-        tc = run(["bash", "-c", lc["test_command"]], cwd=str(wt))
+        tc = run(["bash", "-c", lc["test_command"]], cwd=str(wt), env={**os.environ, **test_env})
         (att / "test.log").write_text((tc.stdout or "") + (tc.stderr or ""))
         test_rc = tc.returncode
     if test_rc != 0:
         finish("failed_test", ERR_TEST, worker_commit=worker_commit, test_exit=test_rc)
+
+    # T1 (R26) — THE FIX for SPEC-015/1's false PASS. Exit code 0 is NOT evidence that the required
+    # tests ran: three trust-class tests SKIPped, `./scripts/test` still exited 0, and the reviewer
+    # certified them as proof. A test that did not RUN has not PASSED.
+    summary_txt = summary_path.read_text() if summary_path.exists() else ""
+    ran = parse_test_summary(summary_txt)
+    req = required_tests()
+    attested, detail = attest_tests(ran, req)
+    attestation = {"required": req, "observed": ran, "attested": attested, "detail": detail}
+    atomic_write(att / "test-attestation.json", json.dumps(attestation, indent=2))
+    if not attested:
+        finish("failed_test", ERR_TEST_NOT_RUN, worker_commit=worker_commit,
+               test_exit=test_rc, attestation=attestation)
 
     # --- step 7.5: OPTIONAL regression-proof gate (holistic-review #1) ----------
     # Prove the change's new test actually CATCHES the intended defect: the human-authored
@@ -962,7 +984,7 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
             finish("failed_regression", ERR_REGRESSION, worker_commit=worker_commit, regression=reg)
 
     # --- step 8: reviewer (bound, fail-closed) --------------------------------
-    verdict, vraw = review(att, spec_id, lc, worker_commit)
+    verdict, vraw = review(att, spec_id, lc, worker_commit, detail)
     atomic_write(att / "review.json", json.dumps(verdict, indent=2) if verdict else "{}")
     binary_result = (evaluate_binary_review(
         verdict.get("verdict"), verdict.get("criteria", []),
@@ -1103,6 +1125,58 @@ def _verdict_schema_for_attempt(att: Path) -> dict:
     return json.loads((pinned if pinned.exists() else VERDICT_SCHEMA).read_text())
 
 
+def parse_test_summary(text: str) -> dict[str, str]:
+    """Parse `scripts/test`'s machine-readable summary: one `PASS|SKIP|FAIL <path>` per line.
+
+    Only the summary lines are authoritative. Worker prose in test.log is NOT parsed — a worker
+    can print anything it likes, so the ONLY thing we trust is the runner's own per-test exit code,
+    which is what produced these lines (see scripts/test)."""
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2 and parts[0] in ("PASS", "SKIP", "FAIL"):
+            out[parts[1].strip()] = parts[0]
+    return out
+
+
+def attest_tests(summary: dict[str, str], required: list[str]) -> tuple[bool, str]:
+    """T1 (decision R26). A test that did not RUN has not PASSED.
+
+    This is the fix for the SPEC-015/1 false PASS: three trust-class tests SKIPped, the aggregate
+    command still exited 0, and the reviewer certified them as proof. Exit code 0 is NOT evidence
+    that the required tests ran.
+
+    Fail closed on:
+      - an EMPTY required set (round-10 finding: zero tests + zero assertions is a vacuous,
+        internally consistent "pass" — it must never authorize a review);
+      - any required test missing from the runner's summary (it never reported);
+      - any required test that SKIPped or FAILed.
+    """
+    if not required:
+        return False, ("no required tests selected — an empty required-test set cannot certify "
+                       "anything (fail closed)")
+    problems = []
+    for t in required:
+        status = summary.get(t)
+        if status is None:
+            problems.append(f"{t}: NO RESULT (test never reported)")
+        elif status != "PASS":
+            problems.append(f"{t}: {status}")
+    if problems:
+        return False, "required tests did not run and pass: " + "; ".join(problems)
+    return True, f"all {len(required)} required tests executed and passed"
+
+
+def required_tests() -> list[str]:
+    """Which tests MUST have run, selected by the ORCHESTRATOR from ITS OWN checkout — never from
+    the worktree, so a candidate cannot shrink its own required set by deleting test files.
+
+    Deliberately blunt: every test in the installed repo is required. One suite, it is fast, and a
+    cleverer selector is exactly the kind of mechanism we are no longer building speculatively
+    (R26 — gates are earned by real failures, not imagined ones)."""
+    return sorted(str(p.relative_to(ROOT)) for p in (ROOT / "tests").glob("*.sh"))
+
+
 def evaluate_binary_review(verdict: str, criteria: list[dict], scope_finding: str,
                            regression_finding: str, security_findings: str) -> str | None:
     """Evaluate only the binary rubric; advisory quality is deliberately not an input."""
@@ -1134,7 +1208,7 @@ def validate_review_verdict(verdict: dict, schema_obj: dict, lc: dict, wc: str) 
         verdict.get("security_findings")) is not None
 
 
-def review(att: Path, spec_id: str, lc: dict, wc: str):
+def review(att: Path, spec_id: str, lc: dict, wc: str, test_attestation: str = "unknown"):
     # policy-note item 2: mandatory structured rubric. The worker's plan/checklist is NEVER
     # included here (confirmation-bias contamination) — only spec, diff, and orchestrator evidence.
     wt = Path(lc["worktree"])
@@ -1184,7 +1258,11 @@ def review(att: Path, spec_id: str, lc: dict, wc: str):
         "\n\n=== SPEC ===\n" + spec_path(spec_id).read_text() +
         f"\n\n=== BINDING ===\nspec_digest: {lc['spec_digest']}\nbase_sha: {lc['base_sha']}\n"
         f"worker_commit: {wc}\n\n=== EVIDENCE (from the orchestrator, not the worker) ===\n"
-        f"integrity: PASS\nscope: PASS\ntest_command: {lc['test_command']} exited 0\n\n"
+        f"integrity: PASS\nscope: PASS\n"
+        # T1 (R26): the reviewer used to be told only "test_command exited 0" — which is how it
+        # certified SPEC-015's three SKIPPED tests as proof. It now gets the orchestrator's own
+        # per-test attestation. This is control-plane evidence, not worker-authored text.
+        f"tests: {test_attestation}\n\n"
         "=== DIFF ===\n" + diff
     )
     (att / "raw" / "review-request.txt").write_text(req)

@@ -5,7 +5,17 @@
 # Individual specs declare their own `test_command`; that is what a worker must
 # drive to exit 0 inside its worktree. This script is the repo's own suite and
 # must stay green independently of any in-flight spec.
-set -euo pipefail
+#
+# TRUTH RULE (T1, decision R26): a test that does not RUN has not PASSED.
+#   exit 0  = assertions ran and passed
+#   exit 77 = prerequisites absent, the test did NOT run   (POSIX convention)
+#   other   = failure
+# A skip is reported as SKIP, never PASS, and is surfaced in the machine-readable
+# summary the dispatcher gates on. `./scripts/test` still exits 0 when everything
+# either passed or legitimately skipped — CI portability — but the DISPATCHER
+# refuses a skip of any test it required (see require_tests_ran in dispatch.py).
+# That is the fix for SPEC-015/1, where three skipped tests were certified as passes.
+set -uo pipefail
 cd "$(dirname "$0")/.."
 
 shopt -s nullglob
@@ -16,15 +26,27 @@ if [ ${#tests[@]} -eq 0 ]; then
   exit 0
 fi
 
+summary="${ORCH_TEST_SUMMARY:-}"   # optional path: machine-readable results for the gate
 failed=0
+declare -a results=()
+
 for t in "${tests[@]}"; do
   echo "=== $t"
-  if bash "$t"; then
-    echo "PASS $t"
-  else
-    echo "FAIL $t"
-    failed=1
-  fi
+  bash "$t"
+  rc=$?
+  case "$rc" in
+    0)  echo "PASS $t";              results+=("PASS $t") ;;
+    77) echo "SKIP $t (did not run)"; results+=("SKIP $t") ;;
+    *)  echo "FAIL $t (exit $rc)";   results+=("FAIL $t"); failed=1 ;;
+  esac
 done
+
+echo
+echo "--- summary"
+printf '%s\n' "${results[@]}"
+
+if [ -n "$summary" ]; then
+  printf '%s\n' "${results[@]}" > "$summary"
+fi
 
 exit "$failed"
