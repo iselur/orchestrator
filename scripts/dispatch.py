@@ -573,18 +573,52 @@ def _trusted_runtime_file(p: Path, want_exec: bool = True) -> Path | None:
     return real
 
 
+def trusted_runtime_tree(root: Path) -> bool:
+    """Every byte of a bind-mounted DIRECTORY is executed inside the worker service, so the whole
+    tree — not just the entry file — must be un-plantable by the worker or any non-trust principal
+    (round-3 review: npm mode mounts the package dir, whose launcher runs a separate vendor binary
+    from inside the mount; trust-checking only node+entry left that binary swappable). Require of
+    every entry: owned by root or the operator; not world-writable; group-writable only when the
+    group is operator-private; and NO symlink whose resolved target escapes the tree (an external
+    target can change without moving the tree fingerprint). The root dir itself is checked too."""
+    import stat as stat_m
+    try:
+        real_root = root.resolve(strict=True)
+    except OSError:
+        return False
+    for p in [real_root, *real_root.rglob("*")]:
+        try:
+            st = p.lstat()
+        except OSError:
+            return False
+        if st.st_uid not in (0, os.getuid()):
+            return False
+        if st.st_mode & 0o002:
+            return False
+        if (st.st_mode & 0o020) and not _group_is_private(st.st_gid):
+            return False
+        if stat_m.S_ISLNK(st.st_mode):
+            try:
+                tgt = p.resolve(strict=True)
+                tgt.relative_to(real_root)   # ValueError if it escapes the mounted tree
+            except (OSError, ValueError):
+                return False
+    return True
+
+
 def worker_codex_runtime():
     """How an ISOLATED worker runs Codex: (argv prefix, read-only bind mounts, entry file), or
     None when this box has no worker-launchable install. The worker cannot read the operator's
     home (that IS the boundary), so root bind-mounts the runtime past it. Two layouts are
     launchable: the npm package (needs a system node — the worker cannot reach ~/.local), or a
-    native single ELF binary. Candidates are vetted (_trusted_runtime_file) and the entry file is
-    fingerprinted at launch so _run refuses a runtime that changed under it. None must refuse at
-    launch: the old npm-only assumption died opaquely in namespace setup on a native-install box,
-    identically on every retry (dev-box feedback, R51)."""
+    native single ELF binary. Candidates are vetted (_trusted_runtime_file, and the WHOLE mounted
+    tree via trusted_runtime_tree for npm) and fingerprinted at launch so _run refuses a runtime
+    that changed under it. None must refuse at launch: the old npm-only assumption died opaquely
+    in namespace setup on a native-install box, identically on every retry (dev-box feedback,
+    R51)."""
     node = _trusted_runtime_file(Path("/usr/bin/node"))
     entry = _trusted_runtime_file(CODEX_PKG / "bin/codex.js", want_exec=False)
-    if node and entry:
+    if node and entry and trusted_runtime_tree(CODEX_PKG):
         return (["/usr/bin/node", "/opt/codex/bin/codex.js"],
                 [(str(CODEX_PKG), "/opt/codex")], entry)
     import shutil
@@ -625,17 +659,20 @@ def _tree_fingerprint(root: Path) -> str:
     for p in sorted(root.rglob("*")):
         rel = str(p.relative_to(root)).encode()
         st = p.lstat()
+        # Owner/group/mode are part of the identity (round-3 review): a mode or ownership flip that
+        # opens a file to another principal must move the hash even when the bytes are unchanged.
+        meta = f"{st.st_uid}:{st.st_gid}:{oct(st.st_mode)}:".encode()
         if stat_m.S_ISLNK(st.st_mode):
-            h.update(b"L" + rel + os.readlink(p).encode())
+            h.update(b"L" + rel + meta + os.readlink(p).encode())
         elif stat_m.S_ISREG(st.st_mode):
-            h.update(b"F" + rel + oct(st.st_mode & 0o7777).encode())
+            h.update(b"F" + rel + meta)
             with p.open("rb") as fh:
                 for chunk in iter(lambda: fh.read(1 << 20), b""):
                     h.update(chunk)
         elif stat_m.S_ISDIR(st.st_mode):
-            h.update(b"D" + rel)
+            h.update(b"D" + rel + meta)
         else:
-            h.update(b"X" + rel)
+            h.update(b"X" + rel + meta)
     return h.hexdigest()
 
 
@@ -1071,10 +1108,16 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
                     if got != want:
                         stale.append(src)
                 entry_ok = _trusted_runtime_file(Path(rt["entry"]), want_exec=False) is not None
-                if stale or not pins or not entry_ok:
+                # Re-verify whole-tree trust for every mounted DIRECTORY, not just the entry file
+                # (round-3 review): a vendor file inside the mount could have flipped to
+                # worker-writable since launch even if its bytes still match a pin.
+                tree_ok = all(trusted_runtime_tree(Path(src)) for src, _dst in rt["binds"]
+                              if Path(src).is_dir())
+                if stale or not pins or not entry_ok or not tree_ok:
                     finish("failed_worker_error", ERR_WORKER,
                            detail="Codex runtime changed, vanished or lost trust between launch "
-                                  f"and run (stale: {stale or 'no pins recorded'}); refusing")
+                                  f"and run (stale: {stale or 'no pins recorded'}, "
+                                  f"tree_ok={tree_ok}); refusing")
                 argv_prefix, binds = rt["argv"], [tuple(b) for b in rt["binds"]]
             else:  # launch record predates runtime pinning: resolve live
                 runtime = worker_codex_runtime()

@@ -116,6 +116,44 @@ if pathlib.Path("/usr/bin/node").exists():
         print("  ok: host interpreter pinned alongside bind sources")
 shutil.rmtree(home, ignore_errors=True)
 
+# 8. whole-tree trust (round-3): a package tree with a clean vendor binary is trusted; a
+#    world-writable vendor file, or a symlink escaping the tree, makes the WHOLE tree untrusted.
+def mkpkg(home):
+    pkg = home / ".local/lib/node_modules/@openai/codex"
+    (pkg / "bin").mkdir(parents=True); (pkg / "vendor").mkdir()
+    (pkg / "bin/codex.js").write_text("// entry\n")
+    (pkg / "vendor/codex-native").write_bytes(ELF); (pkg / "vendor/codex-native").chmod(0o755)
+    return pkg
+home = pathlib.Path(tempfile.mkdtemp()); pkg = mkpkg(home)
+if not d.trusted_runtime_tree(pkg):
+    fails.append("clean package tree rejected")
+else:
+    print("  ok: clean package tree trusted")
+(pkg / "vendor/codex-native").chmod(0o757)   # world-writable vendor binary
+if d.trusted_runtime_tree(pkg):
+    fails.append("world-writable vendor binary did NOT untrust the tree")
+else:
+    print("  ok: world-writable vendor binary untrusts the tree")
+shutil.rmtree(home, ignore_errors=True)
+home = pathlib.Path(tempfile.mkdtemp()); pkg = mkpkg(home)
+(home / "outside-secret").write_text("x")
+os.symlink(home / "outside-secret", pkg / "vendor/escape")   # symlink escaping the mounted tree
+if d.trusted_runtime_tree(pkg):
+    fails.append("escaping symlink did NOT untrust the tree")
+else:
+    print("  ok: escaping symlink untrusts the tree")
+shutil.rmtree(home, ignore_errors=True)
+# 9. an ownership/mode flip on a vendor file moves the tree hash even with identical bytes
+home = pathlib.Path(tempfile.mkdtemp()); pkg = mkpkg(home)
+th1 = d._tree_fingerprint(pkg)
+(pkg / "vendor/codex-native").chmod(0o775)
+th2 = d._tree_fingerprint(pkg)
+if th1 == th2:
+    fails.append("tree hash unchanged after a vendor-file mode flip (bytes identical)")
+else:
+    print("  ok: tree hash moves on a mode flip with identical bytes")
+shutil.rmtree(home, ignore_errors=True)
+
 for f in fails:
     print(f"  FAIL {f}")
 sys.exit(1 if fails else 0)
