@@ -1,12 +1,21 @@
 # AGENTS.md — conventions and commands
 
-Referenced by [CLAUDE.md](CLAUDE.md), which holds the operating rules.
+Referenced by [CLAUDE.md](CLAUDE.md), which holds the operating rules in terms of ROLES. This is the
+only file that maps a role to a vendor — swapping a model is an edit here, never to the rulebook.
+
+## Who plays which role (today)
+
+| Role | Today | Note |
+|---|---|---|
+| owner | the human | approves specs, merges `main` |
+| orchestrator | Claude Code on this box | dispatches, reviews worker diffs, reports |
+| worker | Codex CLI (`gpt-5.6-sol`) | research, drafts, implementation, tests |
+| reviewer | whichever vendor did NOT author the work | never self-review, never same-vendor review |
 
 ## What this repo is
 
-An orchestrator that dispatches Codex worker jobs from schema-validated specs, checks their output
-(work untouched → in scope → tests actually ran → cross-model review), and opens PRs the human
-merges.
+An orchestrator that dispatches worker jobs from schema-validated specs, checks the output (work
+untouched → in scope → tests actually ran → cross-vendor review), and opens PRs the owner merges.
 
 ## Stack
 
@@ -19,11 +28,11 @@ merges.
 
 - Specs: `specs/SPEC-NNN.yaml`, schema `specs/spec.schema.json`. Immutable once approved; never
   regex-parsed. Approval files in `.orchestrator/approvals/<digest>.json`.
-- Branches: worker branches `codex/SPEC-NNN-<attempt>`; PRs target `integration`; only the operator
+- Branches: worker branches `codex/SPEC-NNN-<attempt>`; PRs target `integration`; only the owner
   promotes `integration` → `main`. Both protected by ruleset.
-- Worker isolation: the worker and the gate tests run as the `codex-worker` user in hardened
-  systemd services; worktrees under `/srv/codexwork/worktrees`. One-time setup:
-  `scripts/setup-worker-user.sh`. Proof: `tests/worker_isolation.sh`.
+- Worker isolation: the worker and the gate tests run as the `codex-worker` user in hardened systemd
+  services; worktrees under `/srv/codexwork/worktrees`. Setup: `scripts/setup-worker-user.sh`.
+  Proof: `tests/worker_isolation.sh`, `tests/worker_userns.sh`.
 - Evidence: per-attempt under `.orchestrator/attempts/<id>/<n>/`; raw logs untracked, hashes
   tracked. It is an audit record (see SECURITY.md), not immutable.
 
@@ -38,8 +47,9 @@ merges.
   `bwrap: loopback: Failed RTM_NEWADDR`; proof: `tests/worker_userns.sh`). Inlining context is a
   choice now, not a requirement — the bound reviewer still gets spec + diff + evidence only, never
   a live checkout. The final answer is recoverable from the `--json` stream (last `agent_message`).
-- Adversarial reviews of **Claude-authored** work go through `scripts/review` (its reviewer is
-  Codex; it requires `--author` and refuses Codex-authored artifacts, counts rounds per topic, and
-  refuses a third round). Codex-authored work is reviewed by Claude — worker diffs by the bound
-  reviewer in the dispatcher, plans in-session — under the same two-round cap.
-  Plan drafts go through `scripts/codex-plan` — it refuses a plan body over 150 lines.
+- Reviews of **Claude-authored** work go through `scripts/review` (reviewer = Codex; needs
+  `--author`, refuses Codex-authored artifacts, counts rounds, refuses a third). Codex-authored work
+  is reviewed by Claude — worker diffs by the bound reviewer in the dispatcher, plans in-session —
+  under the same two-round cap.
+- Plans go through `scripts/codex-plan`: `--small` (cap 40), default (cap 250), `--brief` (cap 400,
+  and it refuses a brief missing any required section). Tiers and triggers: CLAUDE.md rule 5.

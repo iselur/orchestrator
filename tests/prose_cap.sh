@@ -26,13 +26,13 @@ fi
 #    is a reviewed decision: add it here AND give it a cap, in the same PR.
 declare -A cap=(
   [CLAUDE.md]=80
-  [AGENTS.md]=45
+  [AGENTS.md]=60   # raised from 45 with the role→vendor table: the rulebook now speaks in roles,
+                   # and this is the one place a model name may appear, so swapping a vendor is an
+                   # edit here and nowhere else.
   [README.md]=100
   [BOOTSTRAP.md]=80
-  [SECURITY.md]=100
-  [DECISIONS.md]=60
-  [.orchestrator/BACKLOG.md]=40
-  [.orchestrator/VISION.md]=40
+  [SECURITY.md]=110
+  [.orchestrator/BACKLOG.md]=45
 )
 total_lines=0
 total_bytes=0
@@ -53,35 +53,67 @@ for f in "${md_files[@]}"; do
   fi
 done
 
-# 2. Totals: 600 lines AND 60,000 bytes — the byte cap stops one-line walls of text that a line
+# 2. Totals: 500 lines AND 60,000 bytes — the byte cap stops one-line walls of text that a line
 #    count cannot see. A zero total means the counting broke (this exact check once passed
 #    vacuously with "0/600" because awk was invoked wrong) — zero is a failure, not a clean repo.
 [ "$total_lines" -gt 0 ] || bad "total tracked markdown counted as 0 lines — the count is broken, not the repo empty"
-[ "$total_lines" -le 600 ]   && ok "total tracked markdown: $total_lines/600 lines" \
-  || bad "total tracked markdown is $total_lines lines — cap is 600. Delete before you add."
+[ "$total_lines" -le 500 ]   && ok "total tracked markdown: $total_lines/500 lines" \
+  || bad "total tracked markdown is $total_lines lines — cap is 500. Delete before you add."
 [ "$total_bytes" -le 60000 ] && ok "total tracked markdown: $total_bytes/60000 bytes" \
   || bad "total tracked markdown is $total_bytes bytes — cap is 60000. Delete before you add."
 
-# 3. The prose graveyards stay empty: plans and review rounds are untracked working files;
-#    a decision that still binds gets one line in DECISIONS.md.
+# 3. The prose graveyards stay empty: plans and review rounds are untracked working files. A
+#    decision that still binds is a RULE (CLAUDE.md); one that no longer binds is history (git).
 if git ls-files -- .orchestrator/decisions .orchestrator/plans .orchestrator/reviews | grep -q .; then
-  bad "tracked files under .orchestrator/{decisions,plans,reviews} — these are transient; conclusions go to DECISIONS.md, arguments to the PR"
+  bad "tracked files under .orchestrator/{decisions,plans,reviews} — these are transient; a binding decision becomes a rule in CLAUDE.md, the argument stays in the PR"
 else
   ok "no tracked files under .orchestrator/{decisions,plans,reviews}"
 fi
 
-# 4. Backlog item #1 must carry a parseable 'product:' line naming something other than this repo
-#    (the one measured failure mode of this setup was pointing itself at itself). Loose keyword
-#    matching was evadable; a dedicated field is not.
-item1=$(awk '/^1\./ { grab = 1 } /^2\./ { grab = 0 } grab' .orchestrator/BACKLOG.md 2>/dev/null)
-product=$(printf '%s\n' "$item1" | sed -n 's/^[[:space:]]*product:[[:space:]]*//p' | head -1)
+# 4. The backlog must ALWAYS carry at least one real product outside this repo. The owner relaxed
+#    the old "item #1 must be the product" rule on 2026-07-14 (self-work may be scheduled first),
+#    but not the guard behind it: the one measured failure of this setup was pointing itself at
+#    itself with no outside finish line. The field must sit INSIDE a numbered backlog item (a
+#    stray line anywhere in the file is not a queued item), and it must name something — a
+#    placeholder or a reference to this repo is not a product. This function is the whole check,
+#    so the negative fixtures below can exercise it directly.
+backlog_product() { # $1 = backlog file; echoes the product name, or nothing if there is none
+  awk '
+    /^[0-9]+\./           { in_item = 1 }                    # a numbered item opens the block
+    /^[^ \t0-9]/          { if (!/^[0-9]+\./) in_item = 0 }  # any other left-margin line closes it
+    in_item && /^[ \t]*product:[ \t]*/ {
+      sub(/^[ \t]*product:[ \t]*/, ""); sub(/[ \t]+$/, "")
+      if ($0 == "") next
+      lower = tolower($0)
+      if (lower ~ /^(this repo|this repository|orchestrator|the orchestrator|tbd|todo|tba|none|n\/a|-+)$/) next
+      print; exit
+    }
+  ' "$1"
+}
+product=$(backlog_product .orchestrator/BACKLOG.md 2>/dev/null)
 if [ -z "$product" ]; then
-  bad "backlog item #1 has no 'product:' line — item #1 must name a real product outside this repo (CLAUDE.md rule 2)"
-elif printf '%s' "$product" | grep -qiE '^(this repo|orchestrator)$'; then
-  bad "backlog item #1 product is '$product' — improving this system is never item #1"
+  bad "no numbered backlog item carries a 'product:' line naming a real product outside this repo — the backlog may never be without one (CLAUDE.md rule 2)"
 else
-  ok "backlog item #1 product: $product"
+  ok "backlog carries a real product: $product"
 fi
+
+# 4b. The guard above must actually discriminate — this repo once shipped a cap test that passed
+#     vacuously. Each fixture is a way the check was evaded before it was tightened.
+fixture=$(mktemp); trap 'rm -f "$fixture"' EXIT
+for bad_case in "product: TBD" "product: this repository" "product: orchestrator" "product: -"; do
+  printf '1. **Item**\n   %s\n' "$bad_case" > "$fixture"
+  [ -z "$(backlog_product "$fixture")" ] \
+    && ok "rejected placeholder/self-reference: $bad_case" \
+    || bad "accepted a non-product: $bad_case"
+done
+printf 'product: stray line outside every item\n\n1. **Item**\n   no product field\n' > "$fixture"
+[ -z "$(backlog_product "$fixture")" ] \
+  && ok "rejected a 'product:' line outside every numbered item" \
+  || bad "accepted a 'product:' line that is not inside a backlog item"
+printf '1. **Self-work first**\n   product: orchestrator\n2. **Real thing**\n   product: reading-coach app\n' > "$fixture"
+[ "$(backlog_product "$fixture")" = "reading-coach app" ] \
+  && ok "skips a self-reference and finds the real product further down the list" \
+  || bad "a self-referencing item hid the real product below it"
 
 [ "$fails" -eq 0 ] && echo "PASS prose_cap.sh" || echo "FAIL prose_cap.sh"
 exit "$fails"

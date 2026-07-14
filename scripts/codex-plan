@@ -4,13 +4,23 @@ set -euo pipefail
 
 MODEL="gpt-5.6-sol"
 out_dir=".orchestrator/plans"
-small=0
+tier="standard"
 contexts=()
 task_parts=()
 
 usage() {
   cat <<'EOF'
-Usage: scripts/codex-plan [--small] [--context FILE]... [--out DIR] [--] [TASK...]
+Usage: scripts/codex-plan [--small|--brief] [--context FILE]... [--out DIR] [--] [TASK...]
+
+Three tiers, matching the rulebook (CLAUDE.md). Ambiguity picks the HIGHER tier.
+  --small     one reversible spec, one bounded component        cap  40 lines
+  (default)   a non-trivial single spec, decision-complete      cap 250 lines
+  --brief     a program: coordinated specs, a handoff gate,     cap 400 lines
+              trust-boundary/high-risk work, a migration, or
+              an architecture decision across components
+A full brief must contain every anatomy section (checked below): outcome, scope
+and non-goals, frozen decisions, assumptions, the earliest falsifiable proof,
+gates, verification, rollback, deferred, definition of done.
 
 Supply TASK as arguments or, when no task argument is given, on standard input.
 EOF
@@ -24,7 +34,15 @@ die() {
 while (($#)); do
   case "$1" in
     --small)
-      small=1
+      # "Ambiguity picks the HIGHER tier" (CLAUDE.md rule 5) — so a contradictory pair of flags is
+      # refused outright rather than silently letting the last one win.
+      [[ "$tier" == "brief" ]] && die "--small and --brief contradict each other; pick one (when unsure, --brief)"
+      tier="small"
+      shift
+      ;;
+    --brief)
+      [[ "$tier" == "small" ]] && die "--small and --brief contradict each other; pick one (when unsure, --brief)"
+      tier="brief"
       shift
       ;;
     --context)
@@ -91,15 +109,18 @@ plan_path="$out_dir/$plan_id.md"
 stdout_path="$out_dir/$plan_id.stdout"
 stderr_path="$out_dir/$plan_id.stderr"
 
-if ((small)); then
-  instructions=$(cat <<'EOF'
+case "$tier" in
+  small)
+    cap=40
+    instructions=$(cat <<'EOF'
 Draft a concise five-field micro-plan. Use exactly these fields: objective,
 scope, action, verification, and rollback. Make each field specific enough to
 execute, and return only the Markdown plan body without YAML frontmatter.
 EOF
-)
-else
-  instructions=$(cat <<'EOF'
+) ;;
+  standard)
+    cap=250
+    instructions=$(cat <<'EOF'
 Draft a durable, decision-complete implementation plan. Cover the decision and
 non-goals, assumptions and supporting evidence, alternatives considered,
 affected boundaries and interfaces, failure modes, ordered implementation
@@ -107,8 +128,43 @@ steps, validation criteria, and rollback. Resolve material choices so an
 implementer can proceed without making new product or architecture decisions.
 Return only the Markdown plan body without YAML frontmatter.
 EOF
-)
-fi
+) ;;
+  brief)
+    cap=400
+    # The anatomy of the 235-line brief that stood this system up — every section earned its place
+    # in a real failure. The headings are matched literally below: a brief missing one is refused,
+    # because the missing section is exactly the one nobody thought about.
+    instructions=$(cat <<'EOF'
+Draft a full program brief. Use these EXACT top-level headings, in this order,
+and put real content under each — a heading with filler is worse than none:
+
+## Outcome
+## Scope and non-goals
+## Frozen decisions
+## Assumptions
+## Earliest falsifiable proof
+## Gates
+## Verification
+## Rollback
+## Deferred
+## Definition of done
+
+Rules for the content:
+- Outcome is external and observable: what exists for the owner afterwards that
+  does not exist now.
+- Frozen decisions hold ONLY decisions the owner has already made, each with the
+  condition under which it may be reopened. A technical assumption is never
+  frozen — it goes under Assumptions with the evidence for it, or into a step
+  that verifies it.
+- Earliest falsifiable proof: the smallest end-to-end run that would prove this
+  whole approach wrong, done FIRST, before anything is built around it.
+- Every gate names the artifact or command that proves it was passed, who
+  arbitrates it, and the explicit stop-or-escalate action when it fails.
+- Reference existing specs, rules, and code; never copy them in.
+Return only the Markdown brief body without YAML frontmatter.
+EOF
+) ;;
+esac
 
 prompt="$instructions
 
@@ -127,14 +183,15 @@ $context_text"
 done
 
 codex_status=0
-if codex exec \
+# Prompt on stdin, never argv: a brief-sized prompt with context files blows past the argv limit
+# (AGENTS.md — argv dies over 130KB), and it failed silently as a Codex startup error.
+if printf '%s' "$prompt" | codex exec \
   -m "$MODEL" \
   -c model_reasoning_effort=high \
   -c service_tier=priority \
   --sandbox read-only \
   --skip-git-repo-check \
-  "$prompt" \
-  </dev/null >"$stdout_path" 2>"$stderr_path"; then
+  - >"$stdout_path" 2>"$stderr_path"; then
   codex_status=0
 else
   codex_status=$?
@@ -152,14 +209,61 @@ if ! grep -q '[^[:space:]]' "$stdout_path"; then
   exit 1
 fi
 
-# Hard size cap: a plan past this length is doing the work instead of describing it (the pre-reset
-# repo accumulated 2,200-line plans re-emitted almost verbatim across review rounds). Split the
-# task or use --small; raising the cap is a reviewed edit to this script, never drift.
+# Hard size cap per tier: a runaway guard, not the binding constraint on good work. A plan past its
+# cap is doing the work instead of describing it (the pre-reset repo accumulated 2,200-line plans
+# re-emitted almost verbatim across review rounds); but the 235-line founding brief is the best
+# work this system ever did, so a program brief gets room. Raising a cap is a reviewed edit here.
 body_lines=$(awk 'END { print NR }' "$stdout_path")   # NR counts a final unterminated line; wc -l does not
-if ((body_lines > 150)); then
-  printf 'codex-plan: REFUSED — plan body is %d lines (cap 150). Split the task or use --small. Raw output retained at %s\n' \
-    "$body_lines" "$stdout_path" >&2
+if ((body_lines > cap)); then
+  printf 'codex-plan: REFUSED — %s plan body is %d lines (cap %d). Split the task or drop a tier. Raw output retained at %s\n' \
+    "$tier" "$body_lines" "$cap" "$stdout_path" >&2
   exit 1
+fi
+
+# A brief missing a section is refused: the missing one is exactly the section nobody thought about
+# (the founding brief's value came from having all of them). This checks STRUCTURE — real heading
+# lines, in order, each with content under it. Whether the content is any good is the reviewer's
+# job. A substring scan was the first attempt and it was worthless: one line holding all ten
+# heading strings passed it.
+if [[ "$tier" == "brief" ]]; then
+  if ! awk -v out="$stdout_path" '
+    BEGIN {
+      n = split("Outcome|Scope and non-goals|Frozen decisions|Assumptions|Earliest falsifiable proof|Gates|Verification|Rollback|Deferred|Definition of done", want, "|")
+      for (i = 1; i <= n; i++) required[tolower(want[i])] = 1
+      next_want = 1; fence = 0
+    }
+    /^```/ { fence = !fence; next }                 # headings inside a code fence are not headings
+    fence { if (next_want > 1) body[next_want - 1] += 1; next }
+    /^##[ \t]+/ {
+      heading = $0
+      sub(/^##[ \t]+/, "", heading); sub(/[ \t]+$/, "", heading); sub(/[ \t]*:[ \t]*$/, "", heading)
+      key = tolower(heading)
+      # A required heading may appear exactly ONCE: a second "## Outcome" means two answers to the
+      # same question, and a reader (or a later amendment) cannot tell which one binds.
+      # (an awk exit still runs END, so record the failure in bad, not only in the exit status)
+      if (key in required && key in used) {
+        printf "section appears twice: ## %s\n", heading > "/dev/stderr"; bad = 1; exit 1
+      }
+      if (next_want <= n && key == tolower(want[next_want])) {
+        seen[next_want] = 1; used[key] = 1; last = next_want; next_want++
+      }
+      next
+    }
+    /[^ \t]/ { if (last) body[last] += 1 }          # a non-blank line counts as content for the open section
+    END {
+      if (!bad) for (i = 1; i <= n; i++) {
+        if (!seen[i])      { printf "missing or out of order: ## %s\n", want[i] > "/dev/stderr"; bad = 1; break }
+        if (!body[i])      { printf "section has no content under it: ## %s\n", want[i] > "/dev/stderr"; bad = 1 }
+      }
+      exit bad ? 1 : 0
+    }
+  ' "$stdout_path" 2>"$stderr_path.sections"; then
+    printf 'codex-plan: REFUSED — brief structure: %s Raw output retained at %s\n' \
+      "$(tr '\n' ' ' < "$stderr_path.sections")" "$stdout_path" >&2
+    rm -f "$stderr_path.sections"
+    exit 1
+  fi
+  rm -f "$stderr_path.sections"
 fi
 
 created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
