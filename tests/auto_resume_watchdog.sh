@@ -122,7 +122,7 @@ alert_env() { # configure a complete owner alert channel
 
 echo "== W0: tracked resume prompt carries every binding instruction, in the required order"
 P="scripts/lib/watchdog-resume-prompt.txt"
-for phrase in "HALT" "dispatch reconcile" "CLAUDE.md" "scripts/intake" "NEVER touch main" "NEVER create approval files" "heartbeat" "observation rows"; do
+for phrase in "HALT" "dispatch reconcile" "CLAUDE.md" "scripts/intake" "NEVER touch main" "NEVER create approval files" "heartbeat" "observation rows" "exit claude entirely" "write a dated handoff" "compacted"; do
   grep -qF "$phrase" "$P" && ok "prompt mentions: $phrase" || bad "prompt is missing: $phrase"
 done
 halt_line=$(grep -nF "HALT" "$P" | head -1 | cut -d: -f1)
@@ -140,13 +140,34 @@ expected='claude --session-id 00000000-0000-4000-8000-000000000001 --dangerously
 grep -q "^tmux pipe-pane" "$TS/invocations.log" && ok "pane transcript piping enabled" || bad "pipe-pane never set up"
 [ -s "$WDIR/last-run" ] && ok "last-run recorded" || bad "last-run missing"
 
-echo "== W2: no pending work -> strict no-op, dead idle pane not restarted"
+echo "== W2: no pending work -> no launch; a dead idle pane is ROTATED (torn down, id retired)"
 reset
 run_wd
 [ "$(invoked new-session)" = "0" ] && [ -z "$(keys)" ] && ok "idle: no session, no keys" || bad "idle run acted"
 mkdir -p "$TS/sessions"; touch "$TS/sessions/orch-auto"; dead_pane
+mkdir -p "$WDIR"; printf '00000000-0000-4000-8000-000000000099\n' > "$WDIR/session-id"; printf '00000000-0000-4000-8000-000000000099\n' > "$WDIR/launched"
 run_wd
-[ -z "$(keys)" ] && ok "dead idle pane left dead" || bad "dead idle pane was restarted"
+[ -z "$(keys)" ] && ok "rotation typed nothing" || bad "rotation sent input"
+[ ! -e "$TS/sessions/orch-auto" ] && ok "dead idle session torn down" || bad "dead idle session survived rotation"
+[ ! -e "$WDIR/session-id" ] && [ ! -e "$WDIR/launched" ] && ok "conversation id retired" || bad "id survived rotation"
+open_row                                            # work appears after rotation
+run_wd
+grep -q -- '--session-id 00000000-0000-4000-8000-000000000001' <(keys) && ok "next pending wake started FRESH (new id, not --resume)" || bad "post-rotation wake did not start fresh"
+grep -q -- '--resume' <(keys) && bad "post-rotation wake resumed a retired conversation" || ok "retired conversation never resumed"
+
+echo "== W2b: rotation respects a LIVE idle session and survives a failed kill"
+reset
+mkdir -p "$TS/sessions"; touch "$TS/sessions/orch-auto"; echo claude > "$TS/sessions/orch-auto.cmd"
+printf '00000000-0000-4000-8000-000000000099\n' > "$WDIR/session-id" 2>/dev/null || { mkdir -p "$WDIR"; printf '00000000-0000-4000-8000-000000000099\n' > "$WDIR/session-id"; }
+run_wd
+[ -e "$TS/sessions/orch-auto" ] && ok "live idle session left alone (rotation is session-initiated)" || bad "rotation killed a LIVE session"
+dead_pane
+export FAKE_TMUX_FAIL=kill-session
+run_wd
+unset FAKE_TMUX_FAIL
+[ -e "$WDIR/session-id" ] && ok "failed rotation kill kept the id (retry next tick)" || bad "id dropped despite surviving session"
+run_wd
+[ ! -e "$TS/sessions/orch-auto" ] && [ ! -e "$WDIR/session-id" ] && ok "rotation retried and completed" || bad "rotation retry failed"
 
 echo "== W3 (b): dead pane + pending + valid recorded id -> one --resume of THAT id"
 reset; open_row

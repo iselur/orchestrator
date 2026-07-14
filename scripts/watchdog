@@ -351,6 +351,28 @@ check() {
   local pending=0
   [ "$state" = "PENDING" ] && pending=1
   [ -n "$attempt" ] && pending=1
+  if [ "$pending" -eq 0 ]; then
+    # Idle rotation (owner decision 2026-07-14): a conversation whose work is DONE is never
+    # resumed — everything needed to start again lives on disk (ledger, state, handoffs). When
+    # the session's claude has exited and nothing is pending, retire the conversation id and
+    # remove the empty session, so the next pending wake starts a FRESH conversation instead of
+    # accreting compaction debt in an old one. --resume stays reserved for crash-mid-work, where
+    # in-flight context genuinely is not on disk yet. A LIVE idle session is left alone: rotation
+    # is session-initiated at a boundary (the resume prompt orders the exit), never an outside
+    # kill of a running claude.
+    if session_exists && ! claude_alive && [ -e "$WD/session-id" ]; then
+      halted && exit 0
+      local retired; retired=$(get "$WD/session-id")
+      if tmux kill-session -t "$SESSION" 2>/dev/null || ! session_exists; then
+        rm -f "$WD/session-id" "$WD/launched"
+        note "idle rotation: conversation ${retired:-?} retired; next pending wake starts fresh"
+      else
+        note "idle rotation: kill-session failed; keeping state, will retry next tick"
+      fi
+    fi
+    alert_sweep
+    exit 0
+  fi
   if [ "$pending" -eq 1 ]; then
     if ! session_exists; then
       launch_new                                                 # (a)
