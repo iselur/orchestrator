@@ -1,8 +1,0 @@
-You are SOL (gpt-5.6) on the research/consult lane (web search ENABLED, repo read-only). Ledger R21, review-only — no installation.
-
-TASK: The operator asks: "Matt Pocock skills — makes sense to install for Codex and Claude in this harness?"
-1. Research what Matt Pocock has published under "skills" (his AI/agent skills work — likely Claude Code / agent skills packages, e.g. via aihero.dev or GitHub). Identify the exact artifacts: names, repos, formats (Claude Code skills? prompts? MCP?), licenses, maintenance state.
-2. Assess content quality and RELEVANCE to this harness specifically (read CLAUDE.md + AGENTS.md: a Python/bash trust-first orchestrator; Claude = orchestrator/reviewer, Codex gpt-5.6-sol = planner/executor; TypeScript is not our stack unless a skill is stack-agnostic).
-3. Assess the SUPPLY-CHAIN angle explicitly: installing third-party skills injects instructions into our agents' contexts — evaluate against our trust model (worker isolation, reviewer with all tools denied, fail-closed gates). Which agent contexts (orchestrator / worker / reviewer / consult) could tolerate third-party skills at all?
-4. Recommend per skill (or skill-pack): install / adapt / skip, for Claude and for Codex separately, with reasons. If the answer is "mostly built for TS app devs, low fit," say that plainly.
-CAPTURE SOURCES: cite every URL with retrieval evidence. End with "REVIEW COMPLETE".

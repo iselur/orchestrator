@@ -222,4 +222,44 @@ assert_no_file "$run_dir/PLAN-011.md"
 assert_file "$run_dir/PLAN-011.stdout"
 assert_file "$run_dir/PLAN-011.stderr"
 
+# A plan body over 150 lines is refused (a plan that long is doing the work instead of describing
+# it); the raw output is retained and no plan is minted. Exact boundary, and the fixtures have NO
+# terminal newline (the stub prints with printf '%s') — the cap must count a final unterminated
+# line, which wc -l would miss.
+oversized="$(python3 -c 'print("\n".join(f"line {i}" for i in range(151)), end="")')"
+if PATH="$tmp/bin:$PATH" \
+  CODEX_STUB_ARGS="$args_file" \
+  CODEX_STUB_PROMPT="$prompt_file" \
+  CODEX_STUB_STDOUT="$oversized" \
+    scripts/codex-plan --out "$run_dir" 'oversized plan' >/dev/null 2>&1; then
+  fail "a 151-line plan body was accepted (cap is 150)"
+fi
+assert_no_file "$run_dir/PLAN-012.md"
+assert_file "$run_dir/PLAN-012.stdout"
+at_cap="$(python3 -c 'print("\n".join(f"line {i}" for i in range(150)), end="")')"
+PATH="$tmp/bin:$PATH" \
+  CODEX_STUB_ARGS="$args_file" \
+  CODEX_STUB_PROMPT="$prompt_file" \
+  CODEX_STUB_STDOUT="$at_cap" \
+    scripts/codex-plan --out "$run_dir" 'plan at the cap' >/dev/null \
+  || fail "a 150-line body (exactly at the cap) was refused"
+assert_file "$run_dir/PLAN-013.md"
+
+# Same exact boundaries WITH a terminal newline — both spellings of "150 lines" must agree.
+if PATH="$tmp/bin:$PATH" \
+  CODEX_STUB_ARGS="$args_file" \
+  CODEX_STUB_PROMPT="$prompt_file" \
+  CODEX_STUB_STDOUT="$oversized"$'\n' \
+    scripts/codex-plan --out "$run_dir" 'oversized plan, terminated' >/dev/null 2>&1; then
+  fail "a newline-terminated 151-line body was accepted (cap is 150)"
+fi
+assert_no_file "$run_dir/PLAN-014.md"
+PATH="$tmp/bin:$PATH" \
+  CODEX_STUB_ARGS="$args_file" \
+  CODEX_STUB_PROMPT="$prompt_file" \
+  CODEX_STUB_STDOUT="$at_cap"$'\n' \
+    scripts/codex-plan --out "$run_dir" 'plan at the cap, terminated' >/dev/null \
+  || fail "a newline-terminated 150-line body was refused"
+assert_file "$run_dir/PLAN-015.md"
+
 echo "PASS codex_plan.sh"

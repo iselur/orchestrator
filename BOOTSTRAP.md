@@ -57,8 +57,8 @@ merge it.
 
 Autonomy ships **disabled**. If (and only if) you want the orchestrator to merge in-scope PRs to
 `integration` without a per-PR click, create `.orchestrator/AUTONOMY.local.json` (gitignored) with
-your ratified grant. `main` stays human-only regardless. Read the "Dual-validated planning" and
-autonomy sections of `CLAUDE.md` first.
+your ratified grant. `main` stays human-only regardless. Read the autonomy line in `CLAUDE.md`'s
+safety invariants first.
 
 ## Notes
 
