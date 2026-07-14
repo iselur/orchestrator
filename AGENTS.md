@@ -48,8 +48,8 @@ untouched → in scope → tests actually ran → cross-vendor review), and open
   choice now, not a requirement — the bound reviewer still gets spec + diff + evidence only, never
   a live checkout. The final answer is recoverable from the `--json` stream (last `agent_message`).
 - Reviews of **Claude-authored** work go through `scripts/review` (reviewer = Codex; needs
-  `--author`, refuses Codex-authored artifacts, counts rounds, refuses a third). Codex-authored work
+  `--author`, refuses Codex-authored artifacts, counts rounds, refuses a fourth). Codex-authored work
   is reviewed by Claude — worker diffs by the bound reviewer in the dispatcher, plans in-session —
-  under the same two-round cap.
+  under the same three-round cap.
 - Plans go through `scripts/codex-plan`: `--small` (cap 40), default (cap 250), `--brief` (cap 400,
   and it refuses a brief missing any required section). Tiers and triggers: CLAUDE.md rule 5.

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Bounded adversarial review (CLAUDE.md rule 3): draft → review (round 1) → revise → confirmation
-# look (round 2) → ship or escalate to the operator. Round 3 does not exist — this script refuses
-# it. The cap lives in code because a prose cap already lost once to a ten-round loop.
+# Bounded adversarial review (CLAUDE.md rule 3): draft → up to three review rounds, each followed
+# by one revision → ship when clean or escalate to the operator. Round 4 does not exist — this
+# script refuses it. The cap lives in code because a prose cap already lost once to a ten-round
+# loop. Only round-N.md files are rounds: sibling artifacts (dispositions, notes) never count.
 #
 # The reviewer this script invokes is Codex, so it may only review Claude-authored artifacts:
 # --author is required and 'codex' is refused (never Codex-grades-Codex). Codex-authored work is
@@ -61,16 +62,31 @@ dir="$out_root/$topic"
 mkdir -p "$dir"
 
 # The round counter is the safety property, so it must not race: two detached invocations counting
-# the same directory could both claim round 2. The lock is held from counting through the final
+# the same directory could both claim the last round. The lock is held from counting through the final
 # rename, so a concurrent invocation waits and then sees the truth.
 exec 9>>"$dir/.lock"
 flock 9
 
-rounds=$(find "$dir" -maxdepth 1 -name 'round-*.md' | wc -l)
+# Rounds are the CONTIGUOUS run of regular, non-symlink round-N.md files from 1. Counting names
+# alone was exploitable: with only round-2.md present, every invocation would claim round 2 and
+# overwrite it forever — unlimited rounds. Any round-N.md beyond the contiguous prefix (a gap, a
+# symlink, a directory) is a corrupt state and refuses outright rather than guessing.
+rounds=0
+while [ -f "$dir/round-$((rounds + 1)).md" ] && [ ! -L "$dir/round-$((rounds + 1)).md" ]; do
+  rounds=$((rounds + 1))
+done
+# Regex, not a glob: round-[0-9].md misses a stray round-10.md (reads as clean), and
+# round-[0-9]*.md would re-admit sibling artifacts like round-1-dispositions.md.
+named=$(find "$dir" -maxdepth 1 -regextype posix-extended -regex '.*/round-[0-9]+\.md' | wc -l)
+if [ "$named" -ne "$rounds" ]; then
+  echo "review: REFUSED — '$dir' holds a corrupt round state (a gap, symlink, or non-file among round-N.md)." >&2
+  echo "        Fix the directory by hand before any further review; nothing was run or written." >&2
+  exit 5
+fi
 round=$((rounds + 1))
-if ((round > 2)); then
-  echo "review: REFUSED — '$topic' has already had 2 review rounds ($dir)." >&2
-  echo "        Ship it or escalate to the operator; a third round is not allowed (CLAUDE.md rule 3)." >&2
+if ((round > 3)); then
+  echo "review: REFUSED — '$topic' has already had 3 review rounds ($dir)." >&2
+  echo "        Ship it or escalate to the owner; a fourth round is not allowed (CLAUDE.md rule 3)." >&2
   exit 3
 fi
 
@@ -89,4 +105,4 @@ if ! codex exec \
 fi
 grep -q '[^[:space:]]' "$out.partial" || { printf 'review: empty review output\n' >&2; rm -f "$out.partial"; exit 1; }
 mv "$out.partial" "$out"
-printf 'Review round %d of 2: %s\n' "$round" "$out"
+printf 'Review round %d of 3: %s\n' "$round" "$out"

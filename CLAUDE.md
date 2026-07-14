@@ -14,9 +14,9 @@ holds the commands; SECURITY.md says what the protections do and do not prove.
 2. **One workstream:** one active execution stream. New ideas go to `.orchestrator/BACKLOG.md`, never
    in beside current work. Business ideas stay private. A real product outside this repo is always
    somewhere on that backlog — self-improvement may be scheduled first, but never be the only thing.
-3. **Review cap:** draft, one adversarial review, one revision, one confirmation look, then ship or
-   escalate to the owner. Never a third round — `scripts/review` refuses it. Trust-critical work
-   with an unresolved critical finding stays BLOCKED: escalate, never ship because the cap ran out.
+3. **Review cap:** draft, then up to three adversarial review rounds, each answered by one
+   revision; ship when clean. Never a fourth round — `scripts/review` refuses it. Trust-critical
+   work with an unresolved critical finding stays BLOCKED: escalate, never ship on a spent cap.
 4. **Communication:** at most five plain bullets — Outcome / Verified / Not done / Risk / Next. A
    coined term is allowed only when it names code that exists in this repo.
 5. **Every program gets ONE brief.** Pick the tier; when it could be two, take the higher one.

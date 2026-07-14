@@ -77,7 +77,7 @@ those account-bound steps are yours.
 |---|---|
 | `scripts/dispatch.py` / `scripts/dispatch` | launch, checks, review, merge, health, reconcile |
 | `scripts/intake` | task gate: no work without a goal and a checkable definition of done |
-| `scripts/review` / `scripts/codex-plan` | bounded cross-vendor review (2 rounds max) / tiered plans and briefs |
+| `scripts/review` / `scripts/codex-plan` | bounded cross-vendor review (3 rounds max) / tiered plans and briefs |
 | `scripts/setup-worker-user.sh` | one-time privileged host setup for worker isolation |
 | `CLAUDE.md` / `AGENTS.md` / `SECURITY.md` | operating rules, role-to-model map and commands, honest security model |
 | `specs/`, `.orchestrator/` | specs and the tracked approval/attempt records |
