@@ -988,6 +988,32 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
     # satisfy it.
     summary_path = wt / ".orch-test-summary"
     test_env = {"ORCH_TEST_SUMMARY": str(summary_path)}
+
+    # T1b (R26) — HOLD THE GRADER OUT OF THE AGENT'S REACH.
+    # T1 made the orchestrator choose WHICH tests are required. That is not enough: the tests still
+    # EXECUTE from the worker's worktree, so a candidate whose approved scope includes tests/ can
+    # rewrite a required test to `exit 0` and pass the gate honestly. (Demonstrated, not theorised.)
+    # Every reward-hacking result in the literature reduces to the agent being able to touch the
+    # thing that scores it: METR observed o3 monkey-patching the evaluator and stealing the reference
+    # answer on 100% of trajectories for one task.
+    #
+    # So: the REQUIRED tests are restored from the ORCHESTRATOR's installed copy before the gate runs.
+    # A worker's edits to a required test are recorded and run only as SUPPLEMENTAL evidence — they
+    # can never satisfy the required set. A legitimately changed test becomes authoritative only once
+    # it is merged and installed (i.e. after a human has looked at it).
+    substituted = []
+    for rel in required_tests():
+        parent_copy, worker_copy = ROOT / rel, wt / rel
+        if not parent_copy.exists():
+            continue
+        parent_bytes = parent_copy.read_bytes()
+        if not worker_copy.exists() or worker_copy.read_bytes() != parent_bytes:
+            if worker_copy.exists():
+                (att / "raw" / f"worker-{Path(rel).name}").write_bytes(worker_copy.read_bytes())
+                substituted.append(rel)
+            worker_copy.parent.mkdir(parents=True, exist_ok=True)
+            worker_copy.write_bytes(parent_bytes)
+            worker_copy.chmod(0o755)
     if iso:
         with open(att / "test.log", "w") as tl:
             tcp = isolated_run(
@@ -1009,7 +1035,11 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
     ran = parse_test_summary(summary_txt)
     req = required_tests()
     attested, detail = attest_tests(ran, req)
-    attestation = {"required": req, "observed": ran, "attested": attested, "detail": detail}
+    attestation = {"required": req, "observed": ran, "attested": attested, "detail": detail,
+                   # T1b: required tests the worker had modified. Their content was REPLACED with the
+                   # orchestrator's copy before the gate ran; the worker's versions are retained in
+                   # raw/ as evidence and are visible to the reviewer, but they graded nothing.
+                   "required_tests_restored_from_parent": substituted}
     atomic_write(att / "test-attestation.json", json.dumps(attestation, indent=2))
     if not attested:
         finish("failed_test", ERR_TEST_NOT_RUN, worker_commit=worker_commit,

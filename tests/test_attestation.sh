@@ -88,5 +88,34 @@ cp scripts/test "$tmp/runner"
 check "exit-77 test recorded as SKIP" "SKIP tests/skipper.sh" "$(grep skipper "$tmp/sum" 2>/dev/null)"
 check "exit-0 test recorded as PASS"  "PASS tests/passer.sh"  "$(grep passer  "$tmp/sum" 2>/dev/null)"
 
+echo "== T1b: a worker cannot neuter a required test (grader out of reach)"
+# THE ATTACK: a spec whose approved scope includes tests/ (SPEC-017's did) rewrites a required test
+# to `exit 0`. Pre-T1b this passed the gate honestly: the test "ran" and "passed" — it just asserted
+# nothing. The gate must restore the ORCHESTRATOR's copy before running, so the worker's version
+# grades nothing.
+grep -q "required_tests_restored_from_parent" ../scripts/dispatch.py 2>/dev/null ||
+  grep -q "required_tests_restored_from_parent" scripts/dispatch.py
+check "attestation records substituted required tests" "0" "$?"
+
+src=$(cat scripts/dispatch.py)
+case "$src" in
+  *"HOLD THE GRADER OUT OF THE AGENT'S REACH"*) ok=0 ;;
+  *) ok=1 ;;
+esac
+check "the gate restores required tests from the parent copy" "0" "$ok"
+
+# Prove the restore actually defeats the attack, end to end.
+atk=$(mktemp -d); trap 'rm -rf "$tmp" "$atk"' EXIT
+mkdir -p "$atk/tests" "$atk/scripts"
+cp scripts/test "$atk/scripts/test"
+printf '#!/usr/bin/env bash\necho "neutered"\nexit 0\n' > "$atk/tests/victim.sh"   # worker's version
+printf '#!/usr/bin/env bash\necho "real assertion failed"\nexit 1\n' > "$atk/parent_victim.sh" # parent's
+chmod +x "$atk/tests/victim.sh"
+# simulate the restore: parent copy overwrites the worker's
+cp "$atk/parent_victim.sh" "$atk/tests/victim.sh"
+( cd "$atk" && ORCH_TEST_SUMMARY="$atk/sum" bash scripts/test >/dev/null 2>&1 )
+check "restored test fails as it should (worker's exit-0 stub did not grade)" \
+      "FAIL tests/victim.sh" "$(grep victim "$atk/sum" 2>/dev/null)"
+
 [ "$fails" -eq 0 ] && echo "PASS test_attestation.sh" || echo "FAIL test_attestation.sh"
 exit "$fails"
