@@ -527,14 +527,35 @@ ISO_WORKTREES = Path("/srv/codexwork/worktrees")
 CODEX_PKG = OPERATOR_HOME / ".local/lib/node_modules/@openai/codex"  # npm layout; bind-mounted RO to /opt/codex
 
 
+def _group_is_private(gid: int) -> bool:
+    """True iff gid is the operator's PRIMARY group, its member list names nobody but the
+    operator, and it is not the worker's primary group. Ubuntu's user-private-group scheme
+    (umask 002) makes npm-installed files 664 with exactly such a group; anything looser — a
+    shared group, the worker as primary or supplementary member — fails the check."""
+    import grp
+    import pwd
+    try:
+        g = grp.getgrgid(gid)
+        op = pwd.getpwuid(os.getuid())
+    except KeyError:
+        return False
+    if gid != op.pw_gid or any(m != op.pw_name for m in g.gr_mem):
+        return False
+    try:
+        if pwd.getpwnam(WORKER_USER).pw_gid == gid:
+            return False
+    except KeyError:
+        pass
+    return True
+
+
 def _trusted_runtime_file(p: Path, want_exec: bool = True) -> Path | None:
     """Vet a file root will bind-mount into the worker service: resolve symlinks, then require a
-    regular file owned by root or the operator and not WORLD-writable (the worker must never be
-    able to swap what gets mounted), executable when it will be exec'd directly. Group-writable is
-    deliberately allowed: Ubuntu's user-private-group umask makes npm-installed files 664 with the
-    operator's own group, and the worker is never a member of it (setup-worker-user.sh adds the
-    operator to codexwork, never the reverse; the DAC drills prove the worker cannot reach these
-    files at all). Returns the resolved real path, or None."""
+    regular file owned by root or the operator, not world-writable, and group-writable ONLY when
+    that group is verifiably private to the operator (_group_is_private — round-2 review: on a box
+    where the operator's primary group has other members, "group-writable is fine" is an
+    unenforced assumption, so it is enforced here). Executable when it will be exec'd directly.
+    Returns the resolved real path, or None."""
     import stat as stat_m
     try:
         real = p.resolve(strict=True)
@@ -542,6 +563,8 @@ def _trusted_runtime_file(p: Path, want_exec: bool = True) -> Path | None:
     except OSError:
         return None
     if not stat_m.S_ISREG(st.st_mode) or (st.st_mode & 0o002):
+        return None
+    if (st.st_mode & 0o020) and not _group_is_private(st.st_gid):
         return None
     if st.st_uid not in (0, os.getuid()):
         return None
@@ -584,8 +607,52 @@ def worker_codex_runtime():
     return None
 
 
-def runtime_fingerprint(entry: Path) -> str:
-    return hashlib.sha256(entry.read_bytes()).hexdigest()
+def runtime_fingerprint(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _tree_fingerprint(root: Path) -> str:
+    """Deterministic hash of a whole directory tree (names, modes, symlink targets, contents).
+    The npm layout bind-mounts the PACKAGE DIRECTORY, whose launcher executes a separate vendor
+    binary from inside the mount — hashing only the entry file left every other mounted byte
+    unpinned (round-2 review). Special files taint the hash by type+name."""
+    import stat as stat_m
+    h = hashlib.sha256()
+    for p in sorted(root.rglob("*")):
+        rel = str(p.relative_to(root)).encode()
+        st = p.lstat()
+        if stat_m.S_ISLNK(st.st_mode):
+            h.update(b"L" + rel + os.readlink(p).encode())
+        elif stat_m.S_ISREG(st.st_mode):
+            h.update(b"F" + rel + oct(st.st_mode & 0o7777).encode())
+            with p.open("rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+        elif stat_m.S_ISDIR(st.st_mode):
+            h.update(b"D" + rel)
+        else:
+            h.update(b"X" + rel)
+    return h.hexdigest()
+
+
+def pin_runtime_sources(rt_argv: list, rt_binds: list) -> dict:
+    """path -> fingerprint for EVERYTHING the worker service will execute: every bind-mount
+    source (file or whole tree) plus the host-side interpreter when argv[0] is not itself under a
+    pinned mount (npm mode runs /usr/bin/node from the host /usr). _run recomputes these
+    immediately before starting the service; the residual hash->mount window is milliseconds and
+    writable only by operator/root — the box's trust root — which content re-hashing at use time
+    covers at least as well as device/inode pinning would."""
+    pins = {}
+    for src, _dst in rt_binds:
+        sp = Path(src)
+        pins[src] = _tree_fingerprint(sp) if sp.is_dir() else runtime_fingerprint(sp)
+    if not rt_argv[0].startswith("/opt/codex"):
+        pins[rt_argv[0]] = runtime_fingerprint(Path(rt_argv[0]))
+    return pins
 
 
 def isolation_available() -> bool:
@@ -807,7 +874,8 @@ def cmd_launch(spec_id: str) -> None:
                 f"  Probe stderr: {(probe.stderr or b'').decode('utf-8', 'replace').strip()[-400:]}",
                 15)
         runtime_record = {"argv": rt_argv, "binds": [list(b) for b in rt_binds],
-                          "entry": str(rt_entry), "entry_sha256": runtime_fingerprint(rt_entry)}
+                          "entry": str(rt_entry),
+                          "pins": pin_runtime_sources(rt_argv, rt_binds)}
 
     ctx = preflight(spec_id)
     spec, digest, approval = ctx["spec"], ctx["digest"], ctx["approval"]
@@ -989,17 +1057,24 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
             # the final message is recovered from the JSONL stream.
             rt = lc.get("worker_runtime")
             if rt:
-                entry = Path(rt["entry"])
-                pinned = _trusted_runtime_file(entry, want_exec=False)
-                try:
-                    unchanged = pinned is not None and \
-                        runtime_fingerprint(entry) == rt["entry_sha256"]
-                except OSError:
-                    unchanged = False
-                if not unchanged:
+                # Re-verify every pinned source immediately before the service starts (probe->run
+                # TOCTOU, round-2 review). No pins, a stale pin, or a runtime that lost its file
+                # trust all refuse — fail closed.
+                pins = rt.get("pins") or {}
+                stale = []
+                for src, want in pins.items():
+                    sp = Path(src)
+                    try:
+                        got = _tree_fingerprint(sp) if sp.is_dir() else runtime_fingerprint(sp)
+                    except OSError:
+                        got = "<unreadable>"
+                    if got != want:
+                        stale.append(src)
+                entry_ok = _trusted_runtime_file(Path(rt["entry"]), want_exec=False) is not None
+                if stale or not pins or not entry_ok:
                     finish("failed_worker_error", ERR_WORKER,
-                           detail=f"Codex runtime {rt['entry']} changed, vanished or lost trust "
-                                  "between launch and run; refusing an unpinned runtime")
+                           detail="Codex runtime changed, vanished or lost trust between launch "
+                                  f"and run (stale: {stale or 'no pins recorded'}); refusing")
                 argv_prefix, binds = rt["argv"], [tuple(b) for b in rt["binds"]]
             else:  # launch record predates runtime pinning: resolve live
                 runtime = worker_codex_runtime()
@@ -1551,7 +1626,8 @@ def cmd_status(attempt_id: str) -> None:
 
 
 # ================================================================ await =======
-def cmd_await(attempt_id: str, interval: int = 5, max_wait: int = 8 * 3600) -> None:
+def cmd_await(attempt_id: str, interval: int = 5, max_wait: int = 8 * 3600,
+              show_stderr: bool = False) -> None:
     spec_id, n = parse_attempt_id(attempt_id)
     unit = unit_name(spec_id, n)
     waited = 0
@@ -1572,8 +1648,10 @@ def cmd_await(attempt_id: str, interval: int = 5, max_wait: int = 8 * 3600) -> N
                     out["worker_exit"] = r["worker_exit"]
             except Exception:
                 pass
-            if status in ("failed_worker_error", "interrupted"):
-                try:  # local display ONLY — raw/ is gitignored; this never enters provenance
+            if show_stderr and status in ("failed_worker_error", "interrupted"):
+                # OPT-IN local display only (round-2 review: stdout reaches automation logs too).
+                # raw/ is gitignored; this never enters provenance.
+                try:
                     tail = (att / "raw" / "worker-stderr.txt").read_text()[-800:].strip()
                     if tail:
                         out["stderr_tail_local"] = tail
@@ -2138,9 +2216,14 @@ def main() -> None:
     for name in ("launch",):
         p = sub.add_parser(name)
         p.add_argument("spec_id")
-    for name in ("status", "await", "cancel", "merge", "_run"):
+    for name in ("status", "cancel", "merge", "_run"):
         p = sub.add_parser(name)
         p.add_argument("attempt_id")
+    pw = sub.add_parser("await")
+    pw.add_argument("attempt_id")
+    pw.add_argument("--show-stderr", action="store_true",
+                    help="on failure, also print a LOCAL tail of raw/worker-stderr.txt "
+                         "(may contain secrets; never persisted)")
     ph = sub.add_parser("health")
     ph.add_argument("attempt_id")
     ph.add_argument("--minutes", type=int, default=HEALTH_INACTIVITY_MIN,
@@ -2156,7 +2239,7 @@ def main() -> None:
     elif args.cmd == "status":
         cmd_status(args.attempt_id)
     elif args.cmd == "await":
-        cmd_await(args.attempt_id)
+        cmd_await(args.attempt_id, show_stderr=args.show_stderr)
     elif args.cmd == "cancel":
         cmd_cancel(args.attempt_id)
     elif args.cmd == "merge":

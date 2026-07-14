@@ -52,6 +52,16 @@ verdict(){ local marker="$1" desc="$2" want="$3" got
   elif [ -z "$got" ]; then bad "$desc — probe never reported (vacuous; unit likely failed to start)"
   else bad "$desc — probe reported '$got' (isolation broken)"; fi; }
 
+# Positive control FIRST (round-2 review): `sudo -n true` proves sudo, not that commands run AS
+# THE WORKER — if `sudo -u` itself were broken, every denial below would be vacuous.
+echo "== D1 harness: positive control — sudo executes commands as $WORKER"
+if sudo -n -u "$WORKER" cat /etc/hostname >/dev/null 2>&1; then
+  ok "sudo -u $WORKER runs commands (denials below are meaningful)"
+else
+  echo "FAIL positive control: cannot run commands as $WORKER — every D1 denial would be vacuous"
+  exit 1
+fi
+
 echo "== D1: codex-worker is denied every operator credential (DAC)"
 deny "read sentinel $SENTINEL (owner-only, always present)" sudo -u "$WORKER" cat "$SENTINEL"
 for f in "$OPERATOR_HOME/.config/gh/hosts.yml" "$OPERATOR_HOME/.codex/auth.json" \

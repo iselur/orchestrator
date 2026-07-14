@@ -48,10 +48,17 @@ case("native ELF accepted", lambda h: native(h), True)
 case("npm shim rejected", lambda h: native(h, body=b"#!/usr/bin/env node\nrequire('x')\n"), False)
 # 3. non-executable ELF -> rejected
 case("non-executable ELF rejected", lambda h: native(h, mode=0o644), False)
-# 4. world-writable ELF -> rejected (worker-swappable mount source); group-writable stays
-#    accepted (Ubuntu user-private-group umask; the worker is never in the operator's group)
+# 4. world-writable ELF -> rejected (worker-swappable mount source); group-writable is accepted
+#    ONLY when the file's group is verifiably private to this user (_group_is_private), so the
+#    expectation is computed per-box, not assumed
 case("world-writable ELF rejected", lambda h: native(h, mode=0o777), False)
-case("group-writable ELF accepted", lambda h: native(h, mode=0o775), True)
+got, home = probe(lambda h: native(h, mode=0o775))
+private = d._group_is_private((home / ".codex/bin/codex").stat().st_gid)
+if chose_ours(got, home) != private:
+    fails.append(f"group-writable ELF: accepted={chose_ours(got, home)} but group private={private}")
+else:
+    print(f"  ok: group-writable ELF {'accepted' if private else 'rejected'} (group private={private})")
+shutil.rmtree(home, ignore_errors=True)
 # 5. symlinked candidate -> accepted via its resolved real path
 def symlinked(h):
     real = native(h, name=".codex/versions/1.0/codex")
@@ -77,6 +84,37 @@ if pathlib.Path("/usr/bin/node").exists():
     shutil.rmtree(home, ignore_errors=True)
 else:
     print("  skip: npm-layout case (/usr/bin/node absent; native cases above still ran)")
+
+# 7. pins must move when ANY pinned byte moves: entry-file hash and whole-tree hash (the npm
+#    package DIRECTORY is what gets mounted — round-2 review: entry-only hashing left the
+#    vendor binaries inside the mount unpinned)
+home = pathlib.Path(tempfile.mkdtemp())
+pkg = home / "pkg"; (pkg / "vendor").mkdir(parents=True)
+(pkg / "bin").mkdir(); (pkg / "bin/codex.js").write_text("// entry\n")
+(pkg / "vendor/codex-native").write_bytes(ELF)
+f1, t1 = d.runtime_fingerprint(pkg / "bin/codex.js"), d._tree_fingerprint(pkg)
+(pkg / "vendor/codex-native").write_bytes(ELF + b"tampered")
+f2, t2 = d.runtime_fingerprint(pkg / "bin/codex.js"), d._tree_fingerprint(pkg)
+if f1 != f2:
+    fails.append("entry hash moved though the entry file did not change")
+elif t1 == t2:
+    fails.append("tree hash did NOT move when a vendor binary inside the mount changed")
+else:
+    print("  ok: tree fingerprint catches vendor-binary tampering the entry hash misses")
+(pkg / "bin/codex.js").write_text("// tampered entry\n")
+if d.runtime_fingerprint(pkg / "bin/codex.js") == f1:
+    fails.append("entry hash did not move on entry change")
+else:
+    print("  ok: entry fingerprint moves on entry change")
+# pin_runtime_sources covers every bind source plus the host interpreter
+if pathlib.Path("/usr/bin/node").exists():
+    pins = d.pin_runtime_sources(["/usr/bin/node", "/opt/codex/bin/codex.js"],
+                                 [(str(pkg), "/opt/codex")])
+    if "/usr/bin/node" not in pins or str(pkg) not in pins:
+        fails.append(f"pin_runtime_sources missed a source: {sorted(pins)}")
+    else:
+        print("  ok: host interpreter pinned alongside bind sources")
+shutil.rmtree(home, ignore_errors=True)
 
 for f in fails:
     print(f"  FAIL {f}")
