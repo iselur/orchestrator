@@ -33,8 +33,11 @@ merges.
   --sandbox read-only --skip-git-repo-check - <prompt.txt` — prompt on stdin always (argv dies
   over 130KB). Web search: `-c tools.web_search=true`. The priority tier is a speed setting only.
 - Consultations run detached (background or `systemd-run --user`) and may legitimately take hours —
-  never a minute-scale timeout. The Codex sandbox cannot read the repo on this host: inline the
-  context. The final answer is recoverable from the `--json` stream (last `agent_message`).
+  never a minute-scale timeout. Codex runs commands and reads the repo itself (its sandbox needs
+  the `bwrap-userns-restrict` AppArmor profile loaded — without it every run dies at
+  `bwrap: loopback: Failed RTM_NEWADDR`; proof: `tests/worker_userns.sh`). Inlining context is a
+  choice now, not a requirement — the bound reviewer still gets spec + diff + evidence only, never
+  a live checkout. The final answer is recoverable from the `--json` stream (last `agent_message`).
 - Adversarial reviews of **Claude-authored** work go through `scripts/review` (its reviewer is
   Codex; it requires `--author` and refuses Codex-authored artifacts, counts rounds per topic, and
   refuses a third round). Codex-authored work is reviewed by Claude — worker diffs by the bound

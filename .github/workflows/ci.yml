@@ -42,5 +42,5 @@ jobs:
       - name: Run tests (strict — a skip is a failure unless declared box-only)
         env:
           ORCH_TEST_STRICT: '1'
-          ORCH_TEST_STRICT_ALLOW_SKIP: 'tests/worker_isolation.sh'
+          ORCH_TEST_STRICT_ALLOW_SKIP: 'tests/worker_isolation.sh tests/worker_userns.sh'
         run: ./scripts/test
