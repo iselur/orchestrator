@@ -34,22 +34,52 @@ so we don't reinvent what four teams already converged on.
 
 6. **Budget in dollars, not steps** — and SWE-agent's data says raising the cap is the wrong reflex:
    **93% of successes finished well under budget. Failure is not a budget problem.**
+   Note: **Claude Agent SDK's `maxTurns` and `maxBudgetUsd` both default to NO LIMIT.** You must set
+   them. (Corroborated by all three passes.)
 
-## RELIABILITY WARNING (added after a second independent research pass)
+7. **HOLD THE GRADER OUT OF THE AGENT'S REACH.** Every reward-hacking result in the failure
+   literature reduces to the agent being able to touch the thing that scores it.
+   **We shipped this on 2026-07-14 (T1):** `required_tests()` reads the required set from the
+   ORCHESTRATOR's checkout, never the worktree — a candidate cannot shrink its own required set by
+   deleting test files, and worker prose in `test.log` is never parsed as a verdict. Keep it that way.
 
-Two independent passes over the same repos **disagreed**. Pass 1 supplied file paths, line numbers,
-and verbatim snippets; Pass 2 explicitly could not verify several of them. Plausible-looking line
-numbers are exactly what a confabulating extraction produces — so **anything marked SINGLE-SOURCE
-below is a lead to verify, not a fact to build on.** (This is the T1 discipline applied to our own
-research: a claim that did not get checked has not been verified.)
+8. **Tiered context management: clear tool outputs BEFORE you summarize.** Claude Code does exactly
+   this (*"clears older tool outputs first, then summarizes if needed"*) plus a thrashing guard that
+   stops auto-compacting rather than looping. The Anthropic API exposes both tiers directly
+   (`clear_tool_uses` at 100k input tokens keeping the last 3 tool pairs; `compaction` at 150k).
+   A single summarize-everything `/compact` step is the naive design.
+   **Billing trap:** compaction tokens are billed but excluded from top-level `input_tokens` — sum
+   `usage.iterations` or cost accounting silently under-reports.
 
-**DO NOT CITE without opening the file yourself:** Codex's "90% hardcoded compaction ceiling";
-Codex Linux sandbox = bubblewrap vs Landlock (passes conflict); `with_escalated_permissions` being
-removed (Pass 2 found it live); `.git`/`.codex` read-only carve-outs; OpenHands having moved from
-code-as-action to native function calling; SWE-agent's exact "Review Heavy" config ($6 / 10 attempts
-/ o1 chooser — the *structure* is confirmed, the *numbers* are not); Codex `project_doc_max_bytes`
-= 32 KiB. OpenHands condenser defaults produced **three different numbers across three passes** —
-version-dependent; read the pinned version.
+## RELIABILITY: three passes ran; pass 1 was confabulating. REJECTED CLAIMS BELOW.
+
+Three independent research passes over the same primary sources. Pass 1 supplied file paths, line
+numbers and verbatim code snippets; passes 2 and 3 independently **could not verify** them and
+contradicted several. A lone source producing suspiciously precise line numbers, contradicted twice,
+is confabulating — not uniquely well-informed.
+
+**This is the T1 failure in our own research** (certifying evidence nobody checked), caught by the
+same method that catches it in code: an independent second opinion that is not shown the first.
+
+**REJECTED — do not cite, do not build on:**
+- Codex "auto-compacts at 90% of context, hardcoded ceiling" — the official reference says
+  `model_auto_compact_token_limit` is *"unset uses model defaults"*. **No published number.**
+- Codex Linux sandbox = bubblewrap — it is **Landlock + seccomp** (2 passes, official security docs).
+- `with_escalated_permissions` removed — **it is live** and is the mechanism behind the `on-failure`
+  approval policy.
+- `.git`/`.codex` read-only carve-outs inside writable roots — unverified, single-source.
+- OpenHands moved from code-as-action to native function calling — unverified, single-source.
+- The Claude Code "auto-compact at ~95% / `effectiveWindow − 13,000`" formula circulating in blog
+  posts — **third-party reverse-engineering, not in official docs**. The default is model-dependent.
+
+**STILL UNVERIFIED (leads, not facts):** the OpenHands stuck-detector thresholds; its critic numbers;
+SWE-agent's exact "Review Heavy" config values (the *structure* is confirmed by all three passes).
+OpenHands condenser defaults produced **three different numbers across three passes** — version-
+dependent by nature.
+
+**UPGRADED:** Codex `project_doc_max_bytes` = 32 KiB is now well-supported — and comes with a live
+footgun worth knowing: **Codex silently stops adding AGENTS.md files once the combined size hits the
+cap, with no warning** (openai/codex#7138).
 
 ## The single biggest gap in OUR design: a STUCK DETECTOR  [SINGLE-SOURCE — VERIFY FIRST]
 
