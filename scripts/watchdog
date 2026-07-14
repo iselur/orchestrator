@@ -103,13 +103,18 @@ launch_new() {
   halted && return 0
   local sid; sid=$(uuidgen)
   valid_uuid "$sid" || { note "uuidgen produced garbage; refusing to launch"; return 1; }
+  # uuidgen ran an EXTERNAL command, so a HALT created meanwhile is a real, testable window —
+  # re-check before the first mutation (round-2 review: this barrier must be deterministic).
+  halted && return 0
+  # The id is recorded BEFORE the session exists: if creation fails, the next tick simply mints a
+  # fresh id; but a session may never exist without its recovery id already on disk.
+  bump_generation
+  put "$WD/session-id" "$sid"
+  put "$WD/respawns" 0
   # Failed actions are RETRIED next tick and never count as a run: a run that did not happen must
   # not refresh last-run, or a persistently broken launch would suppress the idle alert forever.
   tmux new-session -d -s "$SESSION" -c "$ROOT" -x 220 -y 50 \
     || { note "new-session failed; will retry next tick"; return 1; }
-  bump_generation
-  put "$WD/session-id" "$sid"
-  put "$WD/respawns" 0
   tmux pipe-pane -o -t "$SESSION" "cat >> '$WD/transcript.log'" \
     || note "pipe-pane failed; usage classifier is blind this generation"
   halted && return 0
@@ -124,42 +129,31 @@ launch_new() {
 
 respawn() {
   halted && return 0
-  if [ -e "$WD/session-id" ]; then
-    local sid; sid=$(get "$WD/session-id")
-    if ! valid_uuid "${sid:-}"; then
-      # A recorded id that went bad is NOT a license to guess: --continue could resume the
-      # owner's newer conversation with permissions skipped. Fail visibly and stay down.
-      alert_raise corrupt-session-id "recorded session id is corrupt; refusing to relaunch until it is repaired or removed"
-      return 1
-    fi
-    # A respawn storm (claude dying instantly every tick) refreshes last-run each time and would
-    # otherwise never alert; count consecutive respawns and say so.
-    local n; n=$(get "$WD/respawns"); n=$(( ${n:-0} + 1 )); put "$WD/respawns" "$n"
-    if [ "$n" -gt 6 ]; then
-      alert_raise respawn-loop "claude has been relaunched $n consecutive times without recorded activity"
-    fi
-    bump_generation
-    halted && return 0
-    if tmux send-keys -t "$SESSION" \
-         "claude --resume $sid --dangerously-skip-permissions \"\$(cat $PROMPT_REL)\"" Enter; then
-      record_run
-      note "claude exited; resumed conversation $sid"
-    else
-      note "send-keys failed on respawn; will retry next tick"
-    fi
+  # The launcher chose the conversation id itself and wrote it before the session existed, so a
+  # session with no valid recorded id can only mean foreign session or wiped state. There is NO
+  # legitimate "never recorded" case, therefore there is NO --continue in this program: guessing
+  # the most recent conversation under --dangerously-skip-permissions could resume the owner's.
+  local sid; sid=$(get "$WD/session-id")
+  if ! valid_uuid "${sid:-}"; then
+    alert_raise corrupt-session-id "session exists without a valid recorded id (foreign session or wiped state); refusing to relaunch"
+    return 1
+  fi
+  # A respawn storm (claude dying instantly every tick) refreshes last-run each time and would
+  # otherwise never alert; count consecutive respawns and say so.
+  local n; n=$(get "$WD/respawns"); n=$(( ${n:-0} + 1 ))
+  halted && return 0
+  put "$WD/respawns" "$n"
+  if [ "$n" -gt 6 ]; then
+    alert_raise respawn-loop "claude has been relaunched $n consecutive times without recorded activity"
+  fi
+  bump_generation
+  halted && return 0
+  if tmux send-keys -t "$SESSION" \
+       "claude --resume $sid --dangerously-skip-permissions \"\$(cat $PROMPT_REL)\"" Enter; then
+    record_run
+    note "claude exited; resumed conversation $sid"
   else
-    # No id was EVER recorded for this session (the one legitimate --continue case) — and it
-    # still alerts BEFORE launching, because it cannot prove conversation selection.
-    alert_raise fallback-continue "relaunch used --continue: no session id was ever recorded"
-    bump_generation
-    halted && return 0
-    if tmux send-keys -t "$SESSION" \
-         "claude --continue --dangerously-skip-permissions \"\$(cat $PROMPT_REL)\"" Enter; then
-      record_run
-      note "claude exited; NO recorded id — fell back to --continue (alert raised)"
-    else
-      note "send-keys failed on fallback; will retry next tick"
-    fi
+    note "send-keys failed on respawn; will retry next tick"
   fi
 }
 
@@ -242,7 +236,7 @@ scan_usage() {
     [ -n "$epoch" ] || continue
     local t; t=$(now)
     if [[ "$epoch" =~ ^[0-9]{9,11}$ ]] && [ "$epoch" -gt $((t - 86400)) ] && [ "$epoch" -lt $((t + 604800)) ]; then
-      put "$WD/usage-wait" "$epoch $gen $(basename "$fx")"
+      put "$WD/usage-wait" "$epoch $gen $(basename "$fx") $((off + 1)):$size"
       note "recognized usage limit (framing $(basename "$fx")); waiting until epoch $epoch"
     else
       # Matched framing but a nonsense deadline: fail closed for the retry only.
@@ -313,6 +307,7 @@ check() {
   IDLE_ALERT_SECONDS="${IDLE_ALERT_SECONDS:-21600}"
   USAGE_RETRY_MODE="${USAGE_RETRY_MODE:-observe}"
 
+  halted && exit 0                  # immediately before opening the lock (round-2 review)
   exec 9>>"$WD/lock"
   flock -n 9 || exit 0              # single flight: an overlapping check is a successful no-op
   halted && exit 0

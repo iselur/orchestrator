@@ -78,6 +78,9 @@ FAKE
 
 cat > "$F/uuidgen" <<'FAKE'
 #!/usr/bin/env bash
+# FAKE_UUID_MAKE_HALT: deterministic HALT-injection hook — uuidgen is the external command the
+# watchdog runs between its entry guard and its first mutation (round-2 review, critical 2).
+[ -n "${FAKE_UUID_MAKE_HALT:-}" ] && touch "$FAKE_UUID_MAKE_HALT"
 n=$(cat "$FAKE_UUID_COUNT" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$FAKE_UUID_COUNT"
 printf '00000000-0000-4000-8000-%012d\n' "$n"
 FAKE
@@ -163,14 +166,16 @@ run_wd
 [ "$(keys | wc -l)" = "$n_before" ] && ok "corrupt id: nothing relaunched" || bad "corrupt id still launched something"
 [ -e "$WDIR/ALERT-corrupt-session-id" ] && ok "corrupt id raised its own alert" || bad "corrupt id failed silently"
 
-echo "== W4b (b): id NEVER recorded -> --continue fallback, alerted, exactly once per tick"
+echo "== W4b (b): LOST id (recorded, then wiped) -> same visible refusal; --continue does not exist"
 reset; open_row
 run_wd
-rm -f "$WDIR/session-id"
+rm -f "$WDIR/session-id"                       # the launcher ALWAYS records an id, so absence = lost or foreign
 dead_pane
+n_before=$(keys | wc -l)
 run_wd
-[ "$(grep -c -- '--continue' <(keys))" = "1" ] && ok "fell back to --continue exactly once" || bad "fallback count wrong"
-[ -e "$WDIR/ALERT-fallback-continue" ] && ok "fallback raised an alert incident" || bad "silent fallback"
+[ "$(keys | wc -l)" = "$n_before" ] && ok "lost id: nothing relaunched" || bad "lost id still launched something"
+[ -e "$WDIR/ALERT-corrupt-session-id" ] && ok "lost id raised the visible alert" || bad "lost id failed silently"
+grep -q -- 'claude --continue' "$R/scripts/watchdog" && bad "a claude --continue invocation still exists in the watchdog" || ok "no claude --continue invocation anywhere in the program"
 
 echo "== W5 (c): approved framing arms a wait; no input before the deadline; observe mode after it"
 reset; open_row
@@ -180,8 +185,9 @@ future=$(( $(date +%s) + 3600 ))
 printf 'DRILL-LIMIT-RESET-EPOCH %s\n' "$future" >> "$WDIR/transcript.log"
 n_before=$(keys | wc -l)
 run_wd
-read -r wait_epoch wait_gen wait_fr < "$WDIR/usage-wait" 2>/dev/null || wait_epoch=""
-[ "$wait_epoch" = "$future" ] && [ "$wait_fr" = "drill.sed" ] && ok "wait recorded with epoch and framing identity" || bad "usage-wait missing/wrong"
+read -r wait_epoch wait_gen wait_fr wait_range < "$WDIR/usage-wait" 2>/dev/null || wait_epoch=""
+[ "$wait_epoch" = "$future" ] && [ "$wait_fr" = "drill.sed" ] && [ -n "${wait_range:-}" ] \
+  && ok "wait recorded with epoch, framing identity, and transcript range" || bad "usage-wait missing/wrong"
 [ "$(keys | wc -l)" = "$n_before" ] && ok "no input sent before the deadline" || bad "input sent during the wait"
 echo "$(( $(date +%s) - 60 )) $wait_gen drill.sed" > "$WDIR/usage-wait"
 run_wd
@@ -317,12 +323,12 @@ echo "== W11b: undelivered non-idle incidents are swept for delivery on later ti
 reset; open_row
 run_wd
 alert_env
-rm -f "$WDIR/session-id"; dead_pane
+echo "not-a-uuid" > "$WDIR/session-id"; dead_pane
 export FAKE_CURL_EXIT=22
-run_wd                                            # fallback-continue raised; delivery fails
+run_wd                                            # corrupt-session-id raised; delivery fails
 unset FAKE_CURL_EXIT
-run_wd                                            # pane is live now; only the sweep can deliver
-grep -q '^sent=' "$WDIR/ALERT-fallback-continue" && ok "sweep delivered the stranded incident" || bad "stranded incident never delivered"
+run_wd                                            # refusal repeats, but only the sweep delivers
+grep -q '^sent=' "$WDIR/ALERT-corrupt-session-id" && ok "sweep delivered the stranded incident" || bad "stranded incident never delivered"
 
 echo "== W12 (e): HALT is a strict no-op — nothing created, nothing sent, no alert"
 reset; open_row
@@ -333,6 +339,15 @@ run_wd
 [ ! -e "$FAKE_CURL_LOG" ] && ok "HALT: no alert delivery" || bad "HALT sent an alert"
 run_wd heartbeat
 [ ! -e "$WDIR/activity" ] && ok "HALT: heartbeat refused" || bad "HALT: heartbeat wrote"
+
+echo "== W12b (e): HALT injected DURING the launch (via the uuidgen hook) -> no session, no state"
+reset; open_row
+export FAKE_UUID_MAKE_HALT="$R/.orchestrator/HALT"
+run_wd
+unset FAKE_UUID_MAKE_HALT
+[ "$(invoked new-session)" = "0" ] && ok "mid-launch HALT: no session created" || bad "mid-launch HALT still created a session"
+[ ! -e "$WDIR/session-id" ] && [ ! -e "$WDIR/generation" ] && ok "mid-launch HALT: no state mutated" || bad "mid-launch HALT mutated state"
+[ -z "$(keys)" ] && ok "mid-launch HALT: nothing typed anywhere" || bad "mid-launch HALT sent keys"
 
 echo "== W13: INDETERMINATE ledger -> alert, and NOTHING is launched or prompted"
 reset
