@@ -1,0 +1,625 @@
+OpenAI Codex v0.144.3
+--------
+workdir: /home/val/orchestrator
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 019f5f4b-b01a-7192-9e37-8bc7719d3ed2
+--------
+user
+You are an adversarial design reviewer for a trust-critical change to a dispatch orchestrator. You have
+NOT seen any prior conversation about this work — judge only what is in front of you. The repository is
+readable at your working directory (read-only sandbox); verify claims against the actual code in
+scripts/dispatch.py and tests/ where you can.
+
+DECISION UNDER REVIEW (Critical tier — trust/security boundary): close the "isolation fail-open" in
+scripts/dispatch.py. Today, when D5 isolation (codex-worker UID + systemd hardening) is unavailable,
+the dispatcher silently falls back to running the untrusted worker AND the test/regression phases as
+the operator, with inherited environment and network. The attached draft plan (drafted by a separate
+Codex session) proposes a fail-closed preflight + hardened same-user TEST launcher. The attached
+challenge (written by the orchestrating Claude, with live host evidence) proposes amendments, notably:
+use `unshare --user --net` WITHOUT --map-current-user (Ubuntu 24.04 AppArmor denies unprivileged
+uid_map writes; verified on this host), route run_regression_gate's same-user branch through the same
+hardened launcher, and fold the "non-vacuous isolation drills" audit action (dynamic operator home,
+positive canary secrets in tests/worker_isolation.sh) into this plan's scope.
+
+YOUR TASK — adversarial review of the AMENDED design (draft + challenge amendments together):
+1. Attack the credential-assessment design: enumerate bypasses (credential forms it misses, TOCTOU,
+   $HOME vs passwd-home games, symlink/permission tricks) and say which matter given the stated threat
+   model (worker-authored code running in the TEST phase; operator credentials on disk).
+2. Attack the execution-mode state machine: any path where a launch, retry, remediation, regression, or
+   review step can still execute worker code outside the selected mode? Any downgrade-after-selection
+   hole the amended plan leaves open?
+3. Attack the network proof: is an UNMAPPED user+net namespace (uid 65534, only a DOWN loopback)
+   sufficient to prevent exfiltration by the test phase? What still crosses it (abstract vs pathname
+   unix sockets, already-open fds, /proc, dbus)? Is the capability-probe design (mapped-first,
+   unmapped-fallback, representative git+write probe, refuse when userns unavailable) sound, or does
+   the fallback ladder itself create a weaker-mode hole?
+4. Attack the validation: which of the plan's 15 automated cases + canary acceptance test could pass
+   VACUOUSLY (test theater)? Does asserting the refusal branch on userns-restricted hosts (instead of
+   SKIP) actually keep the suite honest, or does it let a misconfigured box masquerade as tested?
+5. The scope amendment (folding the worker_isolation.sh non-vacuous-drills work in): does it bloat a
+   trust-critical change past reviewability, or is splitting it the greater risk?
+6. State the strongest counterargument to shipping the amended plan at all, and address it.
+
+VERDICT CONTRACT (mandatory): end with a line `VERDICT: PASS` or `VERDICT: BLOCK`, preceded by a
+numbered list of findings, each labeled BLOCKING / CONDITION / ADVISORY. PASS may carry CONDITIONs
+(must-fix-before-merge items that do not invalidate the design). BLOCK means the design must change
+before implementation. Address the strongest counterargument explicitly, questionable assumptions,
+failure modes, and validation gaps. Do not soften: a wrong PASS here exposes operator credentials to
+worker-authored code.
+
+=== ATTACHMENT 1: draft plan (.orchestrator/plans/drafts/isolation-failopen/PLAN-001.md) ===
+---
+id: PLAN-001
+created: 2026-07-13T22:29:20Z
+author_model: gpt-5.6-sol
+status: draft
+task: "Close the isolation fail-open: preflight must REFUSE launch when isolation_available() is false AND operator credentials exist (unless ORCH_ALLOW_UNISOLATED=1); and the same-user fallback TEST phase m"
+---
+# Close the isolation fail-open
+
+## Decision
+
+Treat execution isolation as a preflight policy decision, not a best-effort launch optimization.
+
+`dispatch` must select one immutable execution mode before creating an attempt, branch, worktree, or Codex process:
+
+| `isolation_available()` | Operator credentials | `ORCH_ALLOW_UNISOLATED` | Result |
+|---|---:|---:|---|
+| true | any | any | Use the existing `codex-worker`/systemd isolation path. |
+| false | present or indeterminate | exactly `1` | Permit the same-user worker with a prominent warning; always run its TEST phase with a scrubbed environment and private network namespace. |
+| false | present or indeterminate | unset or any value other than `1` | Refuse before launch with a nonzero exit. |
+| false | absent | any | Permit the same-user worker with a warning; always sandbox its TEST phase as above. |
+
+Additional decisions:
+
+- `ORCH_ALLOW_UNISOLATED=1` overrides only the credential-based worker refusal. It must not disable TEST environment scrubbing or network isolation.
+- A failure after selecting the isolated path must fail the attempt; it must never trigger a runtime downgrade to the same-user path.
+- Any same-user path must first prove that its TEST network namespace can be created. If that proof fails, refuse before launching the worker.
+- Only the literal string `1` activates the override. Values such as `true`, `yes`, or `01` do not.
+- Credential-probe errors are indeterminate and therefore treated as credentials present.
+- No secret values may appear in diagnostics or evidence.
+
+## Goals
+
+- Prevent a missing, broken, or sudo-denied D5 setup from silently exposing operator credentials to worker-authored code.
+- Preserve the explicitly approved same-user escape hatch.
+- Ensure every same-user TEST process receives a minimal, deterministic environment and cannot directly access the host IP network.
+- Make downgrade, override, credential-detection, and sandbox failures observable and testable.
+- Preserve the existing isolated worker and isolated TEST behavior.
+
+## Non-goals
+
+- Replacing or redesigning the `codex-worker` UID, systemd services, ACLs, worktree location, or `scripts/setup-worker-user.sh`.
+- Restricting the worker’s network access; Codex still requires network access.
+- Providing complete filesystem isolation for the same-user TEST fallback. The test can still address operator-readable paths by absolute pathname.
+- Eliminating all local IPC routes such as pathname Unix sockets. The new boundary guarantees an isolated IP network namespace and closed inherited descriptors, not full host containment.
+- Solving the separate CI-skip, hard-coded operator-home, sudoers, resource-limit, approval, evidence-integrity, or merge-authority findings.
+- Changing spec schema, branch policy, review policy, test commands, or gate ordering.
+- Making `ORCH_ALLOW_UNISOLATED=1` a persistent configuration or normal operating mode.
+- Adding a Python package dependency; the fallback may depend on the host’s trusted `util-linux` `unshare` executable.
+
+## Current-state evidence and assumptions
+
+The implementation is based on the following repository-specific evidence:
+
+- `.orchestrator/decisions/SELF-REFLECT-2026-07/06-reconciled-findings.md` records independent SOL and Claude convergence that `isolation_available() == false` currently falls back to running worker and TEST as the operator.
+- The same finding records that the fallback TEST inherits an unscrubbed environment and retains network access.
+- `AGENTS.md` defines the intended D5 boundary: worker and gate TEST run as `codex-worker` in hardened systemd services, with worktrees under `/srv/codexwork/worktrees`, while the operator’s home and credentials remain inaccessible.
+- The required falsifiable outcome is specifically that a sudo-denied launch with operator credentials refuses rather than running as the operator.
+- The repository test entry point is `./scripts/test`, which discovers `tests/*.sh`; the new regression must run without requiring working sudo or D5 and must never convert failure into SKIP.
+- The authoritative implementation is expected in `scripts/dispatch.py`, with existing isolation coverage in `tests/worker_isolation.sh`.
+
+Before editing, the implementer must verify at HEAD:
+
+1. Every call to `isolation_available()`.
+2. Every worker-launch entry point, including retries and remediation.
+3. Every location that can select a same-user fallback after an isolated launch failure.
+4. The isolated and fallback TEST launch call sites.
+5. The point at which attempts, branches, worktrees, and evidence directories are created.
+
+If HEAD no longer matches the audited fail-open control flow, stop the spec as stale rather than applying a partial fix.
+
+## Affected trust boundaries and interfaces
+
+### Operator-to-worker boundary
+
+`scripts/dispatch.py` becomes responsible for proving one of:
+
+- D5 isolation is available; or
+- same-user execution is allowed because no configured credential indicator was found; or
+- the operator deliberately supplied the exact break-glass override.
+
+The decision must occur before untrusted worker code can execute.
+
+### Worker-to-TEST boundary
+
+Worker-authored repository code is untrusted during TEST. On the same-user path, TEST must execute through one dedicated launcher that:
+
+- starts from an empty environment;
+- uses a temporary HOME and XDG directories;
+- enters a new user and network namespace;
+- closes all unrelated inherited file descriptors;
+- invokes a non-interactive shell without profile files;
+- never retries outside the namespace.
+
+### Public operator interface
+
+`ORCH_ALLOW_UNISOLATED=1` is the sole new/confirmed break-glass interface. Document it in `CLAUDE.md` as invocation-scoped, security-sensitive, and ineffective at bypassing TEST hardening.
+
+Refusal diagnostics must state:
+
+- isolation is unavailable;
+- credential indicators were found or could not be safely assessed;
+- no worker was launched;
+- D5 setup should be restored with `scripts/setup-worker-user.sh`;
+- `ORCH_ALLOW_UNISOLATED=1` is the explicit emergency override.
+
+### Internal interfaces in `scripts/dispatch.py`
+
+Keep the implementation centralized in `scripts/dispatch.py` rather than adding a second launcher module. Introduce testable top-level units equivalent to:
+
+- `assess_operator_credentials() -> CredentialAssessment`
+- `fallback_test_isolation_available() -> bool`
+- `select_execution_mode() -> ExecutionDecision`
+- `run_same_user_test(...)`
+
+`ExecutionDecision` must distinguish `ISOLATED` from `SAME_USER` and retain whether an override was activated and the non-secret credential indicator categories used in the decision.
+
+## Detailed design
+
+### Credential assessment
+
+Resolve the operator’s authoritative home from `pwd.getpwuid(os.geteuid()).pw_dir`; do not trust `$HOME` alone. Also inspect `$HOME` when it resolves to a different location and any explicitly configured credential roots such as `CODEX_HOME` or `GH_CONFIG_DIR`.
+
+Classify credentials as present when any of the following exists:
+
+- A nonempty environment variable whose name contains a credential term such as `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `API_KEY`, `PRIVATE_KEY`, or `CREDENTIAL`.
+- A nonempty credential-capable pointer or agent variable, including `SSH_AUTH_SOCK`, `GPG_AGENT_INFO`, `DBUS_SESSION_BUS_ADDRESS`, `AWS_SHARED_CREDENTIALS_FILE`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `GOOGLE_APPLICATION_CREDENTIALS`, `KUBECONFIG`, `DOCKER_CONFIG`, `CODEX_HOME`, or `GH_CONFIG_DIR`, when applicable.
+- A known credential artifact, including:
+  - `.codex/auth.json`
+  - `.config/gh/hosts.yml`
+  - `.git-credentials`
+  - `.netrc`
+  - `.aws/credentials`
+  - `.config/gcloud/application_default_credentials.json`
+  - `.azure/accessTokens.json`
+  - `.docker/config.json`
+  - `.kube/config`
+  - `.npmrc`
+  - `.pypirc`
+  - non-public-key material under `.ssh`
+  - entries under `.gnupg/private-keys-v1.d`, `.local/share/keyrings`, or `.password-store`
+- A known credential path that is a symlink, even if broken.
+- A stat, enumeration, ownership, or permission error that prevents a conclusive result.
+
+Centralize these probes in one constant registry. Tests must cover each category. Probe metadata only; never open or log credential contents. Diagnostics may report safe indicators such as `env:OPENAI_API_KEY` or `file:.codex/auth.json`.
+
+This predicate is intentionally conservative. A false positive requires D5 or the explicit override; a false negative may expose unknown credential forms and is therefore the more serious error.
+
+### Execution-mode selection
+
+Perform preflight after parsing and validating the requested spec but before mutable attempt setup.
+
+1. Call `isolation_available()` once for mode selection.
+2. If true, return `ISOLATED`; ignore the override because it was not needed.
+3. If false, assess credentials.
+4. If credentials are present or indeterminate and the override is not exactly `1`, raise a dedicated preflight error.
+5. Prove that the same-user TEST namespace can be established.
+6. If that proof fails, raise a preflight error regardless of override.
+7. Return `SAME_USER`, retaining whether the override was used.
+8. Recheck the credential assessment immediately before a same-user worker subprocess is created. Abort if the result became unsafe and the snapshotted override was not active.
+9. Once `ISOLATED` was selected, any systemd launch error is terminal for that attempt. Remove every catch block or fallback branch that could downgrade it.
+
+All launch paths, including retry or remediation paths, must consume this decision rather than independently calling `isolation_available()`.
+
+### Same-user TEST environment
+
+Build the TEST environment from an empty mapping. Do not copy `os.environ` and delete known secrets.
+
+Set only:
+
+- A fixed system `PATH`, such as `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`.
+- `HOME` pointing to a new mode-0700 temporary directory.
+- `TMPDIR`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, and `GNUPGHOME` pointing to private empty subdirectories.
+- `LANG=C.UTF-8`, `LC_ALL=C.UTF-8`, `TZ=UTC`, and `CI=1`.
+- `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1`.
+
+Do not propagate `ORCH_ALLOW_UNISOLATED`, cloud variables, proxy variables, shell startup variables, language startup hooks, dynamic-loader variables, agent sockets, GitHub variables, or any arbitrary spec-provided environment.
+
+Invoke the test through absolute trusted executables and `/bin/bash --noprofile --norc -c <test_command>`. Use the worktree as `cwd`, stdin from `/dev/null`, captured stdout/stderr, `close_fds=True`, and `umask 077`. Remove temporary directories in `finally`, including interrupt paths.
+
+### Same-user TEST network isolation
+
+Use the trusted system `unshare` executable from `/usr/bin/unshare` or `/bin/unshare`, rejecting a candidate that is not root-owned or is group/world-writable.
+
+The effective command shape is:
+
+```text
+env -i <allowlisted assignments>
+unshare --user --map-current-user --net --fork
+/bin/bash --noprofile --norc -c <test_command>
+```
+
+The new network namespace contains no host interfaces or routes. Loopback may remain down; tests must not depend on it.
+
+Before launching the worker in same-user mode, run a short, scrubbed `unshare ... /bin/true` capability probe. The real TEST invocation must still use `unshare`; the probe is not a substitute. If the real namespace setup fails, record a TEST infrastructure failure and do not retry the command directly.
+
+Do not implement network denial with proxy-variable removal, DNS changes, firewall mutations, or an internet reachability probe. Those approaches are either bypassable, host-global, privilege-dependent, or nondeterministic.
+
+### Diagnostics and evidence
+
+For a refusal before attempt creation, emit a concise stderr diagnostic and return a distinct nonzero preflight status. Do not create a branch, worktree, attempt directory, or raw worker log merely to record the refusal.
+
+For launched attempts, include non-secret execution metadata in the existing launch/attempt evidence:
+
+- `execution_mode`: `isolated` or `same_user`
+- `isolation_available`: boolean
+- `unisolated_override_used`: boolean
+- `credential_assessment`: `absent`, `present`, or `indeterminate`
+- credential indicator names/categories, never values
+- `fallback_test_network_isolation`: `not_applicable` or `unshare-netns`
+
+If adding these fields would violate a currently validated evidence schema, update that schema in the same spec rather than silently omitting or overloading an existing field.
+
+## Alternatives considered
+
+- **Always refuse unisolated execution:** Stronger and simpler, but rejects the task’s deliberate allowance for credential-free environments and the explicit operator override.
+- **Retain automatic fallback with a warning:** Rejected because warnings do not protect credentials and preserve the audited fail-open.
+- **Make the override accept general truthy values:** Rejected because ambiguous parsing makes accidental activation more likely.
+- **Scrub only known secret variables:** Rejected because new credentials and language/runtime injection variables would remain inherited. An empty environment plus allowlist is auditable.
+- **Remove proxy variables without a network namespace:** Rejected because code can open sockets directly.
+- **Use host firewall or iptables changes:** Rejected because they require elevated, host-global state and introduce cleanup and concurrency hazards.
+- **Use an external internet endpoint as the network test:** Rejected because an offline endpoint produces a vacuous pass.
+- **Fall back again when `unshare` is unavailable:** Rejected because that recreates the same fail-open in the TEST phase.
+- **Downgrade after a systemd launch race or failure:** Rejected because preflight success does not authorize a later, weaker execution mode.
+- **Move all launch logic into a new module:** Rejected for this bounded fix; central helpers in `scripts/dispatch.py` minimize scope while remaining testable.
+
+## Failure modes and required behavior
+
+| Failure mode | Required behavior |
+|---|---|
+| `sudo -n` denied, systemd missing, worker user absent, or another D5 prerequisite fails | `isolation_available()` is false; apply the decision table. |
+| Credential probe cannot stat a path | Treat as indeterminate/present and refuse unless override is exactly `1`. |
+| Override is misspelled or set to a truthy-looking value | Refuse; print the exact accepted form. |
+| `unshare` is absent, untrusted, or denied by kernel policy | Refuse before worker launch, even with the override. |
+| Isolated systemd launch fails after successful preflight | Fail the attempt; never execute as the operator. |
+| Namespace creation fails during TEST | Fail TEST as infrastructure failure; never retry unsandboxed. |
+| Test command exits nonzero inside the namespace | Preserve existing deterministic TEST-gate failure semantics. |
+| Test attempts to read inherited token/proxy/agent variables | Variables are absent. |
+| Test attempts direct IPv4/IPv6 connection or DNS resolution | Connection cannot reach the host or external network namespace. |
+| Test relies on shell profiles or operator Git configuration | Profiles are disabled and global Git configuration is redirected. |
+| Temporary sandbox cleanup fails | Report cleanup failure without changing the test result to success; leave no secret data because only allowlisted values entered the directory. |
+| Credential detector produces a false positive | Operator restores D5 or deliberately uses the one-shot override. |
+| Unknown credential form produces a false negative | Treat as residual risk; extend the centralized probe registry when identified. Do not weaken TEST hardening. |
+
+## Ordered implementation steps
+
+1. **Create a high-assurance spec.** Limit allowed paths to `scripts/dispatch.py`, a new `tests/isolation_fail_closed.sh`, `tests/worker_isolation.sh` only if isolated-path assertions must be extended, and `CLAUDE.md`. Mark the change trust-critical/high-risk under the repository’s existing schema and bind this plan as the implementation reference.
+
+2. **Freeze the current launch call graph.** Record every isolation decision, worker launch, isolated-launch error handler, retry/remediation launch, TEST runner, and first mutable attempt operation. Add a regression assertion for every path that could currently downgrade.
+
+3. **Add the credential assessment.** Implement the typed result and centralized environment/path registry in `scripts/dispatch.py`. Resolve the passwd home independently of `$HOME`, treat probe errors as indeterminate, and expose only safe indicator labels.
+
+4. **Add immutable execution-mode selection.** Implement the decision table, exact override parsing, distinct preflight error, and same-user TEST capability probe. Move it ahead of attempt/branch/worktree creation.
+
+5. **Thread the decision through every launch.** Remove repeated capability choices and runtime downgrade branches. Ensure retries and remediation reuse the original decision. Add the immediate pre-exec credential recheck for same-user workers.
+
+6. **Implement the dedicated same-user TEST launcher.** Construct the allowlisted environment, private temporary directories, trusted command paths, descriptor handling, shell flags, and cleanup. Route only same-user TEST through it; leave the isolated TEST path unchanged.
+
+7. **Enforce the network namespace.** Validate trusted `unshare`, perform the preflight capability probe, and wrap the actual TEST command. Make namespace failure terminal and distinguish it from an ordinary test-command failure where feasible.
+
+8. **Add diagnostics and evidence fields.** Emit actionable refusal/warning messages and record mode/override metadata for launched attempts without secret values. Do not create attempt state for a preflight refusal.
+
+9. **Add non-skipping regressions in `tests/isolation_fail_closed.sh`.** Use temporary homes, repositories, credential canaries, fake subprocess runners, and local loopback listeners. The test must run as an ordinary user without functional sudo or D5.
+
+10. **Preserve isolated-path coverage.** Run or extend `tests/worker_isolation.sh` to prove that available D5 still uses `codex-worker` and that a failed systemd launch cannot downgrade.
+
+11. **Document the break-glass contract in `CLAUDE.md`.** State the exact value, invocation-only use, warning/evidence behavior, residual same-user filesystem risk, and the fact that it cannot bypass TEST scrubbing or network isolation.
+
+12. **Run the high-assurance review lane.** Claude should challenge credential-detection bypasses and vacuous tests; SOL should review the mode state machine, downgrade prevention, and network proof; the human should approve the residual same-user filesystem/IPC risk and exact override semantics before merge.
+
+## Validation and acceptance criteria
+
+### Automated cases
+
+The new regression must prove:
+
+1. Isolation available selects only the isolated path, regardless of credentials or override.
+2. Isolation unavailable plus a credential-bearing environment refuses without override.
+3. Isolation unavailable plus a known credential file refuses without override.
+4. A credential-probe error refuses without override.
+5. Only the literal override value `1` permits the same-user worker.
+6. Credential-free, isolation-unavailable execution may select same-user mode.
+7. Every same-user selection refuses if the network-namespace capability probe fails.
+8. An isolated launch failure never invokes the same-user launcher.
+9. The TEST child sees no parent environment keys beyond the documented allowlist and shell-added non-secret keys.
+10. TEST receives a temporary HOME/XDG tree and no operator Git configuration.
+11. TEST executes in a different network-namespace inode from the dispatcher.
+12. TEST cannot connect to a TCP listener bound on the parent’s `127.0.0.1`; the parent listener must record zero accepted connections.
+13. `unshare` failure never causes the test payload to run directly.
+14. Ordinary nonzero TEST results continue to fail the existing deterministic test gate.
+15. No new test uses SKIP to turn a missing security prerequisite into success.
+
+### Falsifiable acceptance test
+
+On a temporary fixture representing a real dispatch:
+
+1. Plant a canary credential at the operator credential path used by the fixture and export a canary token.
+2. Make the actual isolation probe observe a sudo-denied result.
+3. Replace Codex with a fake executable that creates a launch marker if invoked.
+4. Invoke the real dispatch entry point without `ORCH_ALLOW_UNISOLATED=1`.
+5. Assert all of the following:
+   - dispatch exits nonzero with an isolation/credential refusal;
+   - the fake Codex launch marker does not exist;
+   - no worker subprocess was observed;
+   - no attempt directory, worker branch, or worktree was created;
+   - no credential value appears in output.
+6. Repeat with `ORCH_ALLOW_UNISOLATED=1` and assert that launch reaches the same-user worker path with a security warning and recorded override metadata.
+7. Drive the fallback TEST launcher with a command that verifies the canary token is absent and attempts to connect to a parent-loopback listener. It must complete only when the environment is scrubbed, the network-namespace inode differs, and no parent connection is accepted.
+
+The change fails acceptance if the first invocation launches any worker, if a same-user TEST can observe the canary, if it can connect to the parent listener, or if namespace failure triggers a plain subprocess retry.
+
+### Repository validation
+
+Run:
+
+```text
+python3 -m py_compile scripts/dispatch.py
+./tests/isolation_fail_closed.sh
+./tests/worker_isolation.sh
+./scripts/test
+```
+
+Where the existing isolation drill legitimately requires host setup, its current result may be reported separately; the new fail-closed regression itself must pass without SKIP.
+
+## Rollout
+
+- Merge as one trust-critical change so preflight and TEST hardening cannot land separately.
+- Before the first production dispatch, run a read-only preflight with D5 healthy and confirm `execution_mode=isolated`.
+- Perform the sudo-denied refusal drill before declaring the finding closed.
+- Do not persist `ORCH_ALLOW_UNISOLATED=1` in shell profiles, service environments, `.env` files, or CI configuration.
+- Treat any override use as an operator-visible security event and restore D5 before subsequent routine dispatches.
+
+## Rollback
+
+There is no data migration. Evidence readers must tolerate the new additive execution metadata if present.
+
+If the release breaks the healthy isolated path:
+
+1. Stop new dispatches.
+2. Revert the change only while dispatch remains administratively paused.
+3. Restore and verify D5 isolation.
+4. Reapply a corrected fail-closed implementation before resuming.
+
+Do not restore automatic same-user fallback as an operational rollback. If an urgent dispatch is explicitly authorized while the isolated path is unavailable, use the invocation-scoped `ORCH_ALLOW_UNISOLATED=1` path; TEST scrubbing and network isolation remain mandatory. If those TEST controls are unavailable, the safe rollback state is “dispatcher paused,” not unsandboxed execution.
+
+=== ATTACHMENT 2: Claude challenge (challenge.md) ===
+# Claude challenge — isolation-failopen draft (PLAN-001 in this dir; reserved durable ID: PLAN-005)
+
+Challenger: Claude (orchestrator), 2026-07-14. Draft: `PLAN-001.md` (author gpt-5.6-sol, 2026-07-13).
+Status: CHALLENGED — two blocking objections, one scope amendment, three minor. Authorization deferred
+until the adversarial SOL design review returns and dispositions are recorded.
+
+Current-state evidence re-verified at HEAD (995cc13) before challenging: `isolation_available()`
+dispatch.py:527 (silent fallback); fallback worker dispatch.py:860-869 (runs as operator, network on);
+fallback test phase dispatch.py:946-949 (`run(["bash","-c",test_command])` — full inherited
+`os.environ`, network on, operator UID). The draft's core finding is accurate.
+
+## O1 — BLOCKING: the specified netns mechanism fails on this exact host
+
+The draft mandates `unshare --user --map-current-user --net` (§Same-user TEST network isolation) and
+requires the regression to run "as an ordinary user without functional sudo or D5" with no SKIP
+(validation rule 15). **Verified live on this box (Ubuntu 24.04.4, kernel 6.8.0-111):**
+
+```
+$ unshare --user --map-current-user --net /bin/true
+unshare: write failed /proc/self/uid_map: Operation not permitted   (rc=1)
+$ unshare --user --net /bin/true                                    (rc=0)
+$ unshare --user --net bash -c 'id -u; touch $d/probe; cat /proc/net/dev...'
+uid=65534; write-ok; netns contains only DOWN loopback
+```
+
+Ubuntu 24.04 ships `kernel.apparmor_restrict_unprivileged_userns=1`: writing a uid_map from an
+unprivileged, unconfined process is denied, but **unmapped** user+net namespaces succeed. Consequences
+of the draft as written:
+
+1. The break-glass same-user path (`ORCH_ALLOW_UNISOLATED=1`) would ALWAYS refuse at the capability
+   probe **on the primary host** — the escape hatch the plan explicitly preserves is dead exactly where
+   it would be used (D5 broken on this box).
+2. Validation cases 11–12 (namespace-inode differs; parent-loopback unreachable) would FAIL red here,
+   and rule 15 forbids SKIP — `./scripts/test` goes permanently red on the primary host.
+
+**Required amendment:** use `unshare --user --net` (no uid mapping) as the primary mechanism; the
+capability probe tries mapped first and falls back to unmapped. Because the child runs as overflow uid
+65534, the probe must validate a *representative* workload inside the namespace — at minimum a
+read-only `git -C <repo> status --porcelain` and a file write — not just `/bin/true` (git's dubious-
+ownership check and getpwuid callers behave differently unmapped; DAC still enforces via the real kuid,
+so worktree reads/writes keep working — verified for writes above). Where userns is wholly unavailable,
+the regression must assert the REFUSAL branch (fail-closed observed) rather than skip — no vacuous pass
+either way.
+
+## O2 — BLOCKING: the regression gate runs worker code outside the plan's boundary
+
+`run_regression_gate` (dispatch.py:623-672) executes worker-authored code TWICE (base-overlay and
+candidate runs); its non-isolated branch (line 649) is a plain `run(["bash","-c",cmd])` — inherited
+environment, network on, operator UID. The draft routes "only same-user TEST" through the hardened
+launcher, and none of its 15 validation cases nor the acceptance test mentions the regression gate.
+Step 2 ("freeze the launch call graph … every TEST runner") *implies* it, but an implementer following
+the explicit design section verbatim would leave this exact fail-open in place — the same silent-hole
+class the audit flagged.
+
+**Required amendment:** the same-user regression-gate invocations (both runs) MUST route through the
+same hardened launcher; add an explicit validation case; name `run_regression_gate` in steps 2 and 6.
+
+## O3 — SCOPE AMENDMENT: fold reconciled Action 4 (non-vacuous drills) in, per REQUEST-AUDIT
+
+The REQUEST-AUDIT addendum (baton, PENDING) directs: "Action 4, non-vacuous isolation drills: fold into
+the isolation-failopen work" — dynamic operator-home resolution, positive canary credentials,
+fail-when-probed-file-absent in `tests/worker_isolation.sh` (audit C4: drills currently pass VACUOUSLY
+for any adopter whose home isn't /home/val). The draft's non-goals explicitly exclude this. One of the
+two artifacts must yield. **My disposition: fold it in** — identical files (`tests/worker_isolation.sh`
+is already conditionally in the allowed paths), same review lane, and a separate plan would re-run the
+whole high-assurance ceremony for a test-only increment. Allowed paths change from
+"`tests/worker_isolation.sh` only if isolated-path assertions must be extended" to REQUIRED, with C4's
+acceptance ("drills fail on a box where isolation is misconfigured; no hardcoded /home/val") added.
+
+## O4 — minor: preflight must precede the FIRST durable attempt artifact, named precisely
+
+The draft says refusal must not create "a branch, worktree, attempt directory". At HEAD the attempt
+directory + pinned verdict schema are written (~dispatch.py:701) and `claim_slot` records a durable
+`launching` state row (dispatch.py:707) BEFORE the worktree exists. Step 4's "before mutable attempt
+setup" must explicitly name: before att_dir creation AND before `claim_slot` — else an implementer
+could place preflight after the slot claim and leak refusals into state as phantom launching rows.
+
+## O5 — minor: name the second `isolation_available()` call site
+
+`worktree_root()` (dispatch.py:540) calls `isolation_available()` independently of the launch-time call
+(dispatch.py:717). Two calls can disagree (sudo timestamp expiry between them): launch.json records
+`isolation:true` while the worktree lands under the same-user root, or vice versa. The draft's general
+rule ("all launch paths consume this decision") covers it; make it explicit by listing dispatch.py:540
+and :717 as the call sites to collapse into the single `ExecutionDecision`.
+
+## O6 — minor/question: ambient-credential interaction with the new regression in CI
+
+On any real host and in GitHub Actions the dispatcher's own environment contains credential indicators
+(GITHUB_TOKEN, gh hosts.yml, .ssh, .codex/auth.json) — so the "credentials absent → same-user allowed"
+cases of the new regression are reachable only under a constructed `env -i` fixture with fake HOME. The
+draft implies this (temporary homes, fake runners) but should state it: every credentials-absent test
+case must scrub the ambient environment AND point the passwd-home probe at a fixture home, else the
+test is red on any machine that has real credentials — i.e. everywhere it matters.
+
+## What the draft gets right (challenge is not a rejection)
+
+The decision table itself; exact-`1` override parsing; indeterminate→present conservatism; empty-env
+allowlist (not scrub-known-secrets); probe-metadata-only (no secret reads); no-downgrade-after-ISOLATED;
+refusal-creates-no-state; the falsifiable canary acceptance test; and the explicit residual (same-user
+TEST can still read operator files by absolute path — network + env are the closed channels, D5 remains
+the real boundary). These match the audit's intent and the repo's fail-closed doctrine.
+
+## Disposition of this challenge
+
+O1 and O2 are authorization-blocking amendments. O3 is a scope decision I am making now (fold in),
+subject to SOL's adversarial review. O4-O6 are drafting-precision amendments. Next: fresh-context
+adversarial SOL design review of the draft PLUS this challenge (Critical tier — trust boundary);
+then dispositions + authorization as PLAN-005; then a high-assurance spec with operator approval
+(high-risk: per-dispatch approval artifact required) — this change is trust-critical and its PR is
+NEVER auto-merged.
+
+warning: Codex's Linux sandbox uses bubblewrap and needs access to create user namespaces.
+codex
+I’m going to verify the live call graph and existing isolation drills first, then I’ll judge the amended design against paths the attachments may have missed.
+codex
+The repository shell is currently failing before command execution (`bwrap: loopback: Failed RTM_NEWADDR`), so I can’t honestly claim fresh line-by-line verification yet. I’ll try the read-only resource interface; meanwhile, I’m treating the quoted HEAD evidence as evidence, not as proof of completeness.
+mcp: codex/list_mcp_resources started
+mcp: codex/list_mcp_resource_templates started
+mcp: codex/list_mcp_resources (completed)
+mcp: codex/list_mcp_resource_templates (completed)
+codex
+The central problem is now clear: a user+network namespace proves a narrow IP-network property, but it does not create a credential-confidentiality boundary against code running with the operator’s host identity. I’m checking the exact Linux namespace semantics before assigning severity.
+web search: 
+web search: site:man7.org linux network_namespaces abstract unix sockets network namespace ...
+web search: 
+web search: site:man7.org proc_pid_environ ptrace access mode ...
+codex
+The amended design still leaves worker-authored TEST code able to read operator credentials from disk and communicate through host-local channels. A network namespace plus environment scrub is not a credential boundary for code retaining the operator’s host identity. That is design-blocking.
+
+I could not independently re-read the repository because the read-only command sandbox failed before execution with `bwrap: loopback: Failed RTM_NEWADDR`. Code-path references below therefore rely on the challenge’s quoted HEAD audit rather than claiming fresh verification.
+
+1. **BLOCKING — Same-user TEST retains filesystem access to operator credentials.**  
+   Unmapped `unshare --user` makes the child *display* UID 65534, but it does not turn it into an unrelated host user. The challenge’s successful write demonstrates the important property: host VFS checks still permit operator-owned worktree access. The same mechanism permits reads of operator-readable paths such as `.codex/auth.json`, `.ssh/*`, cloud configuration, browser stores, and arbitrary credential locations. Environment scrubbing does nothing to those files.
+
+   Worse, network isolation does not prevent eventual exfiltration. TEST can print a secret into captured output, write it into the worktree/evidence, alter files consumed by remediation or review, or plant data for a later network-enabled worker. The canary acceptance test only checks that an environment token is absent; it must also plant a disk canary and require that TEST cannot read it. Under the proposed launcher, that test will fail.
+
+   This requires a filesystem boundary: a separate host UID, VM, or a mount-root sandbox exposing only the worktree and deliberately selected runtime files while hiding the operator home, `/run/user/$UID`, host `/proc`, and other writable shared state. If that cannot be provided, TEST must refuse.
+
+2. **BLOCKING — Credential assessment cannot safely authorize same-user execution.**  
+   The registry misses many common or generic forms:
+
+   - Environment names containing `AUTH`, `BEARER`, `SESSION`, `COOKIE`, `JWT`, `LOGIN`, or merely `KEY`; secrets in generic variables; command-line arguments; and systemd credential variables.
+   - `KRB5CCNAME`, `KRB5_KTNAME`, `GNUPGHOME`, `AWS_CONFIG_FILE`, `AZURE_CONFIG_DIR`, `npm_config_userconfig`, `PIP_CONFIG_FILE`, custom Git credential helpers, credential-cache sockets, PKCS#11 stores, browser profiles, kernel keyrings, Secret Service, and files outside registered roots.
+   - SSH keys with arbitrary names or outside `.ssh`. “Non-public-key material” cannot be determined reliably using metadata alone without either treating almost every `.ssh` entry as credential-bearing or inspecting contents.
+   - Credentials reachable through hard links, parent-directory symlinks, bind mounts, configured relative paths, or sockets under `/run/user/$UID` and `/tmp`.
+
+   Resolving passwd-home plus `$HOME` is directionally correct, but neither is authoritative for all applications. Every configured path needs application-correct relative-path semantics; final-component `lstat` is insufficient when an ancestor is a symlink.
+
+   There is also unavoidable TOCTOU: credentials can appear after selection, after the immediate worker recheck, or before either TEST/regression execution. Symlinks and credential pointers can change during the attempt. Rechecking before every untrusted launch reduces the window but does not close it. Therefore “no registered credential found” cannot be treated as proof that same-user execution is safe; it is only an operational warning signal.
+
+3. **BLOCKING — The execution-mode state machine must cover more than the named TEST call.**  
+   The supplied HEAD audit identifies independent decisions in [`worktree_root()`](/home/val/orchestrator/scripts/dispatch.py:540) and launch selection near [`dispatch.py:717`](/home/val/orchestrator/scripts/dispatch.py:717), the current fallback worker near [`dispatch.py:860`](/home/val/orchestrator/scripts/dispatch.py:860), fallback TEST near [`dispatch.py:946`](/home/val/orchestrator/scripts/dispatch.py:946), and the unprotected regression branch in [`run_regression_gate()`](/home/val/orchestrator/scripts/dispatch.py:623). These must all consume one immutable decision.
+
+   The inventory must explicitly include:
+
+   - Initial worker launch and every retry.
+   - Remediation Codex launches and any commands they execute.
+   - Primary TEST.
+   - Both base-overlay and candidate regression runs.
+   - Review Codex processes if they can invoke tools or repository commands.
+   - Any post-test validation or Git hook-capable command operating on worker-controlled state.
+
+   A same-user Codex worker is itself dangerous: it can execute model-directed shell commands with the operator’s filesystem identity and network. `ORCH_ALLOW_UNISOLATED=1` therefore authorizes full worker exposure, not merely a less-isolated launcher followed by a safe TEST.
+
+   Preflight must occur before attempt-directory creation and before `claim_slot`. `worktree_root` must take the selected decision rather than calling `isolation_available()` again. An isolated launch failure, timeout, cleanup failure, retry, or remediation transition must never recalculate and downgrade the mode.
+
+4. **BLOCKING — The network proof is valid only for direct IP networking, not exfiltration.**  
+   A fresh network namespace with no interfaces or routes prevents direct access to parent loopback and external IPv4/IPv6. It also isolates Linux abstract Unix sockets. It does **not** isolate pathname Unix sockets, which are governed by filesystem visibility. [Linux’s namespace documentation confirms that distinction](https://www.man7.org/linux/man-pages/man7/network_namespaces.7.html).
+
+   Consequently, TEST may still reach predictable pathname sockets for D-Bus, SSH/GPG agents, Docker/Podman, systemd user services, credential caches, Secret Service, resolver proxies, or custom operator daemons. Those services can expose credentials or act as host-network relays. A network namespace also leaves SysV/POSIX IPC and shared memory visible unless IPC and mount namespaces are added. [IPC namespaces isolate only their specific IPC resources](https://man7.org/linux/man-pages/man7/ipc_namespaces.7.html).
+
+   `close_fds=True` handles accidental inherited descriptors, but stdout/stderr are deliberate cross-boundary descriptors and can carry stolen data into evidence. The shared host `/proc` remains another attack surface; access to other processes’ environment, descriptors, and state depends on ptrace checks and host LSM policy, which is not a portable security guarantee. [Linux documents `/proc` access as using ptrace-style credential checks](https://man7.org/linux/man-pages/man2/ptrace.2.html).
+
+5. **CONDITION — The mapped/unmapped probe ladder is not itself a direct-IP downgrade, but it must select an exact immutable submode.**  
+   Trying mapped mode and then an unmapped probe is acceptable only during preflight. Once one succeeds, record `SAME_USER_MAPPED` or `SAME_USER_UNMAPPED` and use that exact argv for every real TEST/regression invocation. The real payload must never be tried once under one mode and retried under another or without `unshare`.
+
+   The challenge is internally imprecise in calling unmapped mode “primary” while specifying mapped-first probing. Choose and document one ordering. Given the host evidence, unmapped-first is simpler unless mapped identity is required for compatibility.
+
+   The `git status` plus write probe establishes workload compatibility, not security. It should use the same environment, shell, `--fork` behavior, cwd class, executable paths, and namespace flags as the real launcher. A later failure remains terminal. Validate the resolved `unshare` binary and its parent directories; avoid PATH lookup. Root ownership alone does not address a replaceable symlink or writable ancestor.
+
+6. **BLOCKING — Process lifecycle containment is absent.**  
+   Worker TEST can daemonize or double-fork. Killing or waiting for the shell does not prove all descendants terminated. Such descendants can continue reading or modifying shared filesystem state after the gate, including while a later network-enabled review or remediation runs.
+
+   The launcher needs a new PID namespace plus a reliable whole-tree kill mechanism, preferably a cgroup or equivalent. Util-linux documents that `--kill-child` combined with a PID namespace supports killing the tree, while ordinary `--fork` has non-obvious signal behavior. [See `unshare(1)`](https://man7.org/linux/man-pages/man1/unshare.1.html). Validation must include a double-fork escape attempt and prove no descendant survives timeout, interrupt, ordinary completion, or infrastructure failure.
+
+7. **BLOCKING — All 15 proposed cases can pass vacuously without stronger positive controls.**
+
+   - Cases 1–8 can succeed because an earlier parse error, ambient credential, or failed namespace probe prevented any relevant launch. Each must assert the exact decision reason and positive launch markers in its opposite branch.
+   - Cases 2–4 need a scrubbed fixture plus removal controls proving that removing the targeted indicator changes the outcome.
+   - Case 5 must prove literal `1` actually launches the expected same-user path; a later namespace refusal is not success.
+   - Case 6 must reach a real fake worker, not merely return an enum.
+   - Case 8 must prove the isolated launcher was invoked and failed before asserting no fallback.
+   - Cases 9–10 need hostile parent variables, startup hooks, global Git configuration, and real disk canaries. Merely observing a temporary HOME does not prove the old home is inaccessible.
+   - Case 11 proves only namespace identity, not isolation properties.
+   - Case 12 needs listener-readiness synchronization, a successful parent-namespace positive connection, proof the child attempted the connection, and zero sandbox accepts.
+   - Case 13 needs a payload marker and a failure injected after the real launcher is selected; otherwise “payload did not run” proves little.
+   - Case 14 needs proof the payload executed and that its exit was classified as an ordinary gate failure rather than infrastructure refusal.
+   - Case 15 cannot be satisfied by searching for `SKIP`; tests can return success early without using that word.
+
+   The falsifiable acceptance test likewise needs a valid-spec positive control, exact preflight status assertions, before/after durable-state snapshots, scans of stdout/stderr and all created evidence, and disk/proc/pathname-socket canaries. Its current environment-token check is insufficient.
+
+8. **BLOCKING — “Assert refusal where userns is unavailable” does not validate the launcher.**  
+   Refusal is the correct result on a restricted host and should be tested instead of skipped. But it proves only fail-closed selection. It does not exercise environment scrubbing, namespace entry, regression routing, loopback denial, process cleanup, or actual payload execution.
+
+   A misconfigured host can therefore produce a green suite while never testing the hardened path. Validation needs two mandatory environments:
+
+   - One where user namespaces are deliberately unavailable and refusal is proven.
+   - One where the selected unmapped mode works and every launcher/security test actually executes.
+
+   A local refusal-only result should be reported explicitly as incomplete security validation, not as the full suite passing.
+
+9. **CONDITION — Folding the non-vacuous `worker_isolation.sh` drills into this work is appropriate.**  
+   This is not material scope bloat: it touches an already relevant test, exercises the same boundary, and prevents the change from being declared safe using hard-coded or absent credential targets. Splitting it creates a greater risk that the implementation merges with theater coverage.
+
+   Keep it reviewable as a distinct commit or clearly separated test section. Resolve operator home dynamically; create a harmless positive canary; prove the operator can read it; prove the isolated worker cannot; fail if the canary was never created or the probe never ran; and clean it reliably without touching real credential files.
+
+10. **BLOCKING — Strongest counterargument: do not build a “safe” same-user fallback at all.**  
+    The strongest objection is that credential discovery is inherently incomplete and same-user code cannot be denied same-user files by ordinary DAC. Adding only environment and network isolation risks converting an obvious fail-open into a boundary that looks credible but is not.
+
+    That objection is correct. The urgent, defensible shipment is the minimal fail-closed rule: when D5 is unavailable, refuse before durable state or code execution. If a break-glass override must remain, it must be described as explicit acceptance of full operator-credential and host-state exposure—not as a protected fallback—and should require separate human authorization. A genuinely protected fallback can follow only after it has filesystem, pathname-IPC, `/proc`, descendant-lifecycle, and network containment, with mandatory non-vacuous validation.
+
+VERDICT: BLOCK
+tokens used
+56,258

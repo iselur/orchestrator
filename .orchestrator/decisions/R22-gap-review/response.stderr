@@ -1,0 +1,956 @@
+OpenAI Codex v0.144.3
+--------
+workdir: /home/val/orchestrator
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 019f5f44-4099-7e50-9d5f-777880660677
+--------
+user
+You are SOL (gpt-5.6) on the consult lane (repo read-only). Ledger R22, review-only.
+
+The operator recorded the factory's ultimate vision in .orchestrator/VISION.md (read it first — it is the measuring stick). TASK: independently review the WHOLE current setup against that vision, stage by stage (all 10 lifecycle stages). You have full read access: CLAUDE.md, AGENTS.md, README.md, scripts/, tests/, specs/, .orchestrator/ (plans, decisions, ledger, attempts, escalations, state), .github/.
+
+Deliver:
+1. A per-stage coverage matrix: for each of the 10 stages — BUILT (with evidence path), PARTIAL (what exists / what's missing), or MISSING (nothing real).
+2. The mismatches: where the current setup contradicts or over/under-shoots the vision (e.g., capabilities built that the vision doesn't need).
+3. The missing-piece list, prioritized by what unlocks the vision soonest, each with a one-line build sketch and rough effort class (S/M/L).
+4. The single biggest risk to reaching the vision from here.
+Judge the raw question honestly — do not assume the current architecture is correct because it exists. End with "REVIEW COMPLETE".
+
+
+NOTE: your shell sandbox is broken on this box (bwrap RTM_NEWADDR) — you cannot run commands or open files yourself. The complete evidence bundle is inlined below; judge from it. Where the bundle is insufficient for a stage, mark that stage "EVIDENCE-LIMITED" rather than guessing.
+
+
+=== FILE: .orchestrator/VISION.md ===
+# VISION — what this factory is ultimately for (operator, 2026-07-14, verbatim intent)
+
+Recorded from the operator's dictated statement; this is the standing target every setup review
+measures against (ledger R22).
+
+## The model
+
+A combination of an **AI engineering manager and AI engineers**. Claude and Codex are both
+individual contributors (architects, highly skilled executors) AND management capacity:
+
+- **Claude / the orchestrator = the AI engineering manager** — orchestrates, judges, reviews,
+  synthesizes, holds the trust boundary.
+- **Codex = both manager and executor** — plans, drafts, implements, researches.
+
+## The end-to-end capability the operator wants
+
+"Drop any idea onto you guys" and the factory does everything:
+
+1. **Grill the idea** — adversarial review, dual-vendor research, falsification.
+2. **Review / decide** — reconciled recommendation to the operator.
+3. **Break it down into tickets** — decomposition to executable specs.
+4. **Log tickets in a tracking system** (Jira / Linear).
+5. **Iteratively improve the plan** — challenge/authorize loops.
+6. **Iteratively execute** — dispatch, gates, review, remediation.
+7. **Review results of work** — independent review, evidence-bound verdicts.
+8. **Test it** — deterministic gates + golden evaluation.
+9. **Set it up running** — deploy/operate.
+10. **Maintain it** — ongoing operation, monitoring, upkeep ("maintaining EVA").
+
+## Standing instruction
+
+Whenever the setup is holistically reviewed, review it AGAINST THIS DESCRIPTION: what matches,
+what doesn't, and what is missing. Current gap review: `.orchestrator/decisions/R22-gap-review/`.
+
+
+=== FILE: CLAUDE.md ===
+# CLAUDE.md — orchestrator invariants
+
+Short by design. Conventions/stack/test commands live in [AGENTS.md](AGENTS.md); the full build
+log and findings live in `SETUP-REPORT.md`. On any conflict, `SETUP-BRIEF.md` invariants win.
+
+## Autonomy level
+
+**Autonomy is OFF by default (safe by default).** The tracked `.orchestrator/AUTONOMY.json` ships
+DISABLED, so a clone/template never merges anything on its own. An operator opts into **Level 1.5 —
+plan-scoped autonomy** by creating a gitignored `.orchestrator/AUTONOMY.local.json` (the local
+override wins in `load_autonomy`; being untracked, it never travels with the repo). When enabled, the
+operator agrees a plan scope, then the orchestrator may **merge in-scope PRs to `integration`
+autonomously** — no per-PR human click — via `./scripts/dispatch merge <attempt-id>`, which is
+fail-closed and enforces every gate: attempt `passed_pr_opened`; bound reviewer PASS; `ci` green;
+PR head == the reviewed `worker_commit`; and the **merge-time base-check** (base still == bound
+`base_sha`, closing the post-PR stale-base hole). Delete the local override (or set `enabled:false`)
+to revert to Level 1. **`main` promotion stays human-only, permanently** — never auto-merged.
+Spec approval still binds each attempt to intent; the operator reviews results after the fact; `HALT` pauses
+everything. This grant is per-project and does NOT transfer to the eventual real-product repo, which
+gets its own explicit policy decision. Rationale + adversarial validation: `SETUP-REPORT.md` G4-A.
+
+## NO SLIPPAGE — every operator task gets a highest-detail plan + a tracked ledger row (STRENGTHENED)
+
+Reinforced by the operator, 2026-07-13: "ensure EVERY TASK I GIVE YOU HAS THE SAME HIGHEST DETAILED
+PLAN CREATED AND YOU AND CODEX FOLLOW IT. NO MORE SLIPPAGE." (Trigger: the measurement-layer request
+was planned then silently dropped until the operator re-asked.) This is a HARD rule, above convenience.
+
+**Request ledger — mandatory.** Every operator request is appended as a row to
+`.orchestrator/REQUEST-LEDGER.md` at intake, BEFORE work: `id | date | request (verbatim intent) |
+lane | plan-ref | status (open/in-progress/blocked/done) | completion-evidence`. A task with no ledger
+row and no plan-ref may not proceed. At the END of every turn, reconcile: update each touched row, and
+scan for any `open`/`in-progress` row that stalled — a request that leaves the ledger without reaching
+`done` or an explicit operator deferral IS a process failure, surfaced to the operator, not swallowed.
+
+**Highest-detail plan ARTIFACT for EVERY substantive task.** The deliverable is not a bullet sketch —
+it is a **brief-caliber standalone document** at the depth of the original SETUP-BRIEF (detailed enough
+to execute autonomously with no further clarification), written to `.orchestrator/plans/PLAN-NNN.md`
+following `.orchestrator/plans/PLAN-TEMPLATE.md` (decision/non-goals; cited current-state evidence;
+numbered testable requirements incl. abuse cases; detailed design + alternatives; affected boundaries +
+dependency closure; ordered file-level steps; failure modes + blast radius; falsifiable validation
+incl. a fail-on-broken/pass-on-fixed test; rollback; open questions; provenance). No "small task"
+exemption on plan EXISTENCE or DEPTH — only `--small` micro-plans for genuinely trivial edits scale the
+length. Codex drafts to the template (pass it as `--context`), Claude challenges in writing with ≥1
+named objection, Claude authorizes (digest-bound), and BOTH follow the authorized artifact — deviations
+reconciled at completion (followed / authorized-deviation / unauthorized-deviation); repeated
+unauthorized deviation fails process review even with green tests. When uncertain whether something is
+substantive, it is — write the brief-caliber plan and the ledger row.
+
+## Execution split — delegate-first (Claude delegates, Codex executes most work)
+
+Ratified by the operator + dual-validated with SOL (BLOCK→PASS on conditions), 2026-07-13
+(`.orchestrator/decisions/REBALANCE-codex/`). **Default: substantive work is EXECUTED by Codex** (idle
+quota, separate rate/billing pool, uncorrelated errors). Claude delegates aggressively (MAX delegation)
+and is reserved for orchestration, final judgment/synthesis, dual-vendor reconciliation, and the
+INDEPENDENT review layer. This includes **orchestrator self-development** — its own non-trust-critical
+code changes are dispatched as Codex specs, not hand-edited by Claude. Three lanes:
+
+- **Ordinary delegated lane (default for most work):** Codex implements → deterministic fail-closed
+  gates → independent Claude review → PR → auto-merge to `integration`. Covers metrics/reporting,
+  non-normative docs, isolated helpers, ordinary product specs, and **research execution**.
+- **High-assurance delegated lane (trust-critical code):** Codex MAY author (delegate here too), but
+  the installed **parent** version validates the candidate; PLUS a pre-dispatch spec challenge (a fresh,
+  context-isolated critic surfaces abuse cases + invariant-level acceptance tests — never the
+  implementation conversation), mandatory human approval, an adversarial SOL design review, security
+  regression tests, and staged activation.
+- **Control-plane authorization lane (Claude + human, NEVER delegated):** policy/invariant changes,
+  trust classification, reviewer conclusions, merge authority, final synthesis, dual-vendor
+  reconciliation.
+
+**Binding invariants (SOL):**
+1. **Bootstrap:** a change to the trust boundary must never validate, approve, review-bind, or merge
+   ITSELF. The installed parent version runs all gates; the dispatcher never executes a candidate's own
+   modified gate/dispatch code to gate that candidate; a candidate activates only after separate
+   approval + install.
+2. **Classify by capability + transitive dependency, not path-touch.** A machine-enforced trust manifest
+   + dependency closure decides trust-critical status; any file in the trust closure OR any
+   unclassified/ambiguous file is forced **high-risk** (fail closed). Trust-critical = anything that can
+   affect dispatch authorization, sandbox construction, worker identity/env/PATH, worktree/network
+   policy, gate implementations (+ their libs/config), spec parse/schema/digest/approval/risk/test
+   selection, evidence gen/hash/store/diff-binding, reviewer prompt/schema/inputs/parsing/fail-closed
+   behavior, push/PR/merge/base-check/autonomy, CI + security-claim tests, and packaging/entrypoints/deps
+   for any of these.
+3. **Post-implementation review stays Claude-only** — never Codex-grades-Codex (cross-vendor
+   independence is the asset).
+4. **No single delegation-ratio TARGET** (perverse incentive to downgrade borderline work). Report
+   **risk-weighted work class**; fail closed on unclassified files; never set a quota target on the
+   trust-critical lane.
+
+**Codex toolkit / web search (operator, 2026-07-13):** the **research/consult lane runs Codex with the
+FULL toolkit incl. web search** (`codex exec --sandbox read-only`, network on) — it improves quality and
+runs no untrusted worker-authored code against our creds; require source capture + claim-level
+reconciliation (vendor diversity without evidence diversity is cosmetic). The **worker EXECUTION lane
+stays network-off** (`needs_network:true` still REFUSED) until the D5 credential residual (per-attempt
+UID / credential broker) is closed — enabling network there reopens token exfiltration and is a separate
+Critical decision, not a free flag. See [[delegate-heavy-work-to-codex]], dual-validated-planning above.
+
+## Planning-first — Codex drafts every plan (intake state machine)
+
+Ratified by the operator 2026-07-13 ("models with detailed rigorous plan > models with no plan";
+"outsource plan creation for each task to Codex"). Codex-drafted plan: `PLAN-001`
+(`.orchestrator/plans/`), challenged + authorized with amendments
+(`.orchestrator/decisions/REINFORCE-delegation-planning/`). The operator trusts both vendors equally;
+Claude quota is the scarce one — so Claude AUTHORIZES, Codex AUTHORS.
+
+**Mandatory intake reflex for EVERY substantive task (state machine, not a preference):**
+1. Classify: fast-path / ordinary delegated / high-assurance delegated / control-plane.
+2. If substantive: get a **Codex-drafted plan FIRST** (`scripts/codex-plan`, or a detached
+   `codex exec --sandbox read-only` consult until SPEC-016 lands) — before analysis, drafting,
+   research, or implementation by Claude. `--small` micro-plans
+   (objective/scope/action/verification/rollback) for tiny tasks — plan length scales, the
+   requirement doesn't.
+3. Claude CHALLENGES the plan in writing — must name ≥1 concrete objection (unsupported assumption,
+   missing failure mode, scope ambiguity, insufficient validation) or state why none applies;
+   "looks good" is not a challenge. High-assurance plans additionally get a second, fresh-context
+   Codex critique before authorization.
+4. Claude AUTHORIZES (recorded in the PLAN file with dispositions); silent post-authorization plan
+   edits void the authorization.
+5. Codex EXECUTES everything delegable; Claude does only reserved actions (challenge/authorize,
+   independent per-attempt review, final synthesis, dual-vendor reconciliation, user dialogue).
+6. At completion, reconcile delivered work vs authorized plan: followed / authorized deviation /
+   unauthorized deviation — recorded. Repeated unauthorized deviations fail process review even with
+   green tests.
+
+**Fast path (the ONLY planless work):** read-only and non-substantive — greetings, clarifications,
+status of already-observed work, a single deterministic lookup, or conversational
+explanation/assessment answerable from existing session context with **no new research, no state
+change, and no durable recommendation**. If uncertain → plan. Anything that edits state, produces an
+artifact, synthesizes new research, or recommends a decision is substantive.
+
+**Artifacts:** plans live in `.orchestrator/plans/PLAN-NNN.md` (tracked; frontmatter + plan +
+challenge + dispositions + authorization). Specs cite their plan. Decision records
+(`.orchestrator/decisions/`) record authority, not duplicate plans. Follow-up (high-assurance,
+grandfathering SPEC-001..015): a required `plan_ref` spec-schema field.
+
+**Anti-Goodhart (REBALANCE invariant 4 applies):** delegation/plan-coverage numbers are weekly review
+SIGNALS discussed with the operator (first review 2026-07-20) — never automated targets; unclassified
+work counts as CLAUDE work in the report so omission can't flatter the split. Planning consults never
+preempt an active worker. Numeric quota reserves deferred until a real quota signal exists.
+
+## Session-start ritual (Gate 3)
+
+Run **`./scripts/dispatch reconcile`** first thing. It reads `.orchestrator/state/*.json`, inspects
+real unit state (`systemctl --user`), and flips any attempt whose state is `running` but whose unit
+is gone (orchestrator/box restart) to `interrupted` — resumable ONLY as a fresh attempt (never
+hand-finish a partial worktree; see quota/degradation policy). Then resume from the recorded next
+action. Never ask the operator to reconstruct context these files already hold.
+
+## Health monitoring (Gate 3 — soft-alert, confirm-then-cancel)
+
+`./scripts/dispatch health <attempt-id>` (threshold `--minutes`, default 10). A stale JSONL event
+stream raises an **alert, not a kill**. Silence ≠ death: a long compile/test is silent but busy.
+Cancel ONLY a **confirmed hang** — unit alive but no CPU progress, no new events, and no journal
+activity across **two consecutive** checks. A busy-but-silent worker (CPU advancing) always
+survives.
+
+## Definition of done (a spec is `done` only when ALL hold)
+
+Acceptance criteria demonstrably met; the change was inspected, not inferred from a worker's claim;
+integrity preconditions held; deterministic checks ran and passed; the reviewer returned a bound
+PASS; remediation stayed within limits; no scope drift; the summary states real results with
+evidence paths. **"Should work" is never evidence.**
+
+## Remediation + integration (Gate 4)
+
+- **Remediation limits by risk_class: low 5 / default 3 / high 1.** Attempt 1 is never a
+  remediation; interrupted/stale_base/spec_blocked launches don't consume budget — only merit
+  failures (test/review/scope/integrity) do. Each remediation is a NEW attempt whose prompt embeds
+  the SPECIFIC findings of the last failure. Two consecutive identical findings = stop-early. Limit
+  exhausted or stop-early → spec `failed_remediation_exhausted` + a tracked escalation record in
+  `.orchestrator/escalations/` — never an infinite loop, never silent success.
+- **High-risk specs need the operator's per-dispatch approval artifact** (`approvals/<digest>.attempt-<n>.json`)
+  before EVERY dispatch, at every autonomy level.
+- **`./scripts/integrate <attempt-id>…`** is the deterministic integration step: merges in
+  `depends_on` order via the base-checked `dispatch merge`, re-runs the suite after every merge,
+  cleans up worktree/branch, auto-commits provenance (spec + approvals + attempt evidence +
+  escalations). Merge conflict or suite failure = stop/escalate — never AI-resolved.
+
+## Quota / degradation policy (policy-note item 1 — permanent, not deferred)
+
+- A worker hitting a rate/usage limit mid-attempt is classified **`interrupted`**, not failed:
+  preserve all evidence, stop the unit. **Resume ONLY as a fresh attempt in a fresh worktree**
+  after capacity returns. Never resume or hand-finish a partially modified worktree — mixed
+  authorship poisons provenance.
+- **The orchestrator NEVER takes over implementation. Self-review is never permitted, under any
+  degradation. Fail closed:** a stalled pipeline with clean state is correct behaviour.
+- Only acceptable continuity variant (post-MVP, if ever): a separate Claude *worker* authors; merge
+  blocks until an independent Codex reviewer verdict when quota returns.
+- Codex quota is ONE shared constrained resource (implementation + any future spec reviews).
+
+## Dual-validated planning (control-plane / decision layer)
+
+Governs the DECISION layer, not worker implementation; does NOT add a plan-conformance gate to the
+worker pipeline (the Planning policy below stays fully intact). Ratified by the operator + validated with SOL,
+2026-07-13 (`.orchestrator/decisions/PLAN-dual-validation/`).
+
+**Rule:** before a non-trivial control-plane action or a durable recommendation, Claude prepares a
+decision-complete plan and obtains explicit validation from BOTH Claude and Codex SOL on the SAME
+plan revision. Read-only discovery, disposable experiments, and drafting may happen first.
+
+**Non-trivial if ANY holds** (uncertain → treat as non-trivial; complexity / duration / file-count
+alone never count):
+1. creates/changes a durable policy, invariant, architectural precedent, shared contract/schema, or
+   mechanism meant for reuse across jobs/specs;
+2. changes trust/security boundaries, credentials, isolation, approval/autonomy, gate behavior,
+   evidence integrity, protected branch/release behavior, or recovery semantics;
+3. a destructive / irreversible / production-facing / novel external side effect not already
+   authorized by an established workflow;
+4. affects behavior beyond one approved spec's allowed paths + acceptance/test scope;
+5. a research/review deliverable that recommends or authorizes any of the above.
+
+**Worked examples (the operator, 2026-07-13):** a new **business idea / research** deliverable → the
+*recommendation* is non-trivial (dual-validated); the read-only investigation feeding it is exempt.
+A **high-level spec / requirements set for a new feature, or a non-trivial bug fix** → non-trivial,
+dual-validated at the requirements/design level. The routine low-level specs that then implement
+already-decided intent → exempt (gated by approval + reviewer + CI).
+
+**Idea/research stage — MAXIMUM effort, two independent vendors (the operator, 2026-07-13).** For any
+idea-stage / opportunity-evaluation / research deliverable, the read-only investigation itself must be
+done TWICE, independently, by two different vendors, then reconciled: (1) **Claude breadth research** —
+fan out parallel research agents (web); AND (2) an **independent from-scratch Codex/SOL research +
+ranking** that does NOT see Claude's output (no anchoring) — a full independent pass, not merely SOL
+critiquing Claude's summary. Reconcile: agreement → high confidence, disagreement → flag both views to
+the operator. The idea stage is the most crucial; spend maximum research effort here before choosing
+what to implement. This is IN ADDITION to the Standard/Critical validation of the resulting
+recommendation below. Record both passes under `.orchestrator/decisions/<id>/`.
+
+**Exempt (unless a trigger fires):** read-only diagnostics/status; clerical no-semantic changes;
+routine spec drafting that instantiates already-decided intent via established mechanisms; routine
+dispatch/monitor/retry/PR mechanics; worker/helper implementation bounded by an approved
+spec+scope+test+review+CI. Worker checklists are NEVER cross-reviewed.
+
+**Two tiers:** *Standard* (non-trivial, not Critical) → ONE adversarial SOL pass returning explicit
+**PASS/BLOCK** that addresses the strongest counterargument, questionable assumptions, failure
+modes, and validation gaps; Claude records a disposition per material finding; a BLOCK — or a
+material change to approach/scope/risk/validation/rollback after PASS — requires resubmission.
+*Critical* (governing policy/invariants, trust/security boundaries, approval/autonomy, gates/evidence
+integrity, protected branch/release, multi-job shared contracts, or irreversible/production
+consequences) → Claude+SOL iterate on the SAME revision until both explicitly report no unresolved
+blocker; unresolved disagreement goes to the operator, never silently resolved.
+
+**Decision-complete plan** (what earns the round-trip): decision + non-goals; current-state evidence
++ assumptions; alternatives + why this one; affected boundaries/consumers; failure modes + blast
+radius; ordered steps; validation criteria; rollback / irreversibility; open questions. "N/A,
+because…" is fine — "detailed" means decision-complete, not long. Review ONE coherent decision;
+don't split to evade review or bundle unrelated decisions to amortize it.
+
+**Quota/availability:** consults and workers share ONE Codex budget. One initial consult per
+decision; never interrupt a running worker to consult; run detached with no minute-scale timeout. If
+SOL or quota is unavailable the decision stays **PENDING** (exempt work continues) — skipping SOL is
+non-compliant, never a silent Claude-only fallback. Only the operator may authorize a scoped, recorded waiver
+(rationale/scope/expiry); emergency pre-validation action is limited to minimum reversible
+containment of active harm.
+
+**Record** each reviewed decision under `.orchestrator/decisions/<id>/`: trigger classification +
+tier, plan/revision digest, consult prompt + full SOL response (+ raw-stream sha256), Claude's
+disposition, explicit Claude + SOL verdicts, model/commit ids, any waiver/unresolved issue. Any
+binding requirement the plan creates MUST be encoded in governing policy or an approved spec before
+dispatch — workers are judged only by spec/scope/tests/diff/review/CI, never by conformance to a plan.
+
+## Planning policy (policy-note item 2)
+
+- **Workers** get the fixed preamble in `scripts/dispatch.py` (inspect-before-editing; a concise
+  revisable checklist for non-trivial tasks; the spec + evidence gates stay binding; if discovery
+  invalidates the spec/scope, stop and report **`SPEC_BLOCKED`** — never improvise). `SPEC_BLOCKED`
+  voids the approval and requires a spec revision + new approval digest.
+- **Orchestrator** (this agent): same scaled-checklist discipline for non-trivial scaffolding code.
+  No separate plan documents, no plan ceremony for routine actions.
+- **Reviewers**: NO planning phase. Mandatory structured rubric (per-criterion MET/UNMET with
+  evidence + scope + regression + security), enforced by `scripts/verdict.schema.json` (v2) and
+  fail-closed checks in the dispatcher. A PASS with empty `reasons`, or with any UNMET criterion,
+  is rejected.
+- The worker's plan/checklist is **NEVER** passed to the reviewer (confirmation-bias
+  contamination). The reviewer judges spec, diff, and evidence only. There is no plan-conformance
+  gate anywhere; the binding artifacts are the spec, approved scope, and `test_command`.
+
+## Hard invariants (never violate — see SETUP-BRIEF.md Appendix A)
+
+- `launch` returns immediately; `await` is bounded polling. No blocking on a worker's lifetime.
+- Review verdicts are binding and fail-closed, enforced in the dispatcher — never advisory.
+- Cancellation targets the systemd **unit/cgroup**, never a recorded PID.
+- Every launch, even one that crashes at startup, leaves a durable record.
+- Nothing activates with failing or partial tests. CI + branch protection are the hard merge gate.
+- Workers run with a scrubbed env, network off, sandboxed; only the orchestrator holds GitHub/SSH
+  credentials and pushes/opens PRs (D11).
+- **Worker isolation is D5, LANDED (not deferred).** The worker AND the gate `test_command` (both
+  run worker-produced code) execute as the dedicated `codex-worker` UID in hardened `systemd-run
+  --uid` system services: `the operator's home` is inaccessible (DAC + `InaccessiblePaths`), writes are
+  confined to the worktree (`ProtectSystem=strict`+`ReadWritePaths`), and the test phase has
+  `PrivateNetwork=yes`. This is what actually closes risk 13-B — on this host Codex's sandbox can't
+  restrict reads (Landlock), so DAC is the boundary. The reviewer runs with ALL tools denied (no
+  Read/Grep/Glob) — it judges only the spec+diff+evidence it is handed. Setup:
+  `scripts/setup-worker-user.sh`; proof: `tests/worker_isolation.sh`. Residual (deferred): the
+  worker's own copied Codex token is readable to its own model-commands, which keep network —
+  closing that needs per-attempt UIDs or a credential broker. **`needs_network:true` stays refused
+  until that step.** If `isolation_available()` is false (fresh box / CI), the dispatcher falls
+  back to same-user launch and records `isolation:false` so provenance never overstates the boundary.
+- **Parallelism (Gate 3 part 3): `MAX_PARALLEL=2`.** The slot claim is atomic (`claim_slot`, under
+  the STATE lock): at most 2 live attempts, at most one live attempt per spec. Each attempt has a
+  unique branch/worktree. **Stale base is refused, never hand-rebased:** if the base branch advanced
+  while an attempt ran (a sibling integrated), the dispatcher records `stale_base` at push and opens
+  no PR; the orchestrator re-launches a **fresh** attempt off the new base so ALL gates re-run
+  against what would actually land. A reviewed verdict is only valid for the base it was bound to.
+
+
+=== FILE: AGENTS.md ===
+# AGENTS.md — shared project conventions
+
+Referenced by [CLAUDE.md](CLAUDE.md). Kept minimal; expanded as real conventions emerge.
+
+## What this repo is
+
+An orchestrator that dispatches Codex worker jobs from schema-validated specs, gates their output
+(integrity → scope → test → bound review), and opens PRs the human merges. Built gate by gate per
+`SETUP-BRIEF.md`.
+
+## Stack
+
+- **Dispatcher:** Python 3 (`scripts/dispatch.py`), venv in `.venv/` (gitignored), deps pinned in
+  `scripts/requirements.txt` (pyyaml, jsonschema). Thin bash wrapper `scripts/dispatch`.
+- **Codex runs in Fast mode** (the operator, 2026-07-13): every Codex invocation passes
+  `-c service_tier=priority` — the priority processing tier. This is a *speed* setting (faster
+  wall-clock); it does **not** change the model or reasoning depth, which stay `gpt-5.6-sol` /
+  `high` as the approval artifacts pin. The real config key is `service_tier`, not
+  `model_service_tier` (the latter is rejected under `--strict-config`).
+- **Repo tests / CI:** bash. `scripts/test` runs `tests/*.sh`; CI job is named exactly `ci`
+  (required status check on `main` and `integration` — do not rename or add a matrix).
+- **Worker helpers so far:** `scripts/lib/*.sh` (slugify, trim, repeat) — produced by dispatched
+  specs; exercise the pipeline.
+
+## Conventions
+
+- Specs: `specs/SPEC-NNN.yaml`, schema `specs/spec.schema.json`. Immutable once approved;
+  never regex-parsed. Approval artifacts in `.orchestrator/approvals/<digest>.json`.
+- Branches: worker branches `codex/SPEC-NNN-<attempt>`; PRs target `integration`; only the operator
+  promotes `integration` → `main`. Both protected (ruleset, not classic protection).
+- Worker isolation (D5): the worker + gate test run as the `codex-worker` UID in hardened
+  `systemd-run --uid` system services; worktrees live under `/srv/codexwork/worktrees` (not in
+  `the operator's home`), shared with `the operator` via POSIX ACLs. `scripts/setup-worker-user.sh` is the one-time
+  privileged setup; `tests/worker_isolation.sh` proves the boundary. `the operator's home` (hence all of
+  the operator's credentials) is unreachable by workers.
+- Evidence: per-attempt under `.orchestrator/attempts/<id>/<n>/`. Manifests tracked; raw
+  logs/events + worktrees gitignored, integrity provable via tracked sha256 hashes.
+- Consulting Codex SOL (`gpt-5.6-sol`, high reasoning): **never cap the run at minutes.** These
+  runs can legitimately take hours; a minute-scale timeout just burns tokens by killing a run about
+  to finish. Run `codex exec` consultations **detached** (background / `systemd-run --user`), never
+  a foreground call with a short timeout. The final answer is recoverable from the `--json` stream
+  (`item.type == "agent_message"`, last one) even if `--output-last-message` didn't get to write.
+
+## Test command
+
+`./scripts/test` (repo suite). Individual specs declare their own `test_command`.
+
+
+=== FILE: README.md ===
+# orchestrator
+
+**A safety-first control plane where Claude orchestrates and Codex executes autonomous software work — every change gated, isolated, and human-authorized before it ships.**
+
+You write a small spec, approve it once, and the system: dispatches a Codex worker to implement it in an isolated sandbox, commits and checks the result against integrity/scope/tests, has an independent Claude reviewer pass judgment, and opens a pull request — never touching your credentials and never merging to `main` without a human. It runs unattended on a cheap VPS and you review results after the fact.
+
+> This is the real control plane, built and hardened gate by gate (the full build log, including adversarial design reviews, lives in the repo history and decision records). It's set up so you can stand up your own copy and point it at your own repos.
+
+## What makes it safe
+
+- **Spec → approval → worker → gates → review → PR.** Nothing runs without a schema-valid spec and an approval artifact bound to the exact spec digest *and* your instance (a copied approval can't authorize anything).
+- **Worker isolation (the load-bearing part).** The worker *and* the test command (both run model-produced code) execute as a dedicated unprivileged `codex-worker` user in hardened `systemd` services: your home — and every credential in it — is unreachable, writes are confined to the worktree, and the test phase has no network. Credentials are separated by filesystem permissions, not by trusting a model sandbox.
+- **Fail-closed review.** An independent reviewer returns a schema-bound PASS/FAIL bound to the exact diff; the reviewer has no filesystem tools. Green tests are never mistaken for a met spec.
+- **Human-gated merges.** Merges to `main` are human-only, permanently. Optional plan-scoped autonomy lets the orchestrator merge to `integration` — off by default, you opt in.
+- **Dual-validated planning.** Non-trivial architecture/security/policy decisions are drafted and then adversarially reviewed by a second model before adoption, with the reasoning recorded.
+- **Bounded remediation, recovery drills, parallelism with a stale-base guard** — all deterministic and evidence-producing.
+
+## Quick start (bootstrap it yourself)
+
+You need: an **Ubuntu 24.04** VPS, **Claude Code** installed on it, plus **Claude** and **Codex** subscriptions, a **GitHub repo** you own, and (recommended) **Tailscale** for private SSH.
+
+1. Click **“Use this template”** above to create your own repo (choose *default branch only*), then clone it onto your VPS.
+2. In Claude Code on the box, paste:
+
+   ```
+   Read BOOTSTRAP.md and set me up gate by gate, pausing at each human step.
+   ```
+
+Your Claude walks you through it: it runs the idempotent installers and verification, and stops for the steps only you can do (provisioning, your GitHub branch protection, and the interactive Claude/Codex logins).
+
+**Not fully one-click, honestly:** provisioning the VPS, your Tailscale, your GitHub branch protection, and the OAuth/device-auth logins are account-bound and interactive — the bootstrap automates everything else and guides you through those.
+
+## What's in here
+
+| Path | What it is |
+|---|---|
+| `scripts/dispatch.py` / `scripts/dispatch` | the deterministic control plane (launch, gates, review, merge, integrate, health, reconcile) |
+| `scripts/setup-worker-user.sh` | one-time privileged host setup for worker isolation |
+| `scripts/init-operator` | reset a fresh copy for a new operator (safe by default) |
+| `CLAUDE.md` / `AGENTS.md` | the operating invariants and conventions |
+| `specs/`, `.orchestrator/` | example specs and the tracked provenance/approval/attempt model |
+| `tests/` | the repo's own suite, including the worker-isolation drills |
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+
+=== FILE: .orchestrator/REQUEST-LEDGER.md ===
+# REQUEST-LEDGER — every operator request, tracked to completion (no slippage)
+
+Appended at INTAKE, before work (CLAUDE.md "NO SLIPPAGE"). Reconciled at the end of every turn. A row
+must reach `done` or an explicit operator deferral — a stalled row is a surfaced process failure.
+
+| id | date | request (intent) | lane | plan-ref | status | completion-evidence |
+|----|------|------------------|------|----------|--------|---------------------|
+| R01 | 07-13 | Finish #1 regression-proof gate | high-assurance | — (pre-ledger) | done | PR #34; run_regression_gate |
+| R02 | 07-13 | Rebalance to Codex / execution split | control-plane | REBALANCE-codex | done | PR #35; CLAUDE.md |
+| R03 | 07-13 | Ratify delegate-first + MAX delegation | control-plane | REBALANCE-codex | done | CLAUDE.md |
+| R04 | 07-13 | Codex full toolkit / web search | control-plane | REBALANCE-codex | done | CLAUDE.md |
+| R05 | 07-13 | Diff-blindness explain + first delegated spec | ordinary | SPEC-014 | done | PR #36/#37 |
+| R06 | 07-13 | Reviewer quality params (v3) | high-assurance | SPEC-015-quality-rubric | done | PR #38 |
+| R07 | 07-13 | Spec-drafting delegation + plan-first | control-plane | PLAN-001 | done | PR #39 |
+| R08 | 07-13 | Strict planning + Codex drafts plans | control-plane | PLAN-001 | done | codex-plan (SPEC-016); PR #39 |
+| R09 | 07-13 | Rules in GitHub? + IDEAS privacy | — | — | done | ideas never public (confirmed); moved to PRIVATE repo iselur/orchestrator-private; ledger+sensitive dirs gitignored (PR #46); ledger history commit left per operator |
+| R10 | 07-13 | Holistic self-reflection, plan first | control-plane | PLAN-002 | **INCOMPLETE (Claude overstated; Codex audit R18)** | Claude report not hashed pre-disclosure; verifier still DEFECTS; clean rerun deferred. Queued in baton. |
+| R11 | 07-13 | Harness best-on-data: telemetry+dashboard+golden dataset | high-assurance | MEASUREMENT-layer | **IN-PROGRESS** | plan drafted; Phase 2 in baton; NOT built |
+| R12 | 07-13 | Keep capacity, re-audit 2wk, don't pause, 5h routines | control-plane | 06-reconciled | done | trig 2026-07-27; timer; PENDING |
+| R13 | 07-13 | On-box (Hetzner) tracker | control-plane | — | done | orchestrator-continue.timer |
+| R14 | 07-13 | 5h trigger only if unfinished work | control-plane | — | done | continue-session.sh gate |
+| R15 | 07-13 | Verify verdict job broken; delegate to Codex | high-assurance | VERDICT-INTEGRITY | done (investigation); fix IN-PROGRESS | response.md: BROKEN 1/14; fix queued in baton |
+| R16 | 07-13 | Delegate all remaining tasks to Codex | high-assurance | 7 drafts | **IN-PROGRESS** | .orchestrator/plans/drafts/*; 07-14: isolation-failopen (→PLAN-005) challenged (2 blocking amendments, host-verified: --map-current-user denied on 24.04; regression-gate hole) + adversarial SOL review launched (decisions/PLAN-005-isolation-failopen/); 07-14 05:37: attempt-1 consult died on bwrap sandbox error (preserved as response.attempt1.*), retried once from same consult-input.txt (sha 6b63120f verified) — retry running |
+| R17 | 07-13 | Share work plan (BLUF) | — | — | done | conversational |
+| R18 | 07-13 | Audit requests for slippage + reinforce planning | control-plane | REQUEST-AUDIT | done | Codex audit complete (response.md); fixes applied to baton; R10 corrected; NO-SLIPPAGE + PLAN-TEMPLATE merged |
+| R19 | 07-13 | Plan + implement Phase 1 (verdict-integrity + metrics-semantics) and Phase 2 (measurement layer) | high-assurance | PLAN-003 (P1), PLAN-004 (P2) | in-progress | 07-14: dual-validation iterating. PLAN-003: rev3 SOL round2 = BLOCK narrowed to 4 findings (dispatch bypass choke point; approval-schema circularity -> embed minimal parser in Dispatch 0; activation head CAS state machine; controller UID separation) — all sustained, rev4 generating. PLAN-004: SOL round1 = BLOCK 12 findings (journald-datagram capture; observation-journal reframing; sealed golden isolation; honest small-n stats) — all sustained, rev3 generating. All artifacts: decisions/PLAN-00{3,4}-*/ |
+| R20 | 07-14 | Review 0xcodila loop design vs ours; what to reuse (review-only) | ordinary (research) | R20-loop-design | open | Codex web-research launched; reconcile + report to operator |
+| R21 | 07-14 | Evaluate Matt Pocock skills: install for Codex+Claude in this harness? (review-only) | ordinary (research) | R21-pocock-skills | open | Codex web-research launched; reconcile + report to operator |
+| R22 | 07-14 | Record ultimate vision (AI EM + engineer factory: idea->grill->tickets->execute->maintain); gap-review whole setup vs it | control-plane (review) | VISION.md + R22-gap-review | open | vision recorded (.orchestrator/VISION.md); dual gap review launched |
+
+## Open / in-progress (the anti-slippage watchlist)
+- **R09** OPEN — needs an operator decision (public-repo IDEAS-* handling).
+- **R11** IN-PROGRESS — measurement layer: Phase 2, gated behind verdict-integrity + metrics fix.
+- **R15/R16/R18** IN-PROGRESS — verdict-integrity fix, 7 action-item plan-drafts, this audit.
+
+
+=== FILE: .orchestrator/continue-logs/PENDING ===
+UNFINISHED on-box action items from the 2026-07-13 self-reflection audit
+(source: .orchestrator/decisions/SELF-REFLECT-2026-07/06-reconciled-findings.md).
+Work these in priority order, high-assurance lane, one per window:
+1. Close the isolation fail-open (preflight refuses when D5 unavailable & creds exist; scrub+network-cut fallback test).
+   [07-14 IN-FLIGHT → PLAN-005] Draft challenged (challenge.md: 2 blocking — --map-current-user denied
+   on this 24.04 box, use unmapped `unshare --user --net`; regression-gate fallback also fail-open);
+   adversarial SOL review running detached in decisions/PLAN-005-isolation-failopen/. Next: read
+   response.md verdict → dispositions → authorize as PLAN-005 → high-assurance spec (needs operator
+   per-dispatch approval) → PR, STOP for human merge. See continue-logs/NEXT.md.
+2. Bound base+review as a required check on every merge path incl. manual/high-risk.
+3. Snapshot + hash all terminal evidence; reconcile GC for orphans; SPEC-013 deletion class becomes a reconcile error.
+4. Schema-validate approvals/grants; cmd_merge re-reads+binds review.json.
+5. Scoped sudoers wrapper + worker MemoryMax/TasksMax.
+6. Reviewer-value seeded-defect experiment + metrics-semantics fix.
+Delete this file only when all are done (or only operator-blocked work remains).
+
+HIGH-PRIORITY (verdict integrity, operator-flagged 2026-07-13, evidence-confirmed):
+The review gate can PASS on unrun tests. Two stacked bugs:
+ (a) scripts/test + the dispatcher test files treat SKIP as exit 0 → a suite that skipped its core
+     tests still "exits 0"; and the venv-dependent tests SKIP inside the ISOLATED on-box test phase too
+     (codex-worker can't reach the operator .venv), so dispatcher/gate tests never run in the gate.
+ (b) review() tells the reviewer only "test_command exited 0" — never the test.log — so the reviewer
+     cannot see skips and marks the criterion MET (proof: SPEC-015/1 test.log SKIPs gate tests; its
+     review.json says tests MET; it merged).
+Fix (high-assurance lane, dual-validate): make SKIP != PASS for tests required by the touched trust
+class; make the venv deps available to the isolated test phase (or run dispatcher tests in a lane that
+has them); and give the reviewer the actual test.log tail (guard against worker-controlled content).
+See .orchestrator/decisions/VERDICT-INTEGRITY/ for the Codex investigation.
+
+VERDICT-INTEGRITY — Codex investigation result (.orchestrator/decisions/VERDICT-INTEGRITY/response.md):
+BROKEN but bounded — 1 false PASS of 14 (SPEC-015/1); 13 PASSes evidence-supported. Use the
+investigation's HIGHEST-LEVERAGE FIX when authorizing the verdict-integrity plan draft:
+ - Machine-enforced TEST ATTESTATION: required test IDs must actually execute + PASS; SKIP / missing
+   test / zero executed assertions FAIL AT THE TEST GATE, before the reviewer runs. (Fix the
+   orchestrator certifying skipped tests as passes — not just the reviewer prompt.)
+ - Also tighten: verdict schema must require one criterion PER acceptance criterion (not minItems:1),
+   with criterion text bound to the spec's list; evaluate_binary_review must not PASS when
+   security/scope/regression findings indicate a blocker (not merely non-empty).
+ - Reconcile the parallel codex-plan draft (.orchestrator/plans/drafts/verdict-integrity/) WITH this
+   investigation before implementing.
+
+PHASE 2 — MEASUREMENT LAYER (operator-requested; do AFTER verdict-integrity + metrics-semantics land,
+so we instrument on honest data, not broken metrics). Plan drafted:
+.orchestrator/decisions/MEASUREMENT-layer/plan-response.txt (95 lines) — CHALLENGE + authorize it first.
+Scope: (a) telemetry — extract tokens/durations/loops/PR-LOC/consult-round-trips/plan-deviation from
+existing evidence (read-only, no new trust surface); (b) an on-demand static HTML dashboard (no live
+service); (c) a ~10-14 task GOLDEN DATASET with planted-defect probes (scope-trap, SPEC_BLOCKED honesty,
+reviewer-probe with known subtle defect) for config A/B testing across model×effort×harness-version,
+scored on accuracy/stability/cost/time. NOTE the golden dataset's seeded-defect specs OVERLAP the
+reviewer-value experiment (audit action 7) — build them once, shared.
+
+PLAN-ARTIFACT STANDARD (operator, 2026-07-13): every plan must be a brief-caliber standalone artifact
+per .orchestrator/plans/PLAN-TEMPLATE.md. The 7 existing drafts in .orchestrator/plans/drafts/ were
+drafted BEFORE this standard — when authorizing each, UPGRADE it to full template depth (or re-draft
+with codex-plan passing PLAN-TEMPLATE.md as --context). All future plans: pass the template as context.
+
+
+REQUEST-AUDIT ADDENDUM — omissions found by SOL completeness audit
+Do not delete PENDING merely because the six numbered on-box items above are done. The following
+tracking closures must also be completed, transferred to an explicit operator-blocked record, or
+superseded by a cited tracked artifact.
+
+SELF-REFLECTION CLOSURE — status is INCOMPLETE, not DONE:
+- PLAN-002 required BOTH blind reports to be hashed pre-disclosure. report-hashes.txt contains only
+  the SOL report hash; the Claude report has no pre-disclosure hash. This cannot be repaired
+  retroactively. Record the validation failure explicitly; add a current post-hoc hash labeled
+  POST-DISCLOSURE (not equivalent to the missing commitment).
+- Re-run the SOL verification against the actual current 04-sol-independent.md and
+  05-claude-independent.md. Preserve the old defective verifier artifact; write a new verifier
+  artifact rather than overwriting it.
+- Update 06-reconciled-findings.md only after reconciling the new verification. Do not call the
+  holistic session complete until the new verifier passes or all remaining disputes are explicitly
+  recorded for the operator.
+
+LANE-B PLAN STATUS — generation is complete, authorization is not:
+All seven jobs completed successfully and produced non-empty status:draft plans:
+approval-schema, evidence-hashing, isolation-failopen, merge-required-check, reviewer-experiment,
+sudoers-ceilings, verdict-integrity. None is still generating.
+Next step: process them one at a time in priority order through written Claude challenge, required
+fresh-context SOL critique for high assurance, dispositions, authorization, immutable spec, dispatch,
+independent review, and human merge where required. Give each authorized artifact a unique durable
+plan ID; do not leave seven unrelated plans all named PLAN-001.
+Before authorizing verdict-integrity, reconcile its draft with VERDICT-INTEGRITY/response.md and add
+the investigation's missing requirements: exact one-to-one criterion count/text binding and a
+mechanical block when scope/regression/security findings contain blockers.
+
+MISSING RECONCILED ACTIONS:
+- Action 4, non-vacuous isolation drills: fold into the isolation-failopen work. Resolve the operator
+  home dynamically; plant positive canary credentials; fail when a probed credential is absent; prove
+  the test would fail on a misconfigured box. Do not accept deny-only probes against hardcoded
+  /home/val paths.
+- Action 8, truth-in-docs: remove or redirect nonexistent SETUP-BRIEF.md/SETUP-REPORT.md references;
+  reconcile MAX_PARALLEL docs (2) with code default (3); mark trust-manifest, dependency closure,
+  staged activation, and plan_ref as NOT BUILT until code exists; correct README claims that workers
+  never touch credentials and green tests are never mistaken for evidence. Land as a reviewed doc PR.
+- Action 10, representative work: SPEC-016/codex-plan is landed, but the required real multi-file
+  feature and real bugfix exercising regression_command have not happened. Wait for the operator to
+  supply real product work; do not substitute another toy helper. Record the resulting economics and
+  gate evidence before declaring action 10 complete.
+
+UNBUILT PLANNING / TRUST MECHANICS:
+- PLAN-001 explicitly requires a follow-up high-assurance spec adding plan_ref to the spec schema for
+  new specs while grandfathering SPEC-001..015. Draft, challenge, authorize, and dispatch that spec.
+- REBALANCE-codex also promises a machine-enforced capability/dependency trust manifest. Either build
+  it under a separate high-assurance spec or obtain an explicit operator decision to narrow the policy.
+  Until then, docs must say classification is policy/manual and must not call it machine-enforced.
+
+ORPHAN / TERMINAL-EVIDENCE RECONCILIATION:
+Copied remote refs contain four branches not merged into origin/integration:
+origin/codex/SPEC-004-1 (failed_test),
+origin/codex/SPEC-013-1 (no surviving spec/approval/attempt/state),
+origin/codex/SPEC-016-1 (stale_base, superseded by attempt 3),
+origin/codex/SPEC-016-2 (failed_review, superseded by attempt 3).
+Also reconcile SPEC-002/2 (launch + interrupted state but no result), SPEC-004 (no successor/closure),
+and SPEC-010 (SPEC_BLOCKED with no explicit fixture-closure record).
+Do not delete branches first. Seal available evidence, check for open PRs, classify each branch as
+historical fixture/superseded/orphan, make SPEC-013's missing-evidence class a reconcile error, then
+delete only branches/worktrees proven safe to remove. Record the disposition of every item.
+
+UNCOVERED ACTION-PLAN ITEMS:
+origin/integration ACTION-PLAN.md still has unchecked cloud-safe items A-E. The on-box continuation
+prompt currently selects only ON-BOX actions, so assign these to a real executor or explicitly add
+them to the on-box queue:
+A. real CI + least-privilege checkout (covered by verdict-integrity only when that spec lands);
+B. truth-in-docs;
+C. cmd_await derives wait from the attempt ceiling rather than an 8h hard cap;
+D. _match_glob '*' must not cross '/' and needs a nested-path regression test;
+E. reconcile reports orphan branches/worktrees and unresolved terminal failures.
+Do not mark A-E complete merely because ACTION-PLAN.md exists.
+
+UNTRACKED / PUBLICATION DISPOSITION:
+- IDEAS-shortlist, IDEAS-round2, and IDEAS-adversarial are untracked and contain personal founder and
+  business-strategy material. Ask the operator to choose exactly one: private archive outside the
+  public repo; redacted tracked summary; or deletion after verified backup. Do not commit them by
+  default.
+- Decide and record which sanitized artifacts from SELF-REFLECT-2026-07, VERDICT-INTEGRITY,
+  MEASUREMENT-layer, REQUEST-AUDIT, PLAN-002, and the seven plan drafts are authoritative and should
+  be tracked. Keep raw logs/transcripts local where size, privacy, or prompt content makes publication
+  inappropriate, but retain hashes and a sanitized decision/status record.
+- Resolve the separate SHARE-public-template irreversible-history fork still marked pending. Do not
+  infer consent to rewrite history.
+
+STALE AUTHORITY RECORDS:
+- Update REBALANCE-codex/DECISION.md to cite the operator's ratification evidence, or stop claiming it
+  is ratified; it currently says ratification is still required.
+- Update SPEC-015-quality-rubric/DECISION.md: operator approval and merge occurred, but the file still
+  says PENDING. Preserve the later verdict-integrity finding that its test/review certification was
+  false.
+- For decision directories without DECISION.md, either add a compact status/authority record or
+  reclassify the directory as investigation/provenance rather than leaving ambiguous authority.
+
+LIVE-ONLY VERIFICATION (perform from the operator context, not codex-worker):
+- Record `systemctl --user is-enabled` and `is-active` evidence plus the installed contents of
+  orchestrator-continue.timer and orchestrator-continue.service.
+- Verify the timer schedule is approximately every 5h and that the service executes the current
+  continue-session.sh.
+- Verify the 2026-07-20 first delegation/planning review reminder and the 2026-07-27 re-audit reminder.
+  If either reminder is absent, recreate it. Store a non-secret status record so the next isolated
+  audit can verify existence without access to the operator home.
+
+
+=== REPO STRUCTURE ===
+.github/workflows/:
+ci.yml
+
+.orchestrator/:
+approvals
+attempts
+AUTONOMY.json
+AUTONOMY.local.json
+continue.lock
+continue-logs
+continue-session.sh
+decisions
+escalations
+instance.json
+plans
+REQUEST-LEDGER.md
+state
+VISION.md
+
+.orchestrator/decisions/:
+ADOPT-fusion
+D5-worker-isolation
+G1-A-commit-model
+G4-A-approval-gate
+IDEAS-adversarial
+IDEAS-round2
+IDEAS-shortlist
+MEASUREMENT-layer
+PLAN-003-verdict-integrity
+PLAN-004-measurement
+PLAN-005-isolation-failopen
+PLAN-dual-validation
+R20-loop-design
+R21-pocock-skills
+R22-gap-review
+REBALANCE-codex
+REINFORCE-delegation-planning
+REQUEST-AUDIT
+SELF-REFLECT-2026-07
+SHARE-public-template
+SPEC-015-quality-rubric
+VERDICT-INTEGRITY
+
+.orchestrator/plans/:
+drafts
+PLAN-001.md
+PLAN-002.md
+PLAN-003.md
+PLAN-003.stderr
+PLAN-003.stdout
+PLAN-004.md
+PLAN-004.stderr
+PLAN-004.stdout
+PLAN-TEMPLATE.md
+
+scripts/:
+codex-plan
+delegation_report.py
+dispatch
+dispatch.py
+init-operator
+integrate
+lib
+__pycache__
+requirements.txt
+setup-worker-user.sh
+test
+verdict.schema.json
+
+specs/:
+SPEC-001.yaml
+SPEC-002.yaml
+SPEC-003.yaml
+SPEC-004.yaml
+SPEC-005.yaml
+SPEC-007.yaml
+SPEC-008.yaml
+SPEC-009.yaml
+SPEC-010.yaml
+SPEC-011.yaml
+SPEC-012.yaml
+SPEC-014.yaml
+SPEC-015.yaml
+SPEC-016.yaml
+spec.schema.json
+
+tests/:
+capitalize.sh
+codex_plan.sh
+delegation_report.sh
+dispatch_gate4.sh
+dispatch_parallel.sh
+lower.sh
+repeat.sh
+reverse.sh
+slugify.sh
+smoke.sh
+squeeze.sh
+trim.sh
+upper.sh
+worker_isolation.sh
+
+
+=== DISPATCH SUBCOMMANDS (grep "^def cmd_" scripts/dispatch.py) ===
+def cmd_launch(spec_id: str) -> None:
+def cmd_status(attempt_id: str) -> None:
+def cmd_await(attempt_id: str, interval: int = 5, max_wait: int = 8 * 3600) -> None:
+def cmd_cancel(attempt_id: str) -> None:
+def cmd_health(attempt_id: str, inactivity_min: int = HEALTH_INACTIVITY_MIN) -> None:
+def cmd_reconcile() -> None:
+def cmd_metrics() -> None:
+def cmd_merge(attempt_id: str) -> None:
+def cmd_integrate(attempt_ids: list[str]) -> None:
+
+
+=== PLAN-003 §1 (Phase 1, challenged rev3) ===
+## 1. Decision & non-goals
+
+Phase 1 will establish a non-self-gating path before changing the existing gate. A new Dispatch 0 will install a minimal frozen bootstrap verifier outside candidate-controlled repository content. That verifier will carry a frozen required-test inventory and a frozen expected-assertion-ID inventory, run candidate code through the worker boundary, provision root-owned trusted snapshots under `/srv/codexwork/installed/<commit>`, and issue machine-checked activation manifests. It will gate Dispatches 1–4 and will validate Dispatch 4’s activation; Dispatch 4 may not activate by selecting and passing only its own new policy or tests.
+
+After Dispatch 0:
+
+- Dispatch 1 performs a high-assurance, behavior-preserving metrics extraction.
+- Dispatch 2 performs the ordinary-risk metrics semantic correction.
+- Dispatch 3 performs the high-assurance assertion migration.
+- Dispatch 4 installs the repaired parent-owned test-attestation gate, isolated environment, source/target binding, tree revalidation, activation enforcement, and reviewer evidence.
+- Dispatch 5 installs verdict schema v4, positional criterion binding, duplicate-key rejection, and structured blocking findings under the activated Dispatch 4 parent.
+
+The installed parent dispatcher—not candidate content—will select required tests from the exact approved base and candidate Git trees. Each required test will have a parent-owned exact expected-assertion-ID set. Authorization requires an exact set match: every expected ID exactly once, with no missing, unknown, or duplicate assertion.
+
+Trusted assertion events will be producer-authenticated operationally. Candidate application processes receive neither an attestation nonce nor an assertion descriptor. Parent-owned command helpers scrub attestation and Python environment variables, close all non-whitelisted descriptors before every candidate `exec`, and use per-invocation nonces and separate trusted and supplemental pipes. The trusted controller alone converts observed command outcomes into assertion events and owns aggregation.
+
+Required test content, runner, policy, helpers, fixtures, schemas, wrappers, and interpreter identities will come from a root-owned, read-only installed snapshot materialized from the exact parent commit. Candidate-modified tests remain supplemental. The candidate tree will be revalidated after the test phase, immediately before review, and immediately before PR creation.
+
+Review verdict schema v4 will retain positional binding: one ordered entry for every acceptance criterion persisted in the attempt manifest before candidate work. Review JSON parsing will reject duplicate object keys and nonstandard constants. Structured scope, regression, and security blockers will mechanically prevent PASS.
+
+Metrics will retain the extraction/semantics split. Extraction parity baselines will be captured by the operator before candidate work and bound by the approval artifact. Straight-through metrics will be anchored by terminal-spec time while consulting the spec’s complete attempt history.
+
+Phase 2 implementation work requires all six Phase 1 dispatches—Dispatches 0–5—to be completed, merged where applicable, installed, activated, and validated. Dispatch 2 is necessary but not sufficient.
+
+This plan chooses B11 option **(a)**: the separate approval-schema plan from baton action 4 must land and activate before Dispatch 0. PLAN-003 will use that schema to bind exact dispatch, attempt, verifier, baseline, inventory, and changed-test blob identities. Weakening the approval invariant would leave the highest-risk bootstrap and test-migration changes without machine-validatable authorization.
+
+Non-goals:
+
+- Do not create a complete second production gate in Dispatch 0. It is a deliberately minimal, frozen bootstrap verifier.
+- Do not require a read-only bind mount of the candidate tree in revision 3. Tree revalidation is mandatory; a read-only bind is optional hardening.
+- Do not duplicate the full sealing, terminal-manifest, and evidence-hash-chain design assigned to the separate `evidence-hashing` plan.
+- Do not claim that escaping or delimiting reviewer log text neutralizes semantic prompt injection.
+- Do not add a hash-locked wheelhouse or redesign dependency locking in this plan.
+- Do not change the worker model, reasoning depth, priority service tier, reviewer seat, branch topology, or human merge authority.
+- Do not permit candidate dispatcher, runner, policy, schema, helper, fixture, or test content to authorize itself.
+- Do not treat aggregate exit zero, a positive assertion count, free-form `test_command` output, or reviewer prose as proof that required tests ran.
+- Do not expose the operator’s home or `.venv`, install packages as `codex-worker`, enable candidate network access, or import Python modules from the candidate root into the trusted controller.
+- Do not alter `.orchestrator/attempts/SPEC-015/1/*`.
+- Do not retroactively authorize legacy verdicts or test logs.
+- Do not infer an unmatched merge’s actor.
+- Do not authorize an incompatible test change outside the three-state compatibility sequence or a separately approved external bootstrap.
+- Do not allow CI’s portable suite to substitute for an on-box activation artifact.
+
+## 2. Current-state evidence
+
+
+=== PLAN-004 §1 (Phase 2, challenged rev2) ===
+## 1. Decision & non-goals
+
+Phase 2 will add a measurement layer as a read-only projection over existing orchestrator evidence. Its canonical artifact is the append-only JSONL ledger `.orchestrator/measurement/events.jsonl`, populated idempotently by the operator-run `scripts/measure` collector. A disposable SQLite index and self-contained static HTML/JSON report are rebuilt from that ledger. Evaluation uses twelve versioned golden tasks under `eval/golden/v1/`, scored on separate accuracy and safety dimensions, and `eval/run-matrix` runs quota-authorized pairwise A/B comparisons. The architecture, four capture points, twelve-task taxonomy, 0–100 rubric, eight-step rollout, and anti-Goodhart controls are fixed by the accepted draft and are not reconsidered here.
+
+**Precondition:** no Phase 2 implementation spec may be authorized or dispatched until Phase 1’s verdict-integrity and metrics-semantics changes have landed on the target branch, passed `./scripts/test`, and produced an authorized evidence digest. Phase 2 must instrument the corrected Phase 1 meanings; it must not normalize, reinterpret, or preserve known-dishonest pre-Phase-1 metrics as though they were comparable data. Pre-Phase-1 attempts may be collected only with `payload.semantic_epoch = "pre-phase-1"` and must be excluded from default trends and A/B comparisons.
+
+Non-goals are:
+
+- Measurement never participates in dispatch, gate, merge, retry, remediation, or escalation decisions.
+- No gate may import measurement code or read the ledger, SQLite database, report, evaluation results, or measurement configuration.
+- SQLite is not evidence and is not backed up as canonical state.
+- There is no report server, API, authentication layer, external JavaScript dependency, or new database service.
+- The report does not compute a composite “factory efficiency,” configuration rank, or universal throughput target.
+- Phase 2 does not add capture points beyond the four already approved.
+- Phase 2 does not scrape process tables as authoritative history.
+- Golden evaluation never operates on production worktrees, production branches, or production PRs.
+- Phase 2 does not change worker isolation, credential access, branch protection, gate ordering, verdict semantics, or the authority of existing evidence.
+- Phase 2 does not promise deterministic model output. A seed is recorded only as experiment metadata.
+- Phase 2 does not retroactively fabricate unavailable Claude token counts, timestamps, review dispositions, plan actions, gate timings, remediation counts, escalation paths, configuration IDs, or harness versions. Missing values are `null` with explicit coverage, never zero.
+- Phase 2 does not reconstruct review rounds that the current evidence model does not record.
+- Phase 2 does not treat the existence of a gate artifact as proof that the gate passed. Artifact presence proves only that the stage was reached unless an authoritative artifact records its outcome.
+
+## 2. Current-state evidence, assumptions, and provenance boundary
+
+warning: Codex's Linux sandbox uses bubblewrap and needs access to create user namespaces.
+codex
+I’m treating “built” as an operational, evidenced capability—not a policy promise or a draft plan. I’ll also separate the strong implementation core from the known false-certification and isolation defects, since those materially affect stages 6–8.
+codex
+## Overall verdict
+
+The factory has a substantial, safety-oriented **spec-to-PR control plane**, but it is not yet the end-to-end AI engineering factory described in the vision.
+
+Using “BUILT” only for operationally demonstrated capabilities:
+
+- **BUILT:** 2 stages
+- **PARTIAL:** 6 stages
+- **MISSING:** 2 stages
+
+The implementation is concentrated in stages 5–8. Idea intake, external ticketing, deployment, and product maintenance remain largely outside the system.
+
+## 1. Lifecycle coverage matrix
+
+| # | Lifecycle stage | Status | Evidence and judgment |
+|---|---|---|---|
+| 1 | Grill the idea | **PARTIAL — EVIDENCE-LIMITED** | `CLAUDE.md` defines independent Claude breadth research, independent Codex/SOL research, falsification, source capture, and reconciliation. Relevant directories exist at `.orchestrator/decisions/IDEAS-*`, `R20-loop-design/`, and `R21-pocock-skills/`. But R20/R21 remain open, their contents are not in the bundle, and there is no evidenced general intake command or repeatable idea-grilling workflow that turns an arbitrary idea into a completed research package. |
+| 2 | Review / decide | **BUILT** | The dual-validation decision process is real and repeatedly used: [`CLAUDE.md`](/home/val/orchestrator/CLAUDE.md), `.orchestrator/decisions/PLAN-dual-validation/`, `REBALANCE-codex/`, and `REINFORCE-delegation-planning/`. It supports adversarial PASS/BLOCK review, dispositions, revision binding, escalation of disagreement, and presentation to the operator. Authority records are stale in places, but the core decision capability exists. |
+| 3 | Break down into tickets/specs | **PARTIAL** | Real plans, schema-validated specs, dependencies, approvals, and the Codex plan authoring helper exist: [`scripts/codex-plan`](/home/val/orchestrator/scripts/codex-plan), [`specs/spec.schema.json`](/home/val/orchestrator/specs/spec.schema.json), `.orchestrator/plans/`, and `SPEC-001`–`SPEC-016`. What is missing is an evidenced general transformation from a reconciled idea into a complete ticket DAG, including dependency analysis, acceptance criteria, deployment work, and maintenance work. `plan_ref` is still promised rather than enforced. |
+| 4 | Log tickets in Jira / Linear | **MISSING** | No Jira/Linear adapter, API client, synchronization state, external ticket identifiers, or tracker reconciliation mechanism appears in the bundle. `.orchestrator/REQUEST-LEDGER.md` is an internal request log, not the tracking-system capability named by the vision. |
+| 5 | Iteratively improve the plan | **BUILT** | Draft → Claude challenge → SOL BLOCK/PASS → dispositions → revised plan → authorization is operationally demonstrated. Evidence includes `.orchestrator/plans/PLAN-001.md`, `PLAN-003.md`, `PLAN-004.md`, and `.orchestrator/decisions/PLAN-003-verdict-integrity/`, `PLAN-004-measurement/`, and `PLAN-005-isolation-failopen/`. The mechanism is artifact-heavy and partly manual, but genuine iteration exists. |
+| 6 | Iteratively execute | **PARTIAL — EVIDENCE-LIMITED** | The strongest implementation area: `launch`, `await`, `cancel`, `health`, `reconcile`, bounded remediation, parallel attempts, stale-base refusal, merge, and integrate are represented in [`scripts/dispatch.py`](/home/val/orchestrator/scripts/dispatch.py), tests, attempts, state, and escalation records. It is not safely complete: known isolation fail-open behavior, uncovered merge paths, missing machine-enforced trust classification, incomplete approval validation, orphan evidence, and the false test certification all weaken the promised execution boundary. Exact enforcement cannot be verified without the full code. |
+| 7 | Review results | **PARTIAL** | Independent Claude review, structured verdict schema, diff/evidence binding, and fail-closed intent exist in [`scripts/verdict.schema.json`](/home/val/orchestrator/scripts/verdict.schema.json), dispatcher review handling, and `.orchestrator/attempts/`. But `VERDICT-INTEGRITY/response.md` found one false PASS among fourteen: the reviewer certified tests it could not see had skipped. Criterion count/text binding and mechanical blocker handling are also not yet implemented. |
+| 8 | Test it: deterministic gates + golden evaluation | **PARTIAL** | A repo suite, per-spec `test_command`, CI, isolation tests, and gate tests exist under [`tests/`](/home/val/orchestrator/tests) and [`.github/workflows/ci.yml`](/home/val/orchestrator/.github/workflows/ci.yml). However, SKIP currently can masquerade as PASS for required tests, isolated workers cannot access needed dependencies in some tests, and the golden dataset/evaluation matrix is only planned in `PLAN-004` and `MEASUREMENT-layer/`. |
+| 9 | Set it up running: deploy / operate | **MISSING** | The repository can operate the orchestrator itself on a VPS, but there is no evidenced product deployment lifecycle: no deploy command, release artifact model, environment promotion, secrets/configuration interface, rollout, rollback, service health verification, or deployment evidence binding. Opening or merging a PR is not deployment. |
+| 10 | Maintain it | **PARTIAL — EVIDENCE-LIMITED** | `dispatch health`, `reconcile`, the continuation timer, reminders, and tracked pending work provide narrow maintenance of the factory itself. Evidence: `.orchestrator/continue-session.sh`, `continue-logs/PENDING`, and the dispatcher health/reconcile commands. There is no service inventory, monitoring/SLO system, incident loop, dependency/security upkeep, scheduled maintenance policy, or autonomous maintenance of a deployed product such as EVA. Live timer verification is explicitly still pending. |
+
+## 2. Mismatches with the vision
+
+### Direct contradictions
+
+- **Claude’s role has been narrowed below the vision.** The vision says Claude and Codex are both architects, executors, and management capacity. `CLAUDE.md` instead reserves Claude primarily for orchestration, authorization, synthesis, and review, while prohibiting it from taking over implementation. That may be a sound trust policy, but it is not the stated role model.
+
+- **The system starts at a spec, not at an idea.** The README’s real product is “write a small spec, approve it, receive a PR.” The vision starts several stages earlier with arbitrary idea intake, adversarial research, decision-making, and decomposition.
+
+- **The lifecycle ends at integration.** The vision continues through deployment, operation, and maintenance. The dispatcher ends at merge/integrate.
+
+- **External ticket tracking is explicitly required but absent.** Considerable effort has gone into an internal request ledger while Jira/Linear integration is nonexistent.
+
+- **Safety claims overstate observed reality.** The README says green tests are never mistaken for evidence and workers never touch credentials. The ledger records a false PASS caused by skipped tests, plus a residual worker-readable Codex token and isolation fail-open work still underway.
+
+- **Machine-enforced trust classification is claimed before it exists.** `CLAUDE.md` calls for a capability/dependency trust manifest, while `continue-logs/PENDING` says this is unbuilt and classification is currently policy/manual.
+
+- **Recorded project state is internally inconsistent.** R09 is `done` in the ledger table but `OPEN` in its watchlist; R18 is `done` in the table but grouped as `IN-PROGRESS`. Stale decision authority records are also acknowledged. A management system cannot reliably orchestrate a long lifecycle if its own canonical state is ambiguous.
+
+### Architectural over-shoot
+
+The project has invested deeply in:
+
+- self-development bootstrap verification;
+- root-owned installed snapshots;
+- approval digests and activation manifests;
+- template/bootstrap publication;
+- evidence hashing and provenance;
+- delegation metrics and process audits;
+- elaborate per-request planning ceremony.
+
+Much of this supports safe execution, but it is disproportionately advanced relative to the missing idea intake, tracker, deployment, and maintenance capabilities. In effect, the factory is heavily optimizing the middle of the lifecycle before establishing the full lifecycle.
+
+`PLAN-003` is the clearest example. A frozen Dispatch 0 plus six staged dispatches may repair the bootstrap problem, but it also risks creating a second control plane whose correctness and maintenance burden rival the original. An installed-parent release boundary is necessary; the chosen implementation should be reduced to the smallest mechanism that prevents candidate code from certifying itself.
+
+### Architectural under-shoot
+
+- No first-class lifecycle object links **idea → research → decision → plan → ticket → attempt → PR → release → running service → maintenance event**.
+- No generic idea intake or research result schema.
+- No external ticket synchronization.
+- No deployment or release abstraction.
+- No product/service inventory.
+- No ongoing operational feedback loop.
+- No completed golden evaluation layer.
+- No representative real multi-file feature or bugfix proving that the factory works beyond toy helpers.
+- Worker execution is software-repository-specific and network-off, which constrains the claim that the operator can drop “any idea” into it.
+
+## 3. Prioritized missing pieces
+
+| Priority | Missing piece | Build sketch | Effort |
+|---|---|---|---|
+| 1 | Restore truthful trust gates | Establish a minimal installed-parent verifier that mechanically requires every selected test/assertion to execute and pass; bind review, base, approval, and candidate identities; fail closed when isolation is unavailable. Avoid expanding Dispatch 0 beyond this bootstrap boundary. | **L** |
+| 2 | Canonical lifecycle spine | Define durable, versioned entities and transitions for Idea, Research, Decision, Plan, Ticket, Attempt, Release, Service, Incident, and Maintenance Task, with one identifier chain and explicit authority at each transition. | **L** |
+| 3 | Repeatable idea-grilling workflow | Add an intake command that creates two isolated vendor research assignments, requires claim-level sources and falsification attempts, then emits a reconciled recommendation or explicit disagreement for the operator. | **M** |
+| 4 | Ticket decomposition and tracker sync | Generate a dependency-aware ticket DAG from an authorized decision, then create/update Jira or Linear issues idempotently while storing external IDs and detecting drift. | **M** |
+| 5 | Enforced plan lifecycle | Implement plan revision/digest state, `plan_ref` in specs, challenge dispositions, authorization, and automatic invalidation when material scope, risk, validation, or rollback assumptions change. | **M** |
+| 6 | Honest golden evaluation | After test integrity is repaired, implement the sealed golden tasks, planted defects, pairwise configuration evaluation, safety/accuracy scoring, and semantic-epoch separation described by `PLAN-004`. | **M** |
+| 7 | Deployment and release plane | Introduce a target adapter contract for build artifacts, environment configuration, secret references, staged rollout, health verification, rollback, and release evidence bound to the reviewed commit. | **L** |
+| 8 | Operations and maintenance loop | Add a service registry, health/SLO checks, alerts, incident records, scheduled dependency/security upkeep, remediation tickets, and human escalation boundaries. | **L** |
+| 9 | One representative end-to-end pilot | Run a real multi-file feature or bugfix from idea intake through external tickets, execution, review, golden checks, deployment, and a scheduled maintenance event; use its failures to simplify the architecture. | **M** |
+| 10 | Truth and authority cleanup | Reconcile the ledger/watchlist, stale decision verdicts, orphan attempts/branches, live timer evidence, missing-document references, parallelism claims, and README safety language before presenting the system as production-ready. | **S–M** |
+
+## 4. Single biggest risk
+
+The biggest risk is **recursive control-plane accretion becoming the product**.
+
+The evidence already shows many concurrent plans, audits, bootstrap mechanisms, authority repairs, measurement designs, and self-hosting concerns, while no representative product has traveled through all ten stages. Every additional trust mechanism creates more code that itself needs classification, approval, testing, activation, evidence, and maintenance.
+
+If that continues, the factory can become extraordinarily sophisticated at governing its own incomplete middle stage without ever becoming the operator’s idea-to-maintained-system factory. The corrective is not to abandon the trust boundary; it is to stabilize the smallest truthful execution kernel, then immediately prove a thin end-to-end lifecycle with real work before adding further control-plane sophistication.
+
+REVIEW COMPLETE
+tokens used
+23,244

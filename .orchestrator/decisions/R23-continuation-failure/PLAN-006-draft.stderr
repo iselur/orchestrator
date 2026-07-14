@@ -1,0 +1,1602 @@
+OpenAI Codex v0.144.3
+--------
+workdir: /home/val/orchestrator
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 019f5f55-9785-7991-9193-685071ce7a86
+--------
+user
+Draft a decision-complete PLAN (you are the planner; Claude challenges then authorizes) to the PLAN-TEMPLATE standard supplied below. Frontmatter: id PLAN-006, status: draft, ledger_ref: R23, lane: control-plane, revision: 1.
+
+TOPIC: **the orchestrator's OUTER LOOP** — the autonomous continuation mechanism that keeps the factory working across usage windows, reboots, and detached-job completions, so the operator does not have to manually restart the session every ~5 hours when usage limits are hit.
+
+This is NOT "fix the timer". The prior design (a systemd --user timer firing `claude -p` every 5h with a PENDING baton file) has been DELETED after it wasted an entire night. Read the reframe + forensics + loop-design research inlined below; they are your evidence base. Design the loop properly.
+
+HARD REQUIREMENTS the design must satisfy (from the operator + the forensics):
+1. Usage-limit exhaustion is a NORMAL loop state, not a crash: the loop must detect it, wait for window reset, and resume automatically with context intact. Zero operator restarts.
+2. Event-driven re-entry, not tick-driven: primary events are (a) detached job completion, (b) usage-window reset, (c) operator input. A clock may serve only as a fallback heartbeat. Note the fatal defect of the old design: `claude -p` is ONE-SHOT — ending a turn kills the process, orphaning every detached job (proven: two overnight windows produced 12 minutes of work; a Codex consult sat dead for 9 hours). The agent runtime must be able to actually RECEIVE completion events.
+3. A real VALIDATOR (the deepest missing piece): every iteration must produce a durable artifact delta (plan revision, verdict, decision record, PR, ledger row). An iteration that produces none is a FAILED iteration — detected, diagnosed, surfaced. Silent no-op windows must be impossible.
+4. Durable cross-iteration MEMORY: an append-only iteration ledger recording, per iteration: what was picked, hypothesis/intent, what was done, outcome, artifacts produced (with digests/paths), failure class, next step. Conversation memory dies with the process; this must not.
+5. Honest STOPPING + circuit breaker: work exhausted / operator-blocked / budget exhausted / repeated identical failure class → stop and surface to the operator, never spin. 
+6. Safety: the existing HALT killswitch honored; `main` never touched; high-risk changes still require the operator's approval artifact; the loop must never merge trust-critical work autonomously. A persistent agent session with --dangerously-skip-permissions is a standing capability — address its blast radius explicitly (what it can and cannot reach, and how the operator revokes it instantly).
+7. Must work on THIS box: Ubuntu 24.04, systemd --user available, tmux available, single VPS, Claude CLI + Codex CLI both installed. NOTE: the box has a defect — codex's bwrap sandbox fails (`bwrap: loopback: Failed RTM_NEWADDR`, AppArmor unprivileged-userns restriction), so codex consults must currently be fed via stdin with inlined context. Say whether the loop should depend on fixing that or route around it.
+
+DELIVER (beyond the template sections): 
+- The loop's state machine (states, events, transitions, and which are machine-checked).
+- The exact runtime choice (persistent interactive session vs one-shot vs hybrid) with the evidence for it, and the exact supervision mechanism (systemd service? tmux + watchdog? something better) — including how the supervisor detects "usage limit reached" vs "crashed" vs "idle-but-healthy" WITHOUT burning quota to check.
+- The iteration-ledger schema.
+- The progress-validator definition (what counts as a durable artifact delta, mechanically).
+- The stopping/circuit-breaker rules.
+- At least 2 alternative designs considered and why yours wins.
+- Falsifiable validation: how we PROVE the loop survives (i) usage-limit exhaustion, (ii) a detached job completing while idle, (iii) a reboot, (iv) a wedged/hung session, (v) an iteration that produces nothing — each as a test that fails on the old design and passes on yours.
+---
+id: PLAN-NNN
+created: <UTC>
+author: <model that drafted it>
+status: draft | challenged | authorized | superseded
+ledger_ref: R.. (REQUEST-LEDGER.md row)
+lane: ordinary | high-assurance | control-plane
+supersedes: <prior plan id, if any>
+---
+
+# PLAN-NNN — <one-line title>
+
+> **Brief-caliber standard (operator, 2026-07-13):** every plan artifact must reach the depth of the
+> original SETUP-BRIEF — a standalone document detailed enough that an agent can execute it
+> autonomously with NO further clarification. Not a bullet sketch. If a section is genuinely N/A, write
+> "N/A because …". Codex drafts to this template; Claude challenges + authorizes; both then follow it.
+
+## 1. Decision & non-goals
+The single decision this plan commits to, in one paragraph. Explicit non-goals / out-of-scope so the
+executor cannot drift.
+
+## 2. Current-state evidence (facts, with citations)
+What is true NOW, each claim cited to a path:line / commit / attempt / evidence file. Distinguish
+observed fact from assumption. This is the ground truth the design rests on — get it right or the plan
+is built on sand (cf. the audit's self-referential-claims finding).
+
+## 3. Requirements & acceptance criteria (numbered, testable)
+Each requirement as a falsifiable statement. These become the spec's `acceptance_criteria` verbatim, so
+write them as tests, not aspirations. Include the negative/abuse cases, not just the happy path.
+
+## 4. Design / approach (the detailed part)
+The actual mechanism: data structures, control flow, file-level changes, interfaces, invariants
+preserved. Enough that implementation is transcription, not invention. Include a concrete alternatives
+subsection: ≥2 alternatives considered and why THIS one wins (or why none — with reason).
+
+## 5. Affected boundaries & consumers
+Every trust boundary, shared contract, schema, credential, gate, or downstream consumer this touches.
+For control/high-assurance work: the transitive dependency closure (what silently depends on this).
+
+## 6. Ordered implementation steps
+Numbered, each naming the file(s) and the concrete change, in an order that keeps the tree working.
+A reviewer should be able to check the diff against these one-to-one.
+
+## 7. Failure modes & blast radius
+For each realistic failure: trigger → consequence → mitigation. What is the worst case if this ships
+wrong? What is irreversible? Include the "we got it wrong" recovery path.
+
+## 8. Validation plan (falsifiable)
+The exact acceptance test(s) that prove done — including the test that FAILS on the current (broken)
+state and PASSES after (the regression-proof discipline). How each acceptance criterion is
+mechanically verified. "Should work" is never validation.
+
+## 9. Rollback / irreversibility
+How to undo. If irreversible, say so loudly and what containment exists.
+
+## 10. Open questions / operator decisions
+Anything only the operator can decide. If none, "none".
+
+## 11. Provenance (filled during challenge/authorization — NOT by the drafter)
+- **Challenge (Claude):** ≥1 named objection (unsupported assumption / missing failure mode / scope
+  ambiguity / insufficient validation) or why none applies. "Looks good" is not a challenge.
+- **Disposition (drafter):** revise / reject-with-evidence / accept-and-amend, per objection.
+- **Dual-validation (high-assurance/control-plane):** SOL design-review verdict (PASS/BLOCK + rounds);
+  Claude verdict. Unresolved disagreement → operator.
+- **Authorization:** digest of the authorized revision; who authorized; date. Silent post-auth edits
+  void it.
+- **Completion reconciliation:** followed / authorized-deviation / unauthorized-deviation, at the end.
+
+
+=== REFRAME (operator) ===
+# REFRAME (operator, 2026-07-14): the timer IS the outer loop
+
+My R23 assessment was mis-framed. I treated the continuation timer as infrastructure ("the unit
+fired, the script had a bug, delete it, run tmux instead") and R20 as a separate literature review.
+They are the same object: **the continuation mechanism is the orchestrator's OUTER LOOP**, and the
+timer is only its clock. Judged as a loop — using the exact criteria R20 extracted — it failed on
+every axis, and the fixed-interval clock was the least of it.
+
+## The factory has two loops
+
+- **Inner loop (well designed, exists):** spec → dispatch attempt → integrity/scope/test/review
+  gates → remediation (bounded) → PR. Validator: deterministic gates + bound reviewer. State:
+  per-attempt evidence. Stopping: remediation limits + escalation records. Incumbent: `integration`,
+  never regressed by a failed attempt.
+- **Outer loop (never designed):** what keeps the orchestrator itself working across usage windows,
+  reboots, and detached-job completions — i.e. what makes the operator NOT have to restart it every
+  5 hours. This is the loop that broke overnight.
+
+## The outer loop against R20's own criteria
+
+R20 found three indispensable loop facilities (real validator, durable state, stopping condition)
+plus an applicability test. Our outer loop:
+
+| Facility | Ours (deleted design) | Verdict |
+|---|---|---|
+| **Driver / clock** | Fixed 5h systemd timer | Wrong axis: fixed-interval, not event-driven. The real events are *usage-window reset* and *detached-job completion* — neither is a clock tick. |
+| **Agent runtime (liveness)** | `claude -p` one-shot | **Fatal.** Ending a turn kills the process, so any detached work is orphaned; the agent could never receive the completion event it was waiting for. 9h of wall clock → ~12min of work. |
+| **Validator** | **NONE** | The loop had no notion of "did this iteration produce anything?" A window that did nothing looked identical to a window that did work. Nothing detected 2 wasted windows. This is the deepest defect. |
+| **Durable state / memory** | PENDING baton + NEXT.md prose | Crude: no record of hypothesis → outcome per iteration; each window re-derived context from scratch (`claude -p` without `--continue`). R20's "semantic ledger" critique of AutoResearch's untracked TSV applies to us verbatim. |
+| **Stopping condition** | "PENDING file absent" | Under-specified: no budget exhaustion, no repeated-identical-failure circuit breaker, no operator-blocked state. (Ironically the gate worked — it correctly fired *because* PENDING existed — the loop just couldn't do anything once awake.) |
+| **Incumbent / no-regression** | n/a | A failed window left orphaned processes and stale in-flight state rather than a clean incumbent. |
+
+## The actual requirement (operator, restated)
+
+"So I don't have to restart you every five hours when the box limits are hit." The outer loop must:
+
+1. **Survive usage-limit exhaustion** and resume automatically at window reset — the limit is a
+   normal, expected loop state, not a crash.
+2. **Be event-driven, not tick-driven** — re-enter on (a) detached job completion, (b) usage-window
+   reset, (c) operator input; the clock is a fallback heartbeat, not the primary driver.
+3. **Keep a live agent** that can actually receive those events (a persistent session, not one-shot
+   print mode).
+4. **Validate its own progress** — every iteration must produce a durable artifact delta (plan
+   revision, verdict, PR, ledger row, decision record). An iteration producing none is a FAILED
+   iteration: surfaced, diagnosed, and repaired — never silently repeated. This is the missing
+   validator that let the box idle all night.
+5. **Remember across iterations** — what was attempted, what the outcome was, what is next, in
+   durable form (not conversation memory, which dies with the process).
+6. **Stop honestly** — work exhausted / operator-blocked / budget exhausted / repeated identical
+   failure (circuit breaker) → surface to the operator instead of spinning.
+
+## Consequence
+
+The outer loop is a control-plane mechanism (it governs autonomous execution, budget, and when the
+factory acts without a human). Per CLAUDE.md it gets planning-first + dual validation like anything
+else — not a bash script written from the hip, which is exactly how the deleted one came to be.
+The reuse candidates R20 ranked (semantic iteration ledger, gate-informed retry with an explicit
+incumbent, eligibility test, stop policy) are not just for worker attempts — they are the
+specification for THIS loop.
+
+Plan: `PLAN-006` (outer loop / autonomous continuation), ledger R23. The deleted timer stays
+deleted; nothing is reinstalled until the plan is authorized.
+
+
+=== FORENSICS (what actually happened) ===
+# R23 — Why the overnight continuation "did nothing" (2026-07-14)
+
+## What actually happened (evidence)
+
+The timer infrastructure WORKED mechanically. `orchestrator-continue.timer` fired on schedule
+(00:36 and 05:36 UTC — journalctl), the gate correctly saw the PENDING baton, and both runs
+launched `claude -p`. Both exited 0.
+
+**Failure layer 1 — one-shot print mode treated as a living session (the fatal design flaw).**
+`claude -p` is a single turn: the process EXITS the moment the model ends its turn. Both overnight
+sessions launched *detached* Codex consults and then ended their turn "to wait for background
+notifications" (verbatim in `continue-logs/20260714T053621Z.log`: "I'll end this turn and resume
+when the background tasks notify me"). In print mode those notifications can never arrive — the
+process is already dead. Result: 9 hours of wall clock bought ~12 minutes of agent time (7 min +
+5 min), and every detached job was orphaned until the next 5-hour window.
+
+**Failure layer 2 — the detached consults themselves died on the box's broken Codex sandbox.**
+`decisions/PLAN-005-isolation-failopen/response.attempt1.md` and `response.attempt2.md` are both
+0 bytes with ~36KB of stderr: the `bwrap: loopback: Failed RTM_NEWADDR` failure (Ubuntu 24.04
+`apparmor_restrict_unprivileged_userns` blocks codex's sandbox netns setup). So even the one step
+each window queued produced nothing to process.
+
+**Failure layer 3 — no event-driven re-entry.** Nothing watched for "detached job finished/died";
+the only re-entry was the next 5h window, which started a FRESH `claude -p` with no conversation
+context (the script never used `--continue`), re-paying orientation cost every time.
+
+Net effect, as the operator observed: the box was idle all night while a dead consult sat orphaned.
+
+## Actions taken (operator-ordered)
+
+- `orchestrator-continue.timer` + `.service` disabled, unit files and wants-symlink deleted,
+  daemon reloaded. Verified: no orchestrator timers remain.
+- `continue-session.sh` and `continue-logs/` KEPT as evidence and design reference (gitignored).
+- The orphaned PLAN-005 SOL consult relaunched (attempt 3) via the stdin method that works on this
+  box despite the bwrap defect.
+
+## Proposed replacement (operator decision)
+
+**Option A — RECOMMENDED: persistent tmux-resident session + script-only watchdog.**
+Run the orchestrator as a LONG-LIVED interactive `claude` session inside tmux — the exact mode that
+ran today's entire PLAN-003/004 pipeline, provably receiving background-task notifications and
+self-continuing. A 10-minute systemd watchdog timer runs a bash-only check (zero quota):
+- tmux session absent AND PENDING baton exists → create session, send the resume prompt;
+- claude process exited inside tmux → relaunch with `--continue` (context preserved);
+- usage-limit marker in the pane → leave it; the next check retries after reset (self-healing —
+  no operator restarts).
+Pros: notifications work (no orphaned consults); persistent context; survives window exhaustion;
+operator can `tmux attach` any time to watch or steer. Cons: a persistent
+`--dangerously-skip-permissions` session (same trust posture as the deleted design); needs the
+HALT-file killswitch honored in the resume prompt (kept).
+
+**Option B — minimal: keep timers but fix the two fatal bugs.** `claude -p --continue` each window
+(resume the same conversation) + a binding prompt rule: "You are one-shot; ending your turn kills
+the process. NEVER end the turn while detached work is in flight — babysit it with bounded
+sleep/check loops inside the turn." Plus a 15-min script-only watcher that fires the service early
+when a consult output file appears. Cheaper, still turn-scoped, weaker.
+
+**Option C — cloud routines (`/schedule`)** for the CLOUD-SAFE items only (ACTION-PLAN A–E lane).
+Cannot run the on-box trust-critical lane (systemd, isolation drills), so it complements but cannot
+replace A/B.
+
+**Independent of the choice:** the bwrap/AppArmor defect should be fixed or permanently worked
+around — it killed every consult the windows launched. Fix candidates: (a)
+`sysctl kernel.apparmor_restrict_unprivileged_userns=0` (sudo; loosens a host hardening knob —
+operator decision), or (b) standardize all codex invocations on the stdin/inlined-context pattern
+that works today (current workaround; costs repo-read ability in consults).
+
+
+=== DELETED DESIGN (continue-session.sh, for reference) ===
+#!/usr/bin/env bash
+# On-box autonomous continuation runner (Hetzner). Fired by a systemd --user timer every ~5h so a
+# fresh Claude session picks up orchestrator work in each usage window. Local + gitignored (box infra).
+#
+# Guardrails: single-flight (flock); HALT killswitch honored; every run fully logged; the prompt scopes
+# the session to the post-audit action list under planning-first + dual-validation, forbids touching
+# `main`, and leaves high-risk changes as draft PRs for human authorization. Stop it any time with:
+#   touch /home/val/orchestrator/.orchestrator/HALT        # pauses (dispatcher + this runner)
+#   systemctl --user disable --now orchestrator-continue.timer
+set -uo pipefail
+ROOT=/home/val/orchestrator
+LOG_DIR="$ROOT/.orchestrator/continue-logs"
+mkdir -p "$LOG_DIR"
+TS=$(date -u +%Y%m%dT%H%M%SZ)
+LOG="$LOG_DIR/$TS.log"
+export PATH="/home/val/.local/bin:/usr/bin:/bin"
+export HOME=/home/val
+export XDG_RUNTIME_DIR=/run/user/1000
+
+exec 9>"$ROOT/.orchestrator/continue.lock"
+if ! flock -n 9; then
+  echo "$TS another continuation run is still active; skipping" >>"$LOG_DIR/skips.log"; exit 0
+fi
+if [ -e "$ROOT/.orchestrator/HALT" ]; then
+  echo "$TS HALT present; skipping" >>"$LOG_DIR/skips.log"; exit 0
+fi
+
+# Only spend a window if the LAST session left work unfinished. Two signals:
+#   1) a PENDING baton file (the session writes it when work remains, deletes it when all done), or
+#   2) a GENUINELY-LIVE attempt: state says launching/running AND its systemd unit is actually active
+#      (a real crashed-mid-run). NOTE: stale `interrupted` state files do NOT count — they are terminal
+#      (resume only as a fresh attempt, by decision), so leaving them out keeps idle windows idle.
+# If neither, this is a true no-op — no `claude` is launched, no quota burned.
+PENDING="$LOG_DIR/PENDING"
+live=""
+for sf in "$ROOT/.orchestrator/state/"*.json; do
+  [ -e "$sf" ] || continue
+  grep -qE '"status":[[:space:]]*"(launching|running)"' "$sf" || continue
+  aid=$(grep -oE '"attempt_id":[[:space:]]*"[^"]+"' "$sf" | head -1 | grep -oE '[^"]+$')
+  [ -n "$aid" ] || continue
+  if systemctl --user is-active "codex-$aid" >/dev/null 2>&1; then live="$aid"; break; fi
+done
+if [ ! -e "$PENDING" ] && [ -z "$live" ]; then
+  echo "$TS no PENDING baton and no genuinely-live attempt; nothing to resume; skipping" \
+    >>"$LOG_DIR/skips.log"; exit 0
+fi
+
+cd "$ROOT" || exit 1
+read -r -d '' PROMPT <<'EOP'
+You are the orchestrator, resumed autonomously on the Hetzner box in a fresh usage window. Work ONE
+step of the post-audit hardening, then stop. Rules (from CLAUDE.md, binding):
+- Read CLAUDE.md, ACTION-PLAN.md, and .orchestrator/decisions/SELF-REFLECT-2026-07/06-reconciled-findings.md.
+- Pick the highest-priority ON-BOX action item that is not yet done (isolation fail-open; base+review
+  required-check on all merge paths; snapshot+hash-all-evidence + reconcile GC; approval/grant schema;
+  scoped sudoers + worker resource ceilings; reviewer-value seeded-defect experiment; metrics-semantics
+  fix). These are trust-critical: follow the HIGH-ASSURANCE LANE — Codex drafts the plan (detached
+  `codex exec --sandbox read-only`, stdin from /dev/null, no minute timeout), you challenge it in
+  writing, get an adversarial SOL design review, then implement via a Codex worker spec (or directly if
+  it is orchestrator control-plane), gate it, review it, and open a PR.
+- NEVER merge a high-risk PR autonomously and NEVER touch `main`. Low-risk PRs may auto-merge to
+  integration under the Level 1.5 grant only if all gates pass. Anything trust-critical: open the PR and
+  STOP for human authorization.
+- If a step needs a decision only the operator can make, or you are unsure, STOP and write a short note
+  to .orchestrator/continue-logs/NEXT.md instead of guessing.
+- Do ONE coherent step this run (a plan+consult, or one implementation+PR). Do not attempt everything.
+- Record what you did and what is next in .orchestrator/continue-logs/NEXT.md before finishing.
+- BATON (controls whether the next window wakes up): if ANY on-box action item remains unfinished, or
+  work is still in flight, WRITE the concrete next step to .orchestrator/continue-logs/PENDING. If the
+  action list is fully done and nothing is in flight (or the only remaining work needs the operator),
+  DELETE .orchestrator/continue-logs/PENDING so idle windows stay no-ops. Keep this baton honest — it is
+  the sole reason the scheduler will or won't spend the next window.
+EOP
+
+echo "=== continuation run $TS ===" >>"$LOG"
+timeout 5h claude -p "$PROMPT" --dangerously-skip-permissions >>"$LOG" 2>&1
+echo "=== exit $? at $(date -u +%Y%m%dT%H%M%SZ) ===" >>"$LOG"
+
+
+=== LOOP-DESIGN RESEARCH (R20: Codila/Karpathy autoresearch loop, reuse candidates) ===
+## Retrieval verdict
+
+The substantive design was recovered, but not as a complete verbatim X thread.
+
+- The [original X status](https://x.com/0xCodila/status/2072329149520232639) returned empty HTML.
+- [XCancel](https://xcancel.com/0xCodila/status/2072329149520232639) and [Nitter](https://nitter.net/0xCodila/status/2072329149520232639) could not be fetched in this environment.
+- A contemporaneous Chinese article identifies Codila, cites the exact status ID, and reproduces the loop mechanics in detail. This is the main recovery source—not a claim that its prose is verbatim thread text. [AI Frontline reproduction](https://news.marsbit.co/20260706202809896370.html)
+- A podcast episode independently associates the exact status ID with “Agent Loop,” Karpathy’s method, metrics, limits, and an exit rule. It corroborates the subject, but not all implementation details. [No Tiene Nombre episode](https://open.spotify.com/episode/33X8YjgSDseu5FCNnIE20E)
+- The recovered mechanics align closely with the linked primary implementation: [Karpathy/autoresearch](https://github.com/karpathy/autoresearch) and its operative [`program.md`](https://github.com/karpathy/autoresearch/blob/master/program.md).
+- No separate Codila blog or repository containing the thread was found.
+
+Confidence: high for the core loop; medium for Codila’s exact ordering/wording; low for any claim that the entire original thread was recovered verbatim.
+
+## Faithful reconstruction
+
+### Control flow
+
+1. A human writes or maintains a standing instruction document defining exploration directions, constraints, and the objective.
+2. Establish a baseline before experimentation.
+3. Restrict the agent to a narrow mutation surface. In AutoResearch, it may edit `train.py`, while data preparation and evaluation in `prepare.py` are off-limits.
+4. For each iteration:
+
+   `inspect incumbent → propose one change → commit candidate → run fixed experiment → extract metric → record outcome`
+
+5. If the objective metric improves, advance the incumbent branch. If it does not, discard/reset the candidate. Crashes may receive a few repair attempts before being abandoned.
+6. Repeat until a stopping condition is met. Codila’s generalization calls for target/max-round stopping; Karpathy’s concrete instruction instead runs until human interruption, while bounding each experiment and killing an individual experiment that runs excessively long. [AutoResearch operative loop](https://github.com/karpathy/autoresearch/blob/master/program.md)
+
+This is an elitist “winner ratchet”: one accepted incumbent, one challenger, and no regression allowed on the primary metric.
+
+### Roles
+
+- **Human/operator:** defines the objective and constraints, approves setup, provides missing data, edits the standing instructions, eventually stops the run, and reviews the accumulated results.
+- **Generator/optimizer agent:** proposes and implements experiments, diagnoses simple failures, and selects new directions.
+- **Validator:** a fixed metric/evaluation path that the generator is not supposed to modify.
+- **State carrier:** Git branch/commits plus an experiment ledger.
+- **Optional meta-optimizer:** in the bilevel extension, an outer agent examines the search trace and changes how the inner loop searches.
+
+Codila’s recovered formulation does not require a separate semantic-review agent. “Independent verification” primarily means a validator the generator cannot redefine.
+
+### Gating
+
+There are four distinct gates:
+
+- **Scope gate:** only the designated mutation surface may change.
+- **Execution gate:** the candidate must run successfully inside the experiment budget.
+- **Metric gate:** accept only an objective improvement.
+- **Complexity gate:** all else equal, prefer simpler code; small metric gains may be rejected if they buy excessive complexity.
+
+The metric gate is strong and mechanical. The complexity gate is weak because the generating agent exercises the judgment itself. [AutoResearch constraints and acceptance policy](https://github.com/karpathy/autoresearch/blob/master/program.md)
+
+Codila identifies three indispensable loop facilities:
+
+- a real validator;
+- durable state;
+- a stopping condition.
+
+The recovered applicability test is also important: use a loop only when the task repeats frequently, verification can be automated, retry cost is affordable, and the agent has access to the real execution environment. [Exact-status reproduction](https://news.marsbit.co/20260706202809896370.html)
+
+### Memory and state
+
+Karpathy’s concrete state model is:
+
+- `program.md`: durable policy and constraints;
+- current branch/commit: best accepted solution;
+- `results.tsv`: experiment, metric, memory use, outcome, and description;
+- `run.log`: detailed execution/failure evidence;
+- Git history: accepted changes.
+
+The notable defect is that `results.tsv` is deliberately untracked, making the most important search history less durable and less auditable than the accepted code.
+
+### Review and verification
+
+- Objective verification is deterministic and separated from the editable file.
+- Failed candidates are reverted rather than allowed to contaminate the incumbent.
+- There is no PR review, security review, semantic requirements review, or independent human-equivalent reviewer inside the loop.
+- The same agent still chooses hypotheses, implements them, interprets crashes, and judges qualitative complexity.
+
+The bilevel variant adds trace analysis and mechanism generation: an outer loop inspects failures such as repetitive proposals, creates a new search mechanism, validates that it loads, and reverts it on failure. Its paper also reports serious limitations: silent fallback bugs, dependency exposure, evaluator overfitting, and no stability guarantee. [Bilevel Autoresearch paper](https://arxiv.org/abs/2603.23420)
+
+### Human touchpoints
+
+Humans:
+
+- choose the run identifier and objective;
+- confirm setup;
+- provision data/environment when necessary;
+- author the standing instructions;
+- manually interrupt the concrete AutoResearch loop;
+- inspect the ledger and accepted branch afterward.
+
+They do not approve every iteration.
+
+## Comparison with our orchestrator
+
+Repository caveat: the supplied AGENTS.md was available in the prompt, but local reads of [CLAUDE.md](/home/val/orchestrator/CLAUDE.md), [dispatch.py](/home/val/orchestrator/scripts/dispatch.py), [PLAN-003.md](/home/val/orchestrator/.orchestrator/plans/PLAN-003.md), and [PLAN-004.md](/home/val/orchestrator/.orchestrator/plans/PLAN-004.md) failed before execution because the read-only sandbox could not initialize (`bwrap: loopback: Failed RTM_NEWADDR`). Therefore the comparison below is against the declared architecture in the supplied AGENTS.md, not a code-verified audit of those files.
+
+| Dimension | Codila/AutoResearch | Our declared design | Assessment |
+|---|---|---|---|
+| Input authority | Mutable instruction document | Schema-validated, digest-approved, immutable spec | Ours stronger |
+| Mutation scope | One editable file by instruction | Declared scope gate plus isolated worktree | Ours broader and stronger, but their frozen evaluator boundary is exceptionally clear |
+| Iteration | Continuous improve/evaluate/retain loop | Discrete worker attempts through gates | Their feedback loop is stronger |
+| Verification | One scalar metric plus subjective simplicity | Integrity → scope → test → bounded review | Ours substantially stronger for software correctness |
+| Isolation | Branch boundary | Dedicated UID, hardened system service, protected operator home, separate worktree | Ours substantially stronger |
+| State | Branch, untracked TSV, raw log | Per-attempt evidence, tracked manifests, hashes | Ours stronger for auditability |
+| Search memory | Explicit record of successful and failed hypotheses | Attempt evidence, but no declared cross-attempt hypothesis/outcome learning model | Theirs stronger semantically |
+| Acceptance | Automatic monotonic ratchet | Gate pass produces a reviewable PR | Different goals; ours is safer, theirs learns faster |
+| Human control | Setup and eventual interruption | Approval artifacts, PR review, integration branch, operator-only promotion | Ours much stronger |
+| Stop policy | Generalized target/max rounds; concrete implementation runs until interrupted | Not established from readable evidence | Their general rule is worth adopting |
+| Evaluator tampering | Explicitly forbidden | Integrity/scope checks detect changes after the fact | Potential advantage to theirs if immutability is technically enforced |
+| Evidence of rejected work | TSV entry, but untracked | Hashed attempt evidence | Ours stronger structurally; theirs records better experiment semantics |
+
+The important distinction is that AutoResearch optimizes a scalar benchmark, while our orchestrator produces general software changes whose correctness cannot usually be collapsed into one number. Copying its automatic “metric improved, therefore accept” rule would weaken our governance.
+
+## Ranked reuse candidates
+
+Because PLAN-003/004 could not be read, I will not invent their ownership. Each candidate therefore identifies the exact subsystem/spec surface and gives a provisional plan placement requiring confirmation.
+
+1. **Semantic attempt ledger — highest value**
+
+   Record for every attempt: parent/incumbent, hypothesis, intended mechanism, changed scope, gate outcomes, failure class, keep/discard decision, and next suggested direction. Make it append-only or hash-bound; do not emulate the untracked TSV.
+
+   - Effort: **Medium, 2–4 days**
+   - Slot: attempt evidence/manifest work under `.orchestrator/attempts`; whichever of PLAN-003/004 owns persistence and retry orchestration
+   - Value: prevents rediscovery of failed approaches and turns evidence into usable cross-attempt memory.
+
+2. **Gate-informed retry loop with an explicit incumbent**
+
+   After a failed worker attempt, feed structured gate evidence into the next attempt. Preserve the last fully gated incumbent; rejected candidates never become the new base. Bound attempts by count/cost, not a short minute timeout—consistent with the repository rule that SOL consultations may legitimately take hours.
+
+   - Effort: **Large, 1–2 weeks**
+   - Slot: `scripts/dispatch.py` attempt lifecycle; provisional PLAN-004 if it owns multi-attempt execution
+   - Constraint: acceptance still requires every existing gate, not merely improved tests.
+
+3. **Technically immutable verifier boundary**
+
+   Move approved specs, gate programs, and any acceptance fixtures outside the worker-writable mount or expose them read-only. Post-hoc scope detection remains valuable, but prevention is stronger than discovering evaluator tampering later.
+
+   - Effort: **Medium–Large, 3–7 days**
+   - Slot: existing D5 worker-isolation work and `tests/worker_isolation.sh`; provisional PLAN-003 if it owns isolation/integrity
+   - Value: directly reuses AutoResearch’s best structural idea without adopting its weaker review model.
+
+4. **Loop-eligibility fields in the spec schema**
+
+   Add an opt-in contract such as: objective verifier, repeatability, maximum attempts, cost ceiling, incumbent-selection rule, and required real-environment capabilities. Reject loop mode when no independent verifier exists.
+
+   - Effort: **Small–Medium, 1–3 days**
+   - Slot: `specs/spec.schema.json` plus dispatcher validation; whichever plan owns spec/runtime contracts
+   - Value: prevents “agent hamster wheel” jobs from entering autonomous retry mode.
+
+5. **Explicit stopping and circuit-breaker policy**
+
+   Stop on success, exhausted attempt/cost budget, repeated identical failure class, lack of admissible new hypotheses, operator cancellation, or compromised validator integrity. Preserve the existing prohibition on minute-scale SOL timeouts.
+
+   - Effort: **Medium, 2–4 days**
+   - Slot: dispatcher attempt state and evidence manifests; likely alongside candidate 2
+   - Value: Codila’s general formulation is stronger here than Karpathy’s literal “loop forever.”
+
+6. **Offline harness/meta-loop experiments — defer**
+
+   Use a frozen held-out corpus to propose improvements to prompts, schemas, gate ordering, or review rubrics. Never let the outer loop modify production gates at runtime; produce a normal reviewed spec/PR instead.
+
+   - Effort: **Large/XL, 2–4 weeks**
+   - Slot: a new post-PLAN-004 experiment plan, not the live dispatcher
+   - Reason to defer: the bilevel paper itself documents silent fallback and unsafe self-modification risks. Its mechanism-search idea is interesting; runtime gate mutation is inappropriate for this orchestrator.
+
+Bottom line: reuse the experiment ledger, incumbent ratchet, enforced verifier immutability, eligibility test, and stopping policy. Do not reuse scalar-metric acceptance, untracked state, self-graded qualitative review, destructive resets, or runtime self-modification of gates.
+
+REVIEW COMPLETE
+
+
+=== VISION (what the factory is ultimately for) ===
+# VISION — what this factory is ultimately for (operator, 2026-07-14, verbatim intent)
+
+Recorded from the operator's dictated statement; this is the standing target every setup review
+measures against (ledger R22).
+
+## The model
+
+A combination of an **AI engineering manager and AI engineers**. Claude and Codex are both
+individual contributors (architects, highly skilled executors) AND management capacity:
+
+- **Claude / the orchestrator = the AI engineering manager** — orchestrates, judges, reviews,
+  synthesizes, holds the trust boundary.
+- **Codex = both manager and executor** — plans, drafts, implements, researches.
+
+## The end-to-end capability the operator wants
+
+"Drop any idea onto you guys" and the factory does everything:
+
+1. **Grill the idea** — adversarial review, dual-vendor research, falsification.
+2. **Review / decide** — reconciled recommendation to the operator.
+3. **Break it down into tickets** — decomposition to executable specs.
+4. **Log tickets in a tracking system** (Jira / Linear).
+5. **Iteratively improve the plan** — challenge/authorize loops.
+6. **Iteratively execute** — dispatch, gates, review, remediation.
+7. **Review results of work** — independent review, evidence-bound verdicts.
+8. **Test it** — deterministic gates + golden evaluation.
+9. **Set it up running** — deploy/operate.
+10. **Maintain it** — ongoing operation, monitoring, upkeep ("maintaining EVA").
+
+## Standing instruction
+
+Whenever the setup is holistically reviewed, review it AGAINST THIS DESCRIPTION: what matches,
+what doesn't, and what is missing. Current gap review: `.orchestrator/decisions/R22-gap-review/`.
+
+
+=== GOVERNING POLICY (CLAUDE.md) ===
+# CLAUDE.md — orchestrator invariants
+
+Short by design. Conventions/stack/test commands live in [AGENTS.md](AGENTS.md); the full build
+log and findings live in `SETUP-REPORT.md`. On any conflict, `SETUP-BRIEF.md` invariants win.
+
+## Autonomy level
+
+**Autonomy is OFF by default (safe by default).** The tracked `.orchestrator/AUTONOMY.json` ships
+DISABLED, so a clone/template never merges anything on its own. An operator opts into **Level 1.5 —
+plan-scoped autonomy** by creating a gitignored `.orchestrator/AUTONOMY.local.json` (the local
+override wins in `load_autonomy`; being untracked, it never travels with the repo). When enabled, the
+operator agrees a plan scope, then the orchestrator may **merge in-scope PRs to `integration`
+autonomously** — no per-PR human click — via `./scripts/dispatch merge <attempt-id>`, which is
+fail-closed and enforces every gate: attempt `passed_pr_opened`; bound reviewer PASS; `ci` green;
+PR head == the reviewed `worker_commit`; and the **merge-time base-check** (base still == bound
+`base_sha`, closing the post-PR stale-base hole). Delete the local override (or set `enabled:false`)
+to revert to Level 1. **`main` promotion stays human-only, permanently** — never auto-merged.
+Spec approval still binds each attempt to intent; the operator reviews results after the fact; `HALT` pauses
+everything. This grant is per-project and does NOT transfer to the eventual real-product repo, which
+gets its own explicit policy decision. Rationale + adversarial validation: `SETUP-REPORT.md` G4-A.
+
+## NO SLIPPAGE — every operator task gets a highest-detail plan + a tracked ledger row (STRENGTHENED)
+
+Reinforced by the operator, 2026-07-13: "ensure EVERY TASK I GIVE YOU HAS THE SAME HIGHEST DETAILED
+PLAN CREATED AND YOU AND CODEX FOLLOW IT. NO MORE SLIPPAGE." (Trigger: the measurement-layer request
+was planned then silently dropped until the operator re-asked.) This is a HARD rule, above convenience.
+
+**Request ledger — mandatory.** Every operator request is appended as a row to
+`.orchestrator/REQUEST-LEDGER.md` at intake, BEFORE work: `id | date | request (verbatim intent) |
+lane | plan-ref | status (open/in-progress/blocked/done) | completion-evidence`. A task with no ledger
+row and no plan-ref may not proceed. At the END of every turn, reconcile: update each touched row, and
+scan for any `open`/`in-progress` row that stalled — a request that leaves the ledger without reaching
+`done` or an explicit operator deferral IS a process failure, surfaced to the operator, not swallowed.
+
+**Highest-detail plan ARTIFACT for EVERY substantive task.** The deliverable is not a bullet sketch —
+it is a **brief-caliber standalone document** at the depth of the original SETUP-BRIEF (detailed enough
+to execute autonomously with no further clarification), written to `.orchestrator/plans/PLAN-NNN.md`
+following `.orchestrator/plans/PLAN-TEMPLATE.md` (decision/non-goals; cited current-state evidence;
+numbered testable requirements incl. abuse cases; detailed design + alternatives; affected boundaries +
+dependency closure; ordered file-level steps; failure modes + blast radius; falsifiable validation
+incl. a fail-on-broken/pass-on-fixed test; rollback; open questions; provenance). No "small task"
+exemption on plan EXISTENCE or DEPTH — only `--small` micro-plans for genuinely trivial edits scale the
+length. Codex drafts to the template (pass it as `--context`), Claude challenges in writing with ≥1
+named objection, Claude authorizes (digest-bound), and BOTH follow the authorized artifact — deviations
+reconciled at completion (followed / authorized-deviation / unauthorized-deviation); repeated
+unauthorized deviation fails process review even with green tests. When uncertain whether something is
+substantive, it is — write the brief-caliber plan and the ledger row.
+
+## Execution split — delegate-first (Claude delegates, Codex executes most work)
+
+Ratified by the operator + dual-validated with SOL (BLOCK→PASS on conditions), 2026-07-13
+(`.orchestrator/decisions/REBALANCE-codex/`). **Default: substantive work is EXECUTED by Codex** (idle
+quota, separate rate/billing pool, uncorrelated errors). Claude delegates aggressively (MAX delegation)
+and is reserved for orchestration, final judgment/synthesis, dual-vendor reconciliation, and the
+INDEPENDENT review layer. This includes **orchestrator self-development** — its own non-trust-critical
+code changes are dispatched as Codex specs, not hand-edited by Claude. Three lanes:
+
+- **Ordinary delegated lane (default for most work):** Codex implements → deterministic fail-closed
+  gates → independent Claude review → PR → auto-merge to `integration`. Covers metrics/reporting,
+  non-normative docs, isolated helpers, ordinary product specs, and **research execution**.
+- **High-assurance delegated lane (trust-critical code):** Codex MAY author (delegate here too), but
+  the installed **parent** version validates the candidate; PLUS a pre-dispatch spec challenge (a fresh,
+  context-isolated critic surfaces abuse cases + invariant-level acceptance tests — never the
+  implementation conversation), mandatory human approval, an adversarial SOL design review, security
+  regression tests, and staged activation.
+- **Control-plane authorization lane (Claude + human, NEVER delegated):** policy/invariant changes,
+  trust classification, reviewer conclusions, merge authority, final synthesis, dual-vendor
+  reconciliation.
+
+**Binding invariants (SOL):**
+1. **Bootstrap:** a change to the trust boundary must never validate, approve, review-bind, or merge
+   ITSELF. The installed parent version runs all gates; the dispatcher never executes a candidate's own
+   modified gate/dispatch code to gate that candidate; a candidate activates only after separate
+   approval + install.
+2. **Classify by capability + transitive dependency, not path-touch.** A machine-enforced trust manifest
+   + dependency closure decides trust-critical status; any file in the trust closure OR any
+   unclassified/ambiguous file is forced **high-risk** (fail closed). Trust-critical = anything that can
+   affect dispatch authorization, sandbox construction, worker identity/env/PATH, worktree/network
+   policy, gate implementations (+ their libs/config), spec parse/schema/digest/approval/risk/test
+   selection, evidence gen/hash/store/diff-binding, reviewer prompt/schema/inputs/parsing/fail-closed
+   behavior, push/PR/merge/base-check/autonomy, CI + security-claim tests, and packaging/entrypoints/deps
+   for any of these.
+3. **Post-implementation review stays Claude-only** — never Codex-grades-Codex (cross-vendor
+   independence is the asset).
+4. **No single delegation-ratio TARGET** (perverse incentive to downgrade borderline work). Report
+   **risk-weighted work class**; fail closed on unclassified files; never set a quota target on the
+   trust-critical lane.
+
+**Codex toolkit / web search (operator, 2026-07-13):** the **research/consult lane runs Codex with the
+FULL toolkit incl. web search** (`codex exec --sandbox read-only`, network on) — it improves quality and
+runs no untrusted worker-authored code against our creds; require source capture + claim-level
+reconciliation (vendor diversity without evidence diversity is cosmetic). The **worker EXECUTION lane
+stays network-off** (`needs_network:true` still REFUSED) until the D5 credential residual (per-attempt
+UID / credential broker) is closed — enabling network there reopens token exfiltration and is a separate
+Critical decision, not a free flag. See [[delegate-heavy-work-to-codex]], dual-validated-planning above.
+
+## Planning-first — Codex drafts every plan (intake state machine)
+
+Ratified by the operator 2026-07-13 ("models with detailed rigorous plan > models with no plan";
+"outsource plan creation for each task to Codex"). Codex-drafted plan: `PLAN-001`
+(`.orchestrator/plans/`), challenged + authorized with amendments
+(`.orchestrator/decisions/REINFORCE-delegation-planning/`). The operator trusts both vendors equally;
+Claude quota is the scarce one — so Claude AUTHORIZES, Codex AUTHORS.
+
+**Mandatory intake reflex for EVERY substantive task (state machine, not a preference):**
+1. Classify: fast-path / ordinary delegated / high-assurance delegated / control-plane.
+2. If substantive: get a **Codex-drafted plan FIRST** (`scripts/codex-plan`, or a detached
+   `codex exec --sandbox read-only` consult until SPEC-016 lands) — before analysis, drafting,
+   research, or implementation by Claude. `--small` micro-plans
+   (objective/scope/action/verification/rollback) for tiny tasks — plan length scales, the
+   requirement doesn't.
+3. Claude CHALLENGES the plan in writing — must name ≥1 concrete objection (unsupported assumption,
+   missing failure mode, scope ambiguity, insufficient validation) or state why none applies;
+   "looks good" is not a challenge. High-assurance plans additionally get a second, fresh-context
+   Codex critique before authorization.
+4. Claude AUTHORIZES (recorded in the PLAN file with dispositions); silent post-authorization plan
+   edits void the authorization.
+5. Codex EXECUTES everything delegable; Claude does only reserved actions (challenge/authorize,
+   independent per-attempt review, final synthesis, dual-vendor reconciliation, user dialogue).
+6. At completion, reconcile delivered work vs authorized plan: followed / authorized deviation /
+   unauthorized deviation — recorded. Repeated unauthorized deviations fail process review even with
+   green tests.
+
+**Fast path (the ONLY planless work):** read-only and non-substantive — greetings, clarifications,
+status of already-observed work, a single deterministic lookup, or conversational
+explanation/assessment answerable from existing session context with **no new research, no state
+change, and no durable recommendation**. If uncertain → plan. Anything that edits state, produces an
+artifact, synthesizes new research, or recommends a decision is substantive.
+
+**Artifacts:** plans live in `.orchestrator/plans/PLAN-NNN.md` (tracked; frontmatter + plan +
+challenge + dispositions + authorization). Specs cite their plan. Decision records
+(`.orchestrator/decisions/`) record authority, not duplicate plans. Follow-up (high-assurance,
+grandfathering SPEC-001..015): a required `plan_ref` spec-schema field.
+
+**Anti-Goodhart (REBALANCE invariant 4 applies):** delegation/plan-coverage numbers are weekly review
+SIGNALS discussed with the operator (first review 2026-07-20) — never automated targets; unclassified
+work counts as CLAUDE work in the report so omission can't flatter the split. Planning consults never
+preempt an active worker. Numeric quota reserves deferred until a real quota signal exists.
+
+## Session-start ritual (Gate 3)
+
+Run **`./scripts/dispatch reconcile`** first thing. It reads `.orchestrator/state/*.json`, inspects
+real unit state (`systemctl --user`), and flips any attempt whose state is `running` but whose unit
+is gone (orchestrator/box restart) to `interrupted` — resumable ONLY as a fresh attempt (never
+hand-finish a partial worktree; see quota/degradation policy). Then resume from the recorded next
+action. Never ask the operator to reconstruct context these files already hold.
+
+## Health monitoring (Gate 3 — soft-alert, confirm-then-cancel)
+
+`./scripts/dispatch health <attempt-id>` (threshold `--minutes`, default 10). A stale JSONL event
+stream raises an **alert, not a kill**. Silence ≠ death: a long compile/test is silent but busy.
+Cancel ONLY a **confirmed hang** — unit alive but no CPU progress, no new events, and no journal
+activity across **two consecutive** checks. A busy-but-silent worker (CPU advancing) always
+survives.
+
+## Definition of done (a spec is `done` only when ALL hold)
+
+Acceptance criteria demonstrably met; the change was inspected, not inferred from a worker's claim;
+integrity preconditions held; deterministic checks ran and passed; the reviewer returned a bound
+PASS; remediation stayed within limits; no scope drift; the summary states real results with
+evidence paths. **"Should work" is never evidence.**
+
+## Remediation + integration (Gate 4)
+
+- **Remediation limits by risk_class: low 5 / default 3 / high 1.** Attempt 1 is never a
+  remediation; interrupted/stale_base/spec_blocked launches don't consume budget — only merit
+  failures (test/review/scope/integrity) do. Each remediation is a NEW attempt whose prompt embeds
+  the SPECIFIC findings of the last failure. Two consecutive identical findings = stop-early. Limit
+  exhausted or stop-early → spec `failed_remediation_exhausted` + a tracked escalation record in
+  `.orchestrator/escalations/` — never an infinite loop, never silent success.
+- **High-risk specs need the operator's per-dispatch approval artifact** (`approvals/<digest>.attempt-<n>.json`)
+  before EVERY dispatch, at every autonomy level.
+- **`./scripts/integrate <attempt-id>…`** is the deterministic integration step: merges in
+  `depends_on` order via the base-checked `dispatch merge`, re-runs the suite after every merge,
+  cleans up worktree/branch, auto-commits provenance (spec + approvals + attempt evidence +
+  escalations). Merge conflict or suite failure = stop/escalate — never AI-resolved.
+
+## Quota / degradation policy (policy-note item 1 — permanent, not deferred)
+
+- A worker hitting a rate/usage limit mid-attempt is classified **`interrupted`**, not failed:
+  preserve all evidence, stop the unit. **Resume ONLY as a fresh attempt in a fresh worktree**
+  after capacity returns. Never resume or hand-finish a partially modified worktree — mixed
+  authorship poisons provenance.
+- **The orchestrator NEVER takes over implementation. Self-review is never permitted, under any
+  degradation. Fail closed:** a stalled pipeline with clean state is correct behaviour.
+- Only acceptable continuity variant (post-MVP, if ever): a separate Claude *worker* authors; merge
+  blocks until an independent Codex reviewer verdict when quota returns.
+- Codex quota is ONE shared constrained resource (implementation + any future spec reviews).
+
+## Dual-validated planning (control-plane / decision layer)
+
+Governs the DECISION layer, not worker implementation; does NOT add a plan-conformance gate to the
+worker pipeline (the Planning policy below stays fully intact). Ratified by the operator + validated with SOL,
+2026-07-13 (`.orchestrator/decisions/PLAN-dual-validation/`).
+
+**Rule:** before a non-trivial control-plane action or a durable recommendation, Claude prepares a
+decision-complete plan and obtains explicit validation from BOTH Claude and Codex SOL on the SAME
+plan revision. Read-only discovery, disposable experiments, and drafting may happen first.
+
+**Non-trivial if ANY holds** (uncertain → treat as non-trivial; complexity / duration / file-count
+alone never count):
+1. creates/changes a durable policy, invariant, architectural precedent, shared contract/schema, or
+   mechanism meant for reuse across jobs/specs;
+2. changes trust/security boundaries, credentials, isolation, approval/autonomy, gate behavior,
+   evidence integrity, protected branch/release behavior, or recovery semantics;
+3. a destructive / irreversible / production-facing / novel external side effect not already
+   authorized by an established workflow;
+4. affects behavior beyond one approved spec's allowed paths + acceptance/test scope;
+5. a research/review deliverable that recommends or authorizes any of the above.
+
+**Worked examples (the operator, 2026-07-13):** a new **business idea / research** deliverable → the
+*recommendation* is non-trivial (dual-validated); the read-only investigation feeding it is exempt.
+A **high-level spec / requirements set for a new feature, or a non-trivial bug fix** → non-trivial,
+dual-validated at the requirements/design level. The routine low-level specs that then implement
+already-decided intent → exempt (gated by approval + reviewer + CI).
+
+**Idea/research stage — MAXIMUM effort, two independent vendors (the operator, 2026-07-13).** For any
+idea-stage / opportunity-evaluation / research deliverable, the read-only investigation itself must be
+done TWICE, independently, by two different vendors, then reconciled: (1) **Claude breadth research** —
+fan out parallel research agents (web); AND (2) an **independent from-scratch Codex/SOL research +
+ranking** that does NOT see Claude's output (no anchoring) — a full independent pass, not merely SOL
+critiquing Claude's summary. Reconcile: agreement → high confidence, disagreement → flag both views to
+the operator. The idea stage is the most crucial; spend maximum research effort here before choosing
+what to implement. This is IN ADDITION to the Standard/Critical validation of the resulting
+recommendation below. Record both passes under `.orchestrator/decisions/<id>/`.
+
+**Exempt (unless a trigger fires):** read-only diagnostics/status; clerical no-semantic changes;
+routine spec drafting that instantiates already-decided intent via established mechanisms; routine
+dispatch/monitor/retry/PR mechanics; worker/helper implementation bounded by an approved
+spec+scope+test+review+CI. Worker checklists are NEVER cross-reviewed.
+
+**Two tiers:** *Standard* (non-trivial, not Critical) → ONE adversarial SOL pass returning explicit
+**PASS/BLOCK** that addresses the strongest counterargument, questionable assumptions, failure
+modes, and validation gaps; Claude records a disposition per material finding; a BLOCK — or a
+material change to approach/scope/risk/validation/rollback after PASS — requires resubmission.
+*Critical* (governing policy/invariants, trust/security boundaries, approval/autonomy, gates/evidence
+integrity, protected branch/release, multi-job shared contracts, or irreversible/production
+consequences) → Claude+SOL iterate on the SAME revision until both explicitly report no unresolved
+blocker; unresolved disagreement goes to the operator, never silently resolved.
+
+**Decision-complete plan** (what earns the round-trip): decision + non-goals; current-state evidence
++ assumptions; alternatives + why this one; affected boundaries/consumers; failure modes + blast
+radius; ordered steps; validation criteria; rollback / irreversibility; open questions. "N/A,
+because…" is fine — "detailed" means decision-complete, not long. Review ONE coherent decision;
+don't split to evade review or bundle unrelated decisions to amortize it.
+
+**Quota/availability:** consults and workers share ONE Codex budget. One initial consult per
+decision; never interrupt a running worker to consult; run detached with no minute-scale timeout. If
+SOL or quota is unavailable the decision stays **PENDING** (exempt work continues) — skipping SOL is
+non-compliant, never a silent Claude-only fallback. Only the operator may authorize a scoped, recorded waiver
+(rationale/scope/expiry); emergency pre-validation action is limited to minimum reversible
+containment of active harm.
+
+**Record** each reviewed decision under `.orchestrator/decisions/<id>/`: trigger classification +
+tier, plan/revision digest, consult prompt + full SOL response (+ raw-stream sha256), Claude's
+disposition, explicit Claude + SOL verdicts, model/commit ids, any waiver/unresolved issue. Any
+binding requirement the plan creates MUST be encoded in governing policy or an approved spec before
+dispatch — workers are judged only by spec/scope/tests/diff/review/CI, never by conformance to a plan.
+
+## Planning policy (policy-note item 2)
+
+- **Workers** get the fixed preamble in `scripts/dispatch.py` (inspect-before-editing; a concise
+  revisable checklist for non-trivial tasks; the spec + evidence gates stay binding; if discovery
+  invalidates the spec/scope, stop and report **`SPEC_BLOCKED`** — never improvise). `SPEC_BLOCKED`
+  voids the approval and requires a spec revision + new approval digest.
+- **Orchestrator** (this agent): same scaled-checklist discipline for non-trivial scaffolding code.
+  No separate plan documents, no plan ceremony for routine actions.
+- **Reviewers**: NO planning phase. Mandatory structured rubric (per-criterion MET/UNMET with
+  evidence + scope + regression + security), enforced by `scripts/verdict.schema.json` (v2) and
+  fail-closed checks in the dispatcher. A PASS with empty `reasons`, or with any UNMET criterion,
+  is rejected.
+- The worker's plan/checklist is **NEVER** passed to the reviewer (confirmation-bias
+  contamination). The reviewer judges spec, diff, and evidence only. There is no plan-conformance
+  gate anywhere; the binding artifacts are the spec, approved scope, and `test_command`.
+
+## Hard invariants (never violate — see SETUP-BRIEF.md Appendix A)
+
+- `launch` returns immediately; `await` is bounded polling. No blocking on a worker's lifetime.
+- Review verdicts are binding and fail-closed, enforced in the dispatcher — never advisory.
+- Cancellation targets the systemd **unit/cgroup**, never a recorded PID.
+- Every launch, even one that crashes at startup, leaves a durable record.
+- Nothing activates with failing or partial tests. CI + branch protection are the hard merge gate.
+- Workers run with a scrubbed env, network off, sandboxed; only the orchestrator holds GitHub/SSH
+  credentials and pushes/opens PRs (D11).
+- **Worker isolation is D5, LANDED (not deferred).** The worker AND the gate `test_command` (both
+  run worker-produced code) execute as the dedicated `codex-worker` UID in hardened `systemd-run
+  --uid` system services: `the operator's home` is inaccessible (DAC + `InaccessiblePaths`), writes are
+  confined to the worktree (`ProtectSystem=strict`+`ReadWritePaths`), and the test phase has
+  `PrivateNetwork=yes`. This is what actually closes risk 13-B — on this host Codex's sandbox can't
+  restrict reads (Landlock), so DAC is the boundary. The reviewer runs with ALL tools denied (no
+  Read/Grep/Glob) — it judges only the spec+diff+evidence it is handed. Setup:
+  `scripts/setup-worker-user.sh`; proof: `tests/worker_isolation.sh`. Residual (deferred): the
+  worker's own copied Codex token is readable to its own model-commands, which keep network —
+  closing that needs per-attempt UIDs or a credential broker. **`needs_network:true` stays refused
+  until that step.** If `isolation_available()` is false (fresh box / CI), the dispatcher falls
+  back to same-user launch and records `isolation:false` so provenance never overstates the boundary.
+- **Parallelism (Gate 3 part 3): `MAX_PARALLEL=2`.** The slot claim is atomic (`claim_slot`, under
+  the STATE lock): at most 2 live attempts, at most one live attempt per spec. Each attempt has a
+  unique branch/worktree. **Stale base is refused, never hand-rebased:** if the base branch advanced
+  while an attempt ran (a sibling integrated), the dispatcher records `stale_base` at push and opens
+  no PR; the orchestrator re-launches a **fresh** attempt off the new base so ALL gates re-run
+  against what would actually land. A reviewed verdict is only valid for the base it was bound to.
+
+warning: Codex's Linux sandbox uses bubblewrap and needs access to create user namespaces.
+codex
+I’ll draft PLAN-006 as the control-plane artifact, using the supplied reframe/forensics as hypotheses and citing the repository’s actual current state wherever it can be verified. I’ll first inventory the existing plan/ledger/runtime contracts and local Claude/tmux/systemd capabilities, then write the decision-complete design; I will leave challenge and authorization fields explicitly pending for Claude, as the template requires.
+codex
+The local read attempt failed before command execution with the same documented `bwrap: loopback: Failed RTM_NEWADDR` defect, and this session’s workspace is read-only. I’m therefore treating the inlined repository excerpts as the evidence record, will not invent line numbers, and will cite them by exact file/section or attempt path. The design will route around the Codex sandbox defect; weakening AppArmor will not be an activation dependency.
+codex
+The core decision is now fixed: a hybrid runtime with a quota-free deterministic controller as the always-on outer loop, and a persistent interactive Claude session in tmux only as its managed reasoning runtime. systemd—not tmux—will supervise lifecycle; durable event spooling and explicit Claude session IDs will carry work across exits/reboots. Detached jobs become independent systemd units whose completion atomically emits an event, so ending an agent turn can no longer orphan the work or lose its completion.
+2026-07-14T06:42:40.336376Z ERROR codex_core::tools::router: error=patch rejected: writing is blocked by read-only sandbox; rejected by user approval settings
+codex
+I completed the draft, but the workspace rejected the write because this session is read-only. Intended path: [.orchestrator/plans/PLAN-006.md](/home/val/orchestrator/.orchestrator/plans/PLAN-006.md).
+
+```markdown
+---
+id: PLAN-006
+created: 2026-07-14
+author: OpenAI Codex (GPT-5)
+status: draft
+ledger_ref: R23
+lane: control-plane
+revision: 1
+supersedes: null
+---
+
+# PLAN-006 — Event-driven, durable outer loop for autonomous continuation
+
+> **Brief-caliber standard (operator, 2026-07-13):** every plan artifact must reach the depth of the
+> original SETUP-BRIEF — a standalone document detailed enough that an agent can execute it
+> autonomously with NO further clarification. Not a bullet sketch. If a section is genuinely N/A,
+> write "N/A because …". Codex drafts to this template; Claude challenges + authorizes; both then
+> follow it.
+
+## 1. Decision & non-goals
+
+Implement the orchestrator’s outer loop as a hybrid, event-driven control plane. A deterministic,
+quota-free Python controller runs continuously as a hardened systemd user service and owns the state
+machine, durable event spool, append-only iteration ledger, budgets, validation, circuit breakers,
+and privileged capability broker. A persistent interactive Claude CLI process runs in an isolated
+tmux PTY as a separately hardened, controller-managed service; tmux supplies interactivity and
+operator visibility but is not the supervisor.
+
+The controller delivers durable events only while the Claude prompt is known idle, keeps an
+iteration open across detached work and usage waits, and resumes the same explicit Claude session
+after a CLI exit or reboot. Detached jobs run in independent systemd units and atomically publish
+completion events. Usage exhaustion is a persisted WAITING_USAGE_RESET state with a deadline derived
+from the already-observed CLI limit message, never a crash and never a periodic quota probe. Every
+completed iteration passes through an independent allowlisted artifact-delta validator before it can
+be called successful.
+
+Activation is fail-closed, uses a separately installed authorized controller rather than mutable
+candidate code, and remains subject to HALT, high-risk approval, branch, review, and merge invariants.
+
+Non-goals:
+
+1. This plan does not change the worker inner loop, remediation policy, gate meanings, reviewer
+   independence, branch protections, or integration-to-main promotion.
+2. It does not make an iteration-ledger entry proof that work is correct. The outer validator proves
+   durable progress; existing specs, gates, independent review, CI, and human authorization prove
+   admissibility.
+3. It does not autonomously merge trust-critical work, weaken high-risk approval, touch remote main,
+   or grant the model direct GitHub, SSH, Codex, sudo, or user-systemd credentials.
+4. It does not restore the deleted five-hour timer or use periodic model invocation as the driver. A
+   ten-minute local heartbeat is only a zero-quota liveness fallback.
+5. It does not depend on changing kernel.apparmor_restrict_unprivileged_userns. Codex consultations
+   route around the broken bwrap path with complete stdin context inside an external systemd
+   isolation boundary.
+6. It does not self-activate. Challenge, dual validation, authorization, installation, and staged
+   operator-approved activation remain mandatory.
+
+## 2. Current-state evidence (facts, with citations)
+
+### Observed facts
+
+1. The repository already has a bounded inner loop: schema-approved specs dispatch attempts through
+   integrity, scope, test, and review gates; remediation is bounded; attempts retain evidence;
+   stale-base work is refused; and main promotion is human-only. See AGENTS.md, “What this repo is,”
+   and CLAUDE.md, “Definition of done,” “Remediation + integration,” and “Hard invariants.”
+2. The prior continuation mechanism was a five-hour systemd user timer invoking
+   continue-session.sh, which ran one-shot claude -p under a five-hour timeout. Its continuation
+   decision was a PENDING baton or live-attempt scan. See the deleted script supplied in R23.
+3. The timer fired at 00:36 and 05:36 UTC and both claude -p processes exited zero. Timer delivery
+   therefore was not the primary failure. See the operator-supplied R23 forensics and journal
+   observations.
+4. The 05:36 run said it would end the turn and resume on background notifications, but claude -p
+   exited with the turn and could not receive them. See
+   .orchestrator/continue-logs/20260714T053621Z.log as quoted by the R23 forensics. Roughly nine
+   hours produced about twelve minutes of agent work.
+5. PLAN-005 Codex consultations produced empty response files and about 36 KB of stderr containing
+   bwrap: loopback: Failed RTM_NEWADDR. See
+   .orchestrator/decisions/PLAN-005-isolation-failopen/response.attempt1.md,
+   response.attempt2.md, and their sibling stderr evidence identified in R23.
+6. The deleted service had no explicit Claude session identifier, no durable hypothesis/outcome
+   ledger, no detached-completion event consumer, and no artifact-delta validator. A zero exit was
+   indistinguishable from useful work. See the deleted continue-session.sh and the R23 reframe table.
+7. The timer/service were disabled and deleted; the script and logs were retained as evidence. They
+   must not be revived. See R23, “Actions taken.”
+8. Existing policy treats worker usage exhaustion as interrupted, not failed; requires a fresh worker
+   attempt rather than resuming a partially modified worktree; and prohibits minute-scale SOL
+   timeouts. See CLAUDE.md, “Quota / degradation policy,” and AGENTS.md, “Consulting Codex SOL.”
+9. HALT is the global kill switch; high-risk dispatches require per-attempt approval; candidate
+   trust-boundary code may not validate or activate itself; and main promotion is human-only. See
+   CLAUDE.md, “Autonomy level,” “Execution split,” “Remediation + integration,” and “Hard
+   invariants.”
+10. The target is Ubuntu 24.04 with systemd --user, tmux, Claude CLI, and Codex CLI installed. The
+    bwrap failure is an observed host defect caused by its user-namespace/AppArmor boundary.
+
+### Assumptions that must become measured preconditions
+
+1. The installed Claude CLI supports an interactive PTY, explicit session identity or exact-session
+   resume, and a Stop hook. Implementation must record claude --version and pass disposable
+   hook/session-resume tests. It must not silently substitute “most recent conversation.”
+2. The installed CLI’s usage-limit output contains either a parseable reset instant or a stable
+   exhaustion marker. Implementation must capture a sanitized real fixture and pin parsing to the
+   installed version. Unknown wording fails closed.
+3. The required systemd user hardening directives work on Ubuntu 24.04. systemd-analyze verify and
+   negative access tests must prove the effective boundary; unsupported directives block activation.
+4. The user manager starts after reboot without login. loginctl show-user must report Linger=yes
+   before the reboot drill. Enabling linger is a one-time privileged operator action.
+5. Repository line-level inspection could not be performed during drafting because every local
+   command failed before execution with the documented bwrap RTM_NEWADDR error, and this session’s
+   filesystem is read-only. Claude’s challenge must reconcile these exact file/section citations
+   against the tree and replace stale paths or add line numbers before authorization.
+
+## 3. Requirements & acceptance criteria (numbered, testable)
+
+1. Without a valid local enable grant, or with HALT present, starting either outer-loop unit SHALL
+   launch no Claude process or detached job and SHALL persist DISABLED or HALTED.
+2. A submitted operator event or detached-job completion SHALL be durably spooled before
+   acknowledgement and delivered to an idle healthy agent within five seconds on the test clock,
+   without waiting for a heartbeat.
+3. A detached job SHALL remain owned by an independent systemd unit after a Claude turn or process
+   exits. Its status, output digest, and completion event SHALL survive controller downtime and be
+   reconciled exactly once.
+4. On a recognized usage-limit message, the controller SHALL transition the open iteration to
+   WAITING_USAGE_RESET, persist the Claude session ID and reset deadline, make no model probes while
+   waiting, and automatically resume that same session after reset. Usage waiting SHALL not increment
+   crash or failure counters.
+5. A controller restart, user-manager restart, or host reboot SHALL reconstruct state, reconcile
+   units/events, and resume the same open iteration and Claude session, or enter an explicit
+   fail-closed stop state. Conversation memory alone SHALL never be required.
+6. Every automated turn SHALL belong to exactly one controller-created open iteration. Waiting for a
+   registered job or usage reset pauses that iteration instead of closing it.
+7. An iteration SHALL be SUCCESS only when the independent validator finds at least one allowlisted,
+   schema-valid semantic artifact delta against its start baseline and records before/after digests
+   or immutable remote identity.
+8. Loop state, logs, heartbeats, job manifests, timestamps, PENDING/NEXT prose, and the iteration’s
+   own ledger entry SHALL never count as progress.
+9. A turn that stops without a valid delta and without entering legitimate WAITING_JOB or
+   WAITING_USAGE_RESET SHALL close FAILED/NO_DURABLE_DELTA, write evidence and an operator-visible
+   alert, and enter DIAGNOSING.
+10. Every finalized iteration SHALL record its trigger, selected work, intent/hypothesis, actions,
+    outcome, validated artifacts, failure class/fingerprint, resource counters, and typed next step.
+    Entries SHALL form a SHA-256 chain; tampering or truncation SHALL stop the loop before another
+    model invocation.
+11. WORK_EXHAUSTED, OPERATOR_BLOCKED, LOCAL_BUDGET_EXHAUSTED, VALIDATOR_COMPROMISED,
+    LEDGER_CORRUPT, two consecutive identical failure fingerprints, three agent crashes in sixty
+    minutes, or two confirmed wedges of one iteration SHALL stop the agent and produce
+    ATTENTION.json plus a journal warning.
+12. A busy agent SHALL be declared wedged only after two consecutive ten-minute samples show all of:
+    an active nonwaiting turn, no pane/log change, no CPU-time increase, no job progress, and no
+    hook/event activity. A busy-but-silent process with advancing CPU SHALL survive.
+13. Creating HALT SHALL prevent new side effects, stop the agent cgroup and all outer-loop-owned job
+    units, and persist HALTED. Every broker action SHALL recheck HALT immediately before execution.
+    Removing HALT alone SHALL not resume work.
+14. The persistent Claude unit SHALL have no GitHub token, SSH key/agent, Codex credential, sudo,
+    user-systemd bus, or writable installed controller/validator/ledger. Negative tests SHALL prove
+    these resources inaccessible.
+15. GitHub/systemd actions requested by the agent SHALL pass through an allowlisted broker using the
+    installed parent dispatcher. The broker SHALL reject remote main, reject autonomous merge of
+    trust-critical work, and reject absent/invalid high-risk approval.
+16. Codex consultations SHALL use complete digest-bound stdin context in an externally hardened
+    detached unit and SHALL not depend on Codex reading the repository through bwrap. No AppArmor
+    weakening is required.
+17. Controller, heartbeat, reset scheduler, job watcher, and health classifier SHALL make zero
+    Claude/Codex/API calls. Only process state, hooks, systemd state, local logs, deadlines, and the
+    durable spool may be used for health.
+18. The heartbeat SHALL detect a dead controller lease, missed event, overdue reset deadline, or
+    confirmed wedge, but SHALL not prompt an idle agent to ask for status.
+19. The five regression scenarios—usage exhaustion, detached completion while idle, reboot, wedge,
+    and no-delta iteration—SHALL fail against the preserved old-design fixture and pass against the
+    new controller.
+20. Real installed-CLI hook/session/parser smoke tests and an operator-approved actual reboot drill
+    SHALL pass before R23 is marked done.
+
+## 4. Design / approach
+
+### 4.1 Activation and bootstrap boundary
+
+The active loop is an installed, digest-bound control-plane snapshot, not code imported from the
+mutable repository checkout. The repository contains source, schemas, tests, unit templates, and
+fixtures. After authorization, an operator-only installer copies the authorized controller,
+validator, schemas, prompt, and units into a versioned installation directory and records the
+PLAN-006 revision digest.
+
+The Claude service sees this installation read-only. Candidate changes therefore cannot validate,
+install, or activate themselves.
+
+Tracked policy ships disabled. A gitignored local activation grant contains:
+
+- authorized PLAN-006 digest;
+- allowed request, plan, and spec scope;
+- maximum completed iterations, Codex consultations, worker dispatches, and active-turn time;
+- provider-window fallback upper bound;
+- allowed broker capabilities;
+- expiry and operator identity.
+
+The controller refuses missing, expired, widened, or digest-mismatched grants. WAITING_JOB and
+WAITING_USAGE_RESET do not consume active-turn time.
+
+### 4.2 Runtime components
+
+1. orchestrator-outer-loop.service runs the deterministic controller in the foreground with
+   Restart=on-failure. It owns state, events, deadlines, jobs, ledger, validation, budgets, health,
+   alerts, and capability decisions. It performs no model calls.
+2. orchestrator-outer-agent.service runs a small installed runner that creates an isolated tmux
+   server on a dedicated socket, starts interactive Claude with a controller-assigned UUID, enables
+   pipe-pane logging, and remains tied to that tmux lifecycle. It has Restart=no: the controller must
+   classify the exit before any relaunch.
+3. orchestrator-outer-heartbeat.timer performs zero-quota local inspection every ten minutes. It
+   covers missed spool notifications, health sampling, and overdue deadlines; it is not the driver.
+4. scripts/outer-loop is the client/operator interface: enable, disable, submit, status, attach,
+   resume, halt, event, job submit/status, iteration inspect, and install.
+5. The Claude Stop hook submits hook JSON to the installed client. It never writes state or ledger
+   directly.
+6. Detached work runs as orchestrator-outer-job@<job-id>.service or equivalent transient units
+   created from validated named descriptors. The wrapper writes an atomic terminal manifest and
+   completion event before exit.
+7. Runtime state lives beneath .orchestrator/outer-loop/: state.json, event inbox/processed,
+   registered jobs, open iterations, ledger entries, chain.head, logs, health, alerts,
+   ATTENTION.json, and Claude session identity. Runtime content is gitignored except intentional
+   schemas and hash checkpoints.
+
+All JSON is canonical UTF-8 with sorted keys and no floats. Writes use same-filesystem temporary
+files, fsync, atomic rename, and directory fsync. A controller-wide flock serializes mutation. Events
+and iterations are idempotent by UUID.
+
+### 4.3 State machine
+
+| State | Meaning | Machine-checked transitions |
+|---|---|---|
+| DISABLED | No valid activation grant | valid ENABLE → STARTING; HALT_SET → HALTED |
+| STARTING | Verify ledger/policy; reconcile jobs/events/session | eligible work → ITERATING; none → STOPPED_WORK_EXHAUSTED; integrity error → STOPPED_INTEGRITY |
+| READY | Agent alive at Stop-hook-confirmed prompt | OPERATOR_INPUT, JOB_COMPLETED, NEXT_STEP_READY → ITERATING |
+| ITERATING | One automated turn and one open iteration active | JOB_REGISTERED → WAITING_JOB; USAGE_LIMIT_OBSERVED → WAITING_USAGE_RESET; valid STOP_HOOK → READY/stopped state; no-delta STOP_HOOK → DIAGNOSING; AGENT_EXIT → RECOVERING |
+| WAITING_JOB | Open iteration paused on registered work | matching JOB_COMPLETED/JOB_INTERRUPTED → ITERATING; usage limit → WAITING_USAGE_RESET |
+| WAITING_USAGE_RESET | Open iteration paused to reset deadline | RESET_DEADLINE_REACHED → ITERATING in the same explicit session |
+| DIAGNOSING | Failed iteration and alert recorded | one DIAGNOSE event → ITERATING; identical repeat → STOPPED_REPEATED_FAILURE |
+| RECOVERING | Exit/wedge evidence captured | recoverable and within budget → STARTING; repeated failure → stopped state |
+| STOPPED_WORK_EXHAUSTED | No eligible work | new scoped operator input/grant → STARTING |
+| STOPPED_OPERATOR_BLOCKED | Named human decision/approval required | matching operator/approval event → STARTING |
+| STOPPED_BUDGET | Local grant exhausted | new operator grant → STARTING |
+| STOPPED_REPEATED_FAILURE | Circuit breaker open | explicit disposition-bearing RESUME only |
+| STOPPED_INTEGRITY / STOPPED_UNCLASSIFIED | State, protocol, or validation untrustworthy | explicit repair and RESUME only |
+| HALTED | HALT active; agent/jobs stopped | HALT absent plus explicit RESUME and valid grant → STARTING |
+
+READY, WAITING_JOB, and WAITING_USAGE_RESET are idle-but-healthy. READY is not inferred from a prompt
+glyph; it requires a matching Stop hook. Waiting states require a registered job or parsed usage
+evidence. Work selection and conclusions remain model judgments; event identity, transitions,
+budgets, unit liveness, digests, validation, and stops are machine-checked.
+
+### 4.4 Event model
+
+Primary event types are JOB_COMPLETED, USAGE_RESET, and OPERATOR_INPUT. Internal events include
+SERVICE_START, JOB_INTERRUPTED, NEXT_STEP_READY, STOP_HOOK, AGENT_EXIT, HEALTH_SAMPLE,
+RESET_DEADLINE_REACHED, HALT_SET, and DIAGNOSE.
+
+Each event records schema version, UUID, type, UTC creation time, source, correlation/iteration/job
+identity, payload path and SHA-256, required scope, and its own digest. Job output is explicitly
+marked untrusted data.
+
+An event file is atomically persisted and fsynced before the client acknowledges it or nudges the
+controller socket. Socket loss therefore cannot lose the event. Processed state advances only once a
+finalized/open iteration references that event.
+
+When READY, the controller:
+
+1. creates an open iteration;
+2. captures the progress-artifact baseline;
+3. loads a fixed digest-bound envelope into the isolated tmux buffer;
+4. pastes it into the idle Claude PTY and sends Enter.
+
+It never interpolates event text into a shell command. Events arriving during ITERATING remain
+queued. A completion matching WAITING_JOB is delivered immediately. Events arriving during usage
+wait remain durable until reset.
+
+Operator input normally uses scripts/outer-loop submit. Read-only observation uses the dedicated
+tmux socket with attach -r. Writable emergency attachment is an audited override, not routine input.
+
+### 4.5 Runtime and supervision choice
+
+The manager is persistent interactive Claude, never claude -p. First activation assigns an explicit
+session UUID; every later launch resumes exactly that session. “Resume most recent” is prohibited.
+
+tmux provides the PTY and observation surface. systemd provides boot start, cgroup ownership, exit
+status, logs, resource limits, and filesystem/credential boundaries. The dedicated tmux socket
+prevents stopping the outer-loop service from affecting unrelated operator tmux sessions.
+
+The controller distinguishes conditions without spending quota:
+
+- Usage exhausted: a version-pinned ANSI-stripped classifier recognizes a complete known
+  exhaustion record and reset instant. It records WAITING_USAGE_RESET before acting.
+- Crashed: the Claude/tmux lifecycle ends without planned stop or recognized usage evidence.
+- Idle healthy: the PID/session exists and the last matching Stop hook closed the turn, or a
+  registered waiting condition exists.
+- Busy healthy: an open iteration has advancing pane bytes, CPU time, hook/events, or job progress.
+- Wedged: all progress signals remain unchanged for two ten-minute samples while the turn is active
+  and not waiting.
+- Controller dead: systemd restarts it; heartbeat additionally checks its local lease.
+
+Usage classification must resist output spoofing: known CLI framing, state correlation, and
+negative fixtures containing fake limit text in tool/job output are required. Unknown or ambiguous
+usage protocol stops fail-closed.
+
+The reset deadline comes from an already-observed message under TZ=UTC and LC_ALL=C. Reboot
+reconstructs it from its persisted UTC instant. If no reset time is available, the activation grant’s
+conservative provider-window upper bound permits one resume attempt. A second unparseable exhaustion
+stops as UNCLASSIFIED_USAGE_PROTOCOL. There is no polling loop.
+
+### 4.6 Detached jobs
+
+The agent requests named job kinds through the controller; arbitrary argv is rejected. The
+controller validates the request, records it, rechecks HALT/budget, and starts a separate systemd
+unit. That unit is not a descendant of the Claude process and survives the end of a turn.
+
+The job wrapper atomically records:
+
+- job ID and descriptor digest;
+- unit identity;
+- start/end timestamps;
+- exit classification/status;
+- response/output, stderr, and raw-stream paths and digests;
+- completion-event ID.
+
+It persists the manifest/event before attempting socket notification. On startup, the controller
+reconciles every nonterminal job against actual unit state. A unit lost to reboot becomes
+JOB_INTERRUPTED, never silent success or eternal waiting.
+
+### 4.7 Iteration ledger
+
+An iteration begins before prompt delivery. Waiting for a long consultation does not end it and has
+no minute-scale timeout. CLI exit or reboot leaves the open record durable. Terminal success or
+failure produces one immutable canonical entry linked to the previous SHA-256.
+
+Schema:
+
+    {
+      "schema_version": 1,
+      "loop_id": "activation UUID",
+      "sequence": 17,
+      "iteration_id": "UUID",
+      "previous_entry_sha256": "hex or null",
+      "started_at": "RFC3339 UTC",
+      "ended_at": "RFC3339 UTC",
+      "trigger_events": [
+        {"event_id": "UUID", "type": "JOB_COMPLETED", "sha256": "hex"}
+      ],
+      "picked": {
+        "request_id": "R23",
+        "plan_ref": "PLAN-006",
+        "spec_ref": null,
+        "incumbent_ref": "git SHA or artifact digest",
+        "summary": "bounded work item"
+      },
+      "intent": {
+        "hypothesis": "what should change and why",
+        "mechanism": "bounded action",
+        "expected_artifact_types": ["PLAN_REVISION"],
+        "success_predicate": "falsifiable outcome"
+      },
+      "actions": [
+        {
+          "action_id": "UUID",
+          "kind": "BROKER_OPERATION or DETACHED_JOB",
+          "started_at": "UTC",
+          "ended_at": "UTC or null",
+          "job_id": "UUID or null",
+          "result_ref": "path or URI",
+          "result_sha256": "hex"
+        }
+      ],
+      "pauses": [
+        {
+          "kind": "USAGE_RESET",
+          "start": "UTC",
+          "end": "UTC",
+          "evidence_ref": "path"
+        }
+      ],
+      "outcome": {
+        "status": "SUCCESS or FAILED",
+        "summary": "actual result",
+        "validator_version_sha256": "hex"
+      },
+      "artifacts": [
+        {
+          "type": "PLAN_REVISION",
+          "identity": "PLAN-006/revision-2",
+          "path_or_uri": ".orchestrator/plans/PLAN-006.md",
+          "before_sha256": "hex or null",
+          "after_sha256": "hex",
+          "validator": "plan-v1",
+          "validation_receipt_sha256": "hex"
+        }
+      ],
+      "failure": {
+        "class": "NO_DURABLE_DELTA or null",
+        "fingerprint": "hex or null",
+        "diagnosis": "mechanical and agent diagnosis",
+        "evidence_refs": ["path"]
+      },
+      "resources": {
+        "claude_session_id": "UUID",
+        "agent_restarts": 0,
+        "completed_iterations_in_grant": 3,
+        "codex_consults_in_grant": 1,
+        "worker_dispatches_in_grant": 0
+      },
+      "next_step": {
+        "disposition": "READY, WAIT_JOB, WAIT_RESET, WORK_EXHAUSTED, OPERATOR_BLOCKED, or BUDGET_EXHAUSTED",
+        "summary": "concrete next action",
+        "required_event_or_artifact": "typed condition or null"
+      },
+      "entry_sha256": "SHA-256 with this field omitted"
+    }
+
+Failure fingerprints hash the class, normalized subsystem/operation, stable exit or validator code,
+and evidence signature. Timestamps and free-form prose are excluded so rewording cannot evade the
+breaker.
+
+The installed controller—not Claude—writes entries. The agent’s mount makes ledger/state read-only.
+A verification command recomputes every digest and sequence. Corruption stops the loop. Clean stops
+or daily checkpoints persist chain.head into the tracked evidence area, but checkpoints never count
+as iteration progress.
+
+### 4.8 Progress validator
+
+At iteration start, the controller records identities and digests in each allowlisted artifact
+namespace. At Stop, the installed validator independently enumerates candidates and calls the
+matching type validator.
+
+Success requires at least one artifact that:
+
+1. did not exist at start or has a different semantic digest;
+2. remains durably present after fsync;
+3. belongs to the iteration’s approved scope;
+4. passes its schema and semantic transition rules;
+5. has a recorded receipt.
+
+Initial allowed delta types:
+
+1. PLAN_REVISION: template-valid plan, expected ID, incremented revision, consistent frontmatter, and
+   a semantic change outside generated provenance/checkpoint fields.
+2. VERDICT: schema-valid digest-bound PASS/BLOCK or review verdict with reviewer/model identity,
+   reviewed digest, reasons, and evidence.
+3. DECISION_RECORD: new/revised decision with trigger, authority, inputs, decision, and evidence
+   digests.
+4. PR: broker receipt confirmed against the remote API, targeting integration, with immutable PR
+   number/URL, head SHA, base SHA, and reviewed attempt identity.
+5. REQUEST_LEDGER_TRANSITION: parsed row whose status or completion evidence validly changed and
+   references a real artifact.
+6. SPEC_OR_ATTEMPT_RECORD: schema-valid spec, finalized attempt manifest, escalation, or integration
+   record produced by the installed dispatcher with normal bindings.
+
+Unknown types do not count. Deletion does not count without an allowlisted tombstone decision.
+Test output, raw logs, pane transcripts, state/events, job records, health samples, alerts,
+PENDING/NEXT, and outer-loop ledger/checkpoints never count. A digest-only or timestamp-only rewrite
+does not count.
+
+If Stop arrives while a registered job remains live, the iteration enters WAITING_JOB instead of
+being validated. Otherwise, zero valid deltas produces FAILED/NO_DURABLE_DELTA, ATTENTION.json, and
+DIAGNOSING. The diagnosis event includes the baseline, changed noncounting files, expected artifact
+types, and hook/pane evidence. A repeated identical fingerprint opens the breaker.
+
+Validator exception, writable-validator detection, or validator/schema digest mismatch is
+VALIDATOR_COMPROMISED and stops immediately.
+
+### 4.9 Stopping and circuit breakers
+
+The agent submits exactly one typed next-step disposition at Stop. The controller validates it:
+
+- WAIT_JOB requires a live registered job.
+- WAIT_RESET requires recognized limit evidence and a deadline.
+- READY requires eligible in-scope work.
+- OPERATOR_BLOCKED must name the exact decision, approval, credential, or external action.
+- WORK_EXHAUSTED requires no eligible ledger request or pending event.
+- BUDGET_EXHAUSTED follows the activation grant, not provider usage exhaustion.
+
+Breakers:
+
+- two consecutive finalized failures with the same fingerprint;
+- three unplanned agent exits in sixty minutes;
+- two confirmed wedges of the same open iteration;
+- invalid ledger chain;
+- installed policy/validator digest mismatch;
+- ambiguous usage protocol;
+- invalid event schema;
+- broker invariant failure;
+- HALT.
+
+A stop atomically records state, writes timestamped alert evidence and
+.orchestrator/outer-loop/ATTENTION.json, warns in the systemd journal, stops the agent, and leaves the
+quota-free controller listening. ATTENTION includes reason, evidence paths/digests, current
+request/iteration/session, exact resume precondition, and whether jobs were stopped.
+
+Stopped states never spin. Resume requires the qualifying event or explicit disposition-bearing
+operator command.
+
+### 4.10 Safety and revocation
+
+The persistent --dangerously-skip-permissions process is a standing code-execution capability and
+must not inherit the operator’s ambient account.
+
+The agent service uses:
+
+- private HOME, tmp, and dedicated tmux socket;
+- NoNewPrivileges;
+- empty capability bounding/ambient sets;
+- private devices;
+- strict system/kernel/cgroup protection;
+- resource ceilings;
+- restricted address families;
+- explicit read/write mounts.
+
+It hides:
+
+- the operator’s .ssh and GitHub configuration;
+- GH_TOKEN, GITHUB_TOKEN, and SSH_AUTH_SOCK;
+- Codex configuration/token;
+- the user-systemd bus;
+- installed controller, validator, and ledger;
+- unrelated home, /root, and /srv paths;
+- sudo capability.
+
+The minimum Claude credential/config is bound read-only; mutable Claude cache/session data uses the
+private HOME. The agent can read and potentially exfiltrate its own Claude credential and exposed
+repository content, modify writable checkout files, and consume network/quota. That unavoidable
+residual is explicit. It cannot, by design and negative test, access GitHub/SSH/Codex credentials,
+the user bus, installed safety plane, remote main, or unrelated filesystem paths.
+
+Credentialed operations use a typed controller broker, never arbitrary shell. The broker:
+
+- rechecks HALT, grant, scope, and budget;
+- invokes the installed parent dispatcher;
+- records inputs and result digests;
+- rejects source/target main;
+- rejects autonomous trust-critical merge;
+- rejects absent/invalid high-risk approval;
+- treats unclassified paths as high risk.
+
+scripts/outer-loop halt is the instant revocation command. It creates HALT first, stops the agent and
+registered job units, verifies inactive cgroups, and records HALTED. Manual fallback is:
+
+    touch /home/val/orchestrator/.orchestrator/HALT
+    systemctl --user stop orchestrator-outer-agent.service
+
+Removing HALT does not resume. Suspected compromise additionally requires Claude credential
+revocation/rotation.
+
+### 4.11 Codex route around bwrap
+
+The loop does not wait for a host sandbox fix and does not change the AppArmor sysctl.
+
+For a CODEX_CONSULT job, the controller:
+
+1. resolves every context file outside the model job;
+2. bounds size, strips secrets, concatenates complete context with path/digest headers, and hashes
+   stdin;
+3. starts an independent hardened systemd job with disposable HOME/workdir, only its Codex
+   credential/config, and no repository/operator-home mount;
+4. invokes the proven stdin/no-repository-read command form with gpt-5.6-sol, high reasoning, and
+   service_tier=priority;
+5. applies no minute-scale timeout;
+6. records response, raw JSON stream, stderr, exit metadata, and SHA-256 receipts;
+7. emits JOB_COMPLETED.
+
+Implementation must recover and fixture the working PLAN-005 attempt-3 argv. If it cannot be
+reproduced inside the external systemd boundary, activation blocks. Fixing AppArmor remains a
+separate high-assurance decision.
+
+### 4.12 Alternatives considered
+
+**A. Periodic claude -p --continue with babysitting.**  
+Still turn-scoped. It must keep a paid turn alive for hours or rely on another clock. It preserves
+the fatal lifetime mismatch, adds orientation cost, and cannot represent durable idle health.
+Rejected.
+
+**B. tmux-resident Claude with a shell watchdog.**  
+Fixes PTY liveness, but tmux is not an event broker, validator, ledger, capability boundary, or boot
+reconciler. Pane/process checks alone can still waste windows silently. The selected design retains
+tmux but assigns supervision and policy to systemd/controller. Rejected as the final design.
+
+**C. Event-triggered one-shot claude -p --resume.**  
+Better than the timer, but a turn still cannot receive the completion of work it launches, event
+startup repeatedly rehydrates context, and exact background behavior remains fragile. Rejected for
+revision 1.
+
+**D. Cloud schedules/routines.**  
+Cannot operate the on-box systemd/isolation/trust-critical lane without a new remote control surface.
+May complement CLOUD-SAFE work later, but cannot satisfy R23. Rejected.
+
+The hybrid wins because it separates deterministic liveness, validation, state, and safety from
+model reasoning while preserving a genuinely live interactive runtime.
+
+## 5. Affected boundaries & consumers
+
+1. CLAUDE.md autonomy, HALT, bootstrap, trust closure, review independence, approval, quota, merge,
+   and main-promotion rules.
+2. REQUEST-LEDGER, plans, specs, verdicts, decisions, approvals, attempts, escalations, and their
+   schemas.
+3. scripts/dispatch.py and installed dispatcher commands for reconcile, launch, health, cancel, push,
+   PR, merge, and integration.
+4. systemd user manager, linger, cgroups, tmux, journal, filesystem atomicity, clocks, and reboot.
+5. Claude version/session/hooks/usage output and Codex stdin/JSON-stream protocols.
+6. Claude, Codex, GitHub, SSH, and systemd credentials and network boundaries.
+7. Integration target, protected main, PR bindings, candidate versus installed control-plane code.
+8. Event, job, health, ledger, alert, checkpoint, and retained attempt evidence.
+9. Repository tests/CI and host-only lifecycle/security drills.
+10. Operator submit/status/read-only attach/halt/resume/install workflows.
+
+The transitive trust closure includes every parser, schema, library, config, entrypoint, classifier,
+hook, unit template, installer, broker, validator, and state transition affecting these behaviors.
+Unknown dependencies fail high-risk.
+
+## 6. Ordered implementation steps
+
+1. Verify R23 evidence, absence of deleted units, CLI versions/help, PLAN-005 attempt-3 command,
+   systemd/linger/tmux, HALT, autonomy, branch protection, and credential paths. Replace section 2
+   citations with path:line or evidence digest.
+2. Add event, state, grant, job, open-iteration, finalized-ledger, artifact-receipt, alert, and
+   capability schemas plus disabled tracked policy and canonical fixtures.
+3. Implement atomic state, locking, durable events, replay, transitions, injectable clock, ledger
+   verification, budgets, alerts, status, halt/resume, and startup reconciliation.
+4. Implement the closed artifact-validator registry and baseline/receipt logic using installed-parent
+   schema parsers.
+5. Implement named detached jobs, independent units, atomic terminal manifests, completion events,
+   exactly-once reconciliation, and reboot interruption.
+6. Implement explicit Claude session identity/resume, dedicated tmux socket, pipe-pane logging,
+   safe buffer delivery, Stop hook, and usage/health classification.
+7. Add controller, agent, heartbeat, and job unit templates plus installer/uninstaller. Units point
+   at the authorized installed snapshot, not mutable repository code.
+8. Implement filesystem/credential isolation and the typed capability broker. Add negative security
+   tests before any live model start.
+9. Implement Codex consultation using recovered attempt-3 stdin invocation and external systemd
+   isolation. Do not change AppArmor.
+10. Add deterministic tests for schemas, state, chain corruption, replay, usage parsing/spoofing,
+    reset/reboot, detached completion, no-delta validation, breakers, HALT races, wedge detection,
+    CLI drift, capability denial, and candidate self-activation.
+11. Update AGENTS.md, CLAUDE.md, and operator runbook with runtime, supported input, state/alerts,
+    budgets, revocation, residual risk, CLI upgrade, Codex workaround, evidence, and recovery.
+12. Run ./scripts/test, actual-unit security tests, CLI/hook/session smoke tests, and detached-job
+    canary. Produce bound evidence. Do not activate.
+13. Submit the same revision for fresh SOL Critical review and Claude challenge. Resolve findings in
+    a new revision until both PASS, then obtain operator authorization.
+14. Install with the agent disabled. Confirm Linger=yes, start only the deterministic controller,
+    test HALT/status/spool, then enable a tightly scoped grant and run live drills.
+15. Enable normal scoped operation only after the natural usage-reset and operator-approved reboot
+    drills pass. Reconcile R23 and record completion conformance.
+
+## 7. Failure modes & blast radius
+
+| Trigger | Consequence | Mitigation |
+|---|---|---|
+| Controller crash | Events temporarily undelivered | systemd restart, durable replay, lease heartbeat, crash breaker |
+| Claude exit | Runtime disappears | classify evidence before exact-session resume |
+| Usage wording changes | Wrong reset/crash classification | version-pinned parser, spoof tests, unknown-protocol stop |
+| Reboot during reset | Work remains paused | persisted UTC deadline and boot reconciliation |
+| Job finishes while controller down | Socket notification lost | manifest/event persisted first, startup replay |
+| Job killed by reboot | Eternal wait | JOB_INTERRUPTED event; fresh named retry only |
+| Stop hook absent | Validator bypass risk | protocol/integrity stop; no success without hook receipt |
+| No artifact | Silent wasted iteration | NO_DURABLE_DELTA alert and repeated-failure breaker |
+| Cosmetic/log change | False progress | closed semantic validators; loop artifacts excluded |
+| False WAIT state | Infinite idle | live job or recognized usage evidence required |
+| Long silent valid work | False kill | two samples; any CPU/output/job progress prevents kill |
+| True wedge | Window stalls | cgroup recovery once; second wedge stops |
+| Torn ledger write | Lost/corrupt memory | fsync/rename/hash chain; fail closed |
+| Candidate alters validator | Self-approval | active installed snapshot is read-only |
+| Agent exfiltrates secrets | Credential compromise | expose only Claude credential; halt and rotate |
+| Agent damages checkout | Local corruption | disposable/scoped work area, broker/gates/review, reinstall safe plane |
+| Broker permits main/high-risk merge | Trust-boundary breach | installed-parent deny, negative tests, branch ruleset |
+| HALT race | Side effect after stop | HALT-first plus pre-side-effect recheck and cgroup stop |
+| Heartbeat misfires | Unneeded model start | heartbeat cannot invoke model for status |
+| Grant too broad | Excess work/quota | explicit scope, ceilings, expiry, approval |
+| tmux dies | Session loss | systemd report and exact-session/ledger recovery |
+| bwrap remains broken | Consult failure | stdin context and external systemd isolation |
+| Hardening unsupported | Excess host access | activation-blocking verify and negative probes |
+
+Worst credible case is arbitrary command execution within the Claude unit’s exposed filesystem and
+network, exfiltration of its Claude credential/repository content, and local checkout damage. The
+design keeps GitHub/SSH/Codex/systemd credentials and the installed safety plane outside that unit,
+but does not claim --dangerously-skip-permissions is harmless.
+
+Recovery is HALT, stop all units, revoke Claude credentials, preserve evidence, audit remotes,
+recreate the control checkout, reinstall the last authorized snapshot, and remain disabled pending
+a new Critical authorization.
+
+Irreversible effects are model quota/cost and data already transmitted to provider APIs.
+
+## 8. Validation plan (falsifiable)
+
+Deterministic tests use fake Claude/Codex binaries, injectable time, disposable state, and
+systemd/tmux adapters. Host-bound tests repeat lifecycle and security checks with real units.
+
+1. **Usage exhaustion:** fake Claude starts as S1, opens an iteration, emits a captured limit record,
+   and exits or waits. Before reset, assert zero model calls. At reset, assert immediate exact resume
+   of S1 and the same iteration, with no crash/failure count. Restart controller during the wait.
+   The old fixture fails because claude -p exits and continuation depends on a later timer. A natural
+   live limit/reset is required before completion.
+2. **Detached completion while idle:** launch a fake independent job, let Claude enter WAITING_JOB,
+   then complete it. Assert manifest-before-event, delivery within five seconds, exact-session receipt,
+   and one successful iteration. Repeat with controller down. The old fixture fails because no live
+   process receives completion.
+3. **Reboot:** persist an open iteration, queued event, S1, and waiting state; kill all processes;
+   restart the service harness. Assert chain verification, reconciliation, exactly-once delivery, and
+   S1 continuation. Then perform an operator-approved actual VPS reboot with Linger=yes. The old
+   fixture has no explicit session/open-iteration recovery.
+4. **Wedge:** fake an active process with no output, CPU, hooks, or jobs. First sample does not kill;
+   second stops the cgroup and resumes once. A second wedge opens the breaker. CPU/output/job-progress
+   controls must survive. The old fixture has no confirmed-hang logic.
+5. **No delta:** deliver an event and Stop while only logs/state/timestamps change. Assert
+   FAILED/NO_DURABLE_DELTA, alert, diagnosis, and no success. Repeat identically and assert no third
+   prompt. The old fixture accepts exit zero.
+6. **Ledger durability:** kill between each atomic-write phase; recovery yields the old or new
+   complete state. Modify/delete/reorder entries and assert STOPPED_INTEGRITY before Claude starts.
+7. **Event integrity:** duplicate/reorder events, lose socket notifications, and include shell
+   metacharacters/fake limit text. Assert exactly-once handling, safe tmux delivery, and no spoofed
+   usage transition.
+8. **HALT and broker:** race HALT against prompt, job, PR, and merge. Assert no action after the final
+   HALT check. Requests for main, arbitrary argv, unapproved high-risk work, trust-critical merge,
+   candidate validator, or expired grant must be denied.
+9. **Credential isolation:** from the real agent unit, attempt reads of SSH/GitHub/Codex credentials,
+   user bus, installed validator/ledger, /root, and unrelated home/srv, and writes outside the
+   allowlist. All fail.
+10. **CLI compatibility:** record claude --version; prove Stop-hook receipt, explicit S1 creation and
+    exact resume, and real limit-fixture parsing. Reproduce the PLAN-005 attempt-3 Codex stdin
+    invocation in the hardened consult unit.
+11. **Stops/budgets:** exercise exhausted work, operator block, each local ceiling, expiry, repeated
+    failures, crash loop, and wedge loop. Assert one alert, no spinning, and only a qualifying resume.
+12. **Suite/evidence:** ./scripts/test passes; CI remains exactly ci; snapshot, policy, units, test
+    logs, live receipts, and final ledger head are digest-bound in completion evidence.
+
+The five headline tests explicitly run against both the deleted-design fixture and the replacement;
+each must fail old/pass new.
+
+## 9. Rollback / irreversibility
+
+1. Run scripts/outer-loop halt and verify all agent/job cgroups inactive.
+2. Disable controller, agent, and heartbeat units; remove wants links; daemon-reload. Do not restore
+   the old timer.
+3. Remove/repoint the installed snapshot and restore the installer’s hook-config backup.
+4. Disable/remove the local activation grant. Preserve ledger, events, jobs, logs, and alerts.
+5. Rotate Claude credentials if exposure is suspected and audit GitHub/SSH/Codex access.
+6. Resume manually in an operator-controlled session.
+
+Git, unit, tmux, linger, PR, and local-state changes are reversible. Model quota and provider-bound
+content are not. No kernel/AppArmor change is included.
+
+## 10. Open questions / operator decisions
+
+None for the design.
+
+The operator must still execute existing authority steps: authorize the final Critical digest,
+provide scoped local budgets, enable linger if absent, approve the live reboot drill, and explicitly
+enable production operation. These are fail-closed execution approvals, not unresolved design
+choices.
+
+## 11. Provenance (filled during challenge/authorization — NOT by the drafter)
+
+- **Challenge (Claude):** PENDING — must be filled by Claude.
+- **Disposition (drafter):** PENDING challenge.
+- **Dual-validation (high-assurance/control-plane):** SOL verdict PENDING; Claude verdict PENDING.
+- **Authorization:** PENDING; no unit may be installed or enabled.
+- **Completion reconciliation:** N/A — draft only; implementation has not begun.
+```
+tokens used
+102,432

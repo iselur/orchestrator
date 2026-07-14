@@ -9,7 +9,7 @@ One deterministic tool that encodes the Gate 1 procedure. Subcommands:
     dispatch await  <attempt-id>  bounded-sleep polling; exit with the attempt's result code
     dispatch cancel <attempt-id>  stop the attempt's systemd unit (never a recorded PID)
 
-Invariants (SETUP-BRIEF.md):
+Invariants (CLAUDE.md):
   - Every worker runs as a `systemd-run --user` transient unit in its own cgroup (Gate 2).
   - Validation first: schema-valid spec; approval digest matches; depends_on done; HALT absent;
     needs_network hard-refused (residual risk 13-B).
