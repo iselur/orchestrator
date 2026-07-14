@@ -88,11 +88,14 @@ alert_sweep() {
 
 # ---- tmux/session -------------------------------------------------------------------------------
 session_exists() { tmux has-session -t "$SESSION" 2>/dev/null; }
-claude_alive() {
-  # The pane's foreground command is the shell itself iff nothing is running in it. This is
-  # PID-free on purpose: the safety rules ban acting on remembered process numbers.
-  local cmd; cmd=$(tmux display-message -p -t "$SESSION" '#{pane_current_command}' 2>/dev/null)
-  case "$cmd" in bash|sh|dash|zsh|"") return 1 ;; *) return 0 ;; esac
+pane_probe() {
+  # Prints alive | dead | unknown. The pane's foreground command is the shell itself iff nothing
+  # is running in it (PID-free on purpose: the safety rules ban acting on remembered process
+  # numbers). A FAILED or EMPTY probe is UNKNOWN, never dead: treating an indeterminate probe as
+  # dead once meant a transient tmux error could get a live claude killed or typed into.
+  local cmd
+  cmd=$(tmux display-message -p -t "$SESSION" '#{pane_current_command}' 2>/dev/null) || { echo unknown; return; }
+  case "$cmd" in "") echo unknown ;; bash|sh|dash|zsh) echo dead ;; *) echo alive ;; esac
 }
 valid_uuid() { [[ "$1" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; }
 
@@ -360,15 +363,25 @@ check() {
     # in-flight context genuinely is not on disk yet. A LIVE idle session is left alone: rotation
     # is session-initiated at a boundary (the resume prompt orders the exit), never an outside
     # kill of a running claude.
-    if session_exists && ! claude_alive && [ -e "$WD/session-id" ]; then
-      halted && exit 0
-      local retired; retired=$(get "$WD/session-id")
-      if tmux kill-session -t "$SESSION" 2>/dev/null || ! session_exists; then
-        rm -f "$WD/session-id" "$WD/launched"
-        note "idle rotation: conversation ${retired:-?} retired; next pending wake starts fresh"
-      else
-        note "idle rotation: kill-session failed; keeping state, will retry next tick"
-      fi
+    if session_exists && [ -e "$WD/session-id" ]; then
+      case "$(pane_probe)" in
+        dead)
+          halted && exit 0
+          local retired; retired=$(get "$WD/session-id")
+          if ! valid_uuid "${retired:-}"; then
+            # Corrupt ownership stays a visible refusal even when idle: erasing state the
+            # pending path refuses to touch would launder a foreign/corrupt session into a
+            # clean slate.
+            alert_raise corrupt-session-id "idle session with an invalid recorded id; refusing to rotate or erase it"
+          elif tmux kill-session -t "$SESSION" 2>/dev/null || ! session_exists; then
+            rm -f "$WD/session-id" "$WD/launched"
+            note "idle rotation: conversation $retired retired; next pending wake starts fresh"
+          else
+            note "idle rotation: kill-session failed; keeping state, will retry next tick"
+          fi ;;
+        alive) : ;;   # session-initiated exit only — never an outside kill of a live claude
+        *) note "idle rotation: pane liveness indeterminate; not rotating this tick" ;;
+      esac
     fi
     alert_sweep
     exit 0
@@ -376,11 +389,12 @@ check() {
   if [ "$pending" -eq 1 ]; then
     if ! session_exists; then
       launch_new                                                 # (a)
-    elif ! claude_alive; then
-      respawn                                                    # (b)
     else
-      scan_usage                                                 # (c)
-      handle_usage_wait
+      case "$(pane_probe)" in
+        dead)  respawn ;;                                        # (b)
+        alive) scan_usage; handle_usage_wait ;;                  # (c)
+        *)     note "pane liveness indeterminate; taking no session action this tick" ;;
+      esac
     fi
     [ "$attempt" = "MALFORMED" ] && attempt=""
     idle_check "$ids" "$attempt"                                 # (d)

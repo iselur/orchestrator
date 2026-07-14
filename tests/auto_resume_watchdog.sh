@@ -169,6 +169,27 @@ unset FAKE_TMUX_FAIL
 run_wd
 [ ! -e "$TS/sessions/orch-auto" ] && [ ! -e "$WDIR/session-id" ] && ok "rotation retried and completed" || bad "rotation retry failed"
 
+echo "== W2c: an INDETERMINATE pane probe fails closed — no rotation, no respawn, no typing"
+reset
+mkdir -p "$TS/sessions"; touch "$TS/sessions/orch-auto"; echo claude > "$TS/sessions/orch-auto.cmd"
+printf '00000000-0000-4000-8000-000000000099\n' > "$WDIR/session-id" 2>/dev/null || { mkdir -p "$WDIR"; printf '00000000-0000-4000-8000-000000000099\n' > "$WDIR/session-id"; }
+export FAKE_TMUX_FAIL=display-message
+run_wd                                             # IDLE + probe failure
+[ -e "$TS/sessions/orch-auto" ] && [ -e "$WDIR/session-id" ] && ok "idle + failed probe: nothing killed, nothing retired" || bad "failed probe rotated a possibly-live session"
+open_row
+printf '00000000-0000-4000-8000-000000000099\n' > "$WDIR/launched"
+run_wd                                             # PENDING + probe failure
+unset FAKE_TMUX_FAIL
+[ -z "$(keys)" ] && ok "pending + failed probe: no respawn, no keys typed into an unknown pane" || bad "failed probe caused session input"
+
+echo "== W2d: idle rotation refuses corrupt ownership instead of erasing it"
+reset
+mkdir -p "$TS/sessions"; touch "$TS/sessions/orch-auto"; dead_pane
+mkdir -p "$WDIR"; echo "not-a-uuid" > "$WDIR/session-id"
+run_wd
+[ -e "$TS/sessions/orch-auto" ] && [ -e "$WDIR/session-id" ] && ok "corrupt id under idle: session and state untouched" || bad "idle rotation erased corrupt state"
+[ -e "$WDIR/ALERT-corrupt-session-id" ] && ok "corrupt id under idle: visible refusal alert" || bad "corrupt id under idle failed silently"
+
 echo "== W3 (b): dead pane + pending + valid recorded id -> one --resume of THAT id"
 reset; open_row
 run_wd
