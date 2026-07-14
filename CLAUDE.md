@@ -1,7 +1,21 @@
 # CLAUDE.md — orchestrator invariants
 
-Short by design. Conventions/stack/test commands live in [AGENTS.md](AGENTS.md); the full build
-log and findings live in `SETUP-REPORT.md`. On any conflict, `SETUP-BRIEF.md` invariants win.
+Short by design. Conventions/stack/test commands live in [AGENTS.md](AGENTS.md).
+
+> **`SETUP-BRIEF.md` / `SETUP-REPORT.md` do not exist in any commit** — they were local-only files.
+> References to them below are historical; where this file cites them, treat the claim as unsourced.
+> (Truth-in-docs, decision R26.)
+
+## Governing rule (decision R26, operator, 2026-07-14)
+
+**The control plane may not be improved except in response to a failure that a real product shipment
+actually hit.** The factory earns each new gate by breaking without it. This overrides any impulse
+below toward speculative hardening. Planning depth scales with **uncertainty, reversibility, and
+blast radius** — NOT with whether a task is "substantive". The former "brief-caliber plan for every
+substantive task" rule is **REVOKED**: it was the engine of an accretion loop that produced ~82k
+lines of governance prose and zero product features. Dual-vendor adversarial rigor is **moved to
+stage 1** (ideas, product bets, irreversible decisions), where being wrong is expensive; it is not
+applied to internal mechanisms, where being wrong costs a `git revert`.
 
 ## Autonomy level
 
@@ -72,7 +86,9 @@ code changes are dispatched as Codex specs, not hand-edited by Claude. Three lan
    ITSELF. The installed parent version runs all gates; the dispatcher never executes a candidate's own
    modified gate/dispatch code to gate that candidate; a candidate activates only after separate
    approval + install.
-2. **Classify by capability + transitive dependency, not path-touch.** A machine-enforced trust manifest
+2. **Classify by capability + transitive dependency, not path-touch.** *(NOT BUILT: there is no trust
+   manifest and no dependency closure in code. Classification is POLICY/MANUAL today. The text below
+   describes an intent, not a mechanism — do not cite it as an enforced control.)* A trust manifest
    + dependency closure decides trust-critical status; any file in the trust closure OR any
    unclassified/ambiguous file is forced **high-risk** (fail closed). Trust-critical = anything that can
    affect dispatch authorization, sandbox construction, worker identity/env/PATH, worktree/network
@@ -294,7 +310,8 @@ dispatch — workers are judged only by spec/scope/tests/diff/review/CI, never b
   closing that needs per-attempt UIDs or a credential broker. **`needs_network:true` stays refused
   until that step.** If `isolation_available()` is false (fresh box / CI), the dispatcher falls
   back to same-user launch and records `isolation:false` so provenance never overstates the boundary.
-- **Parallelism (Gate 3 part 3): `MAX_PARALLEL=2`.** The slot claim is atomic (`claim_slot`, under
+- **Parallelism (Gate 3 part 3): configurable via `ORCH_MAX_PARALLEL`, default 3** (docs previously
+  said 2; the code says 3 — the code is right). The slot claim is atomic (`claim_slot`, under
   the STATE lock): at most 2 live attempts, at most one live attempt per spec. Each attempt has a
   unique branch/worktree. **Stale base is refused, never hand-rebased:** if the base branch advanced
   while an attempt ran (a sibling integrated), the dispatcher records `stale_base` at push and opens

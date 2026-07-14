@@ -1,0 +1,1324 @@
+You are SOL (gpt-5.6), the DRAFTER of PLAN-003. The OPERATOR has authorized a SCOPE TRIM (decision R24, inlined below). Your revision 6 (the full-scope plan, inlined below) is now the BASE; produce **PLAN-003 REVISION 7 — the TRIMMED TRUTHFUL KERNEL**.
+
+The trim is an operator decision, not a design question: do not argue it, implement it. Preserve every accumulated fix that falls INSIDE the kernel; move everything else to a new "## Deferred (recorded, not cancelled)" section that names each deferred item, why it was deferred, the risk accepted, and the future spec that must carry it. Nothing is silently dropped.
+
+IN THE KERNEL (must remain, at full depth):
+- Machine-enforced TEST ATTESTATION: parent-owned required-test IDs + exact expected-assertion-ID sets; SKIP / missing test / zero-assertion / duplicate / unknown ⇒ failed_test BEFORE the reviewer runs; aggregate exit code is never sufficient.
+- Producer-authenticated assertion events: controller runs OUTSIDE the candidate UID; env scrub + FD close before every candidate exec; per-invocation nonces; separate trusted/supplemental pipes; controller-only event production; ptrace/process_vm/pidfd_getfd denial tests. (Without this, attestation is forgeable — it stays.)
+- Parent-content (git-blob-verified) required tests executed against the candidate as a separate target root; candidate-modified copies run only as supplemental and can never satisfy a required ID.
+- Verdict schema v4: exactly one criteria entry per spec acceptance criterion (count + order + normalized text binding, criterion_index); strict JSON parse rejecting duplicate keys and nonstandard constants; the digest-approved acceptance-criteria vector persisted at launch and validated against.
+- Structured advisory|blocker finding arrays + the mechanical blocker predicate in evaluate_binary_review (fail-closed on malformed input even without schema validation).
+- The credential/evidence CHOKE POINT: authoritative evidence roots and the PR/push credential reachable only through the root-owned launcher; a direct repository dispatcher run cannot produce authoritative artifacts (its outputs are never adopted: no evidence, review, attestation, or test result); the direct-run commit may be readmitted only as untrusted input to a fresh service-controlled attempt.
+- Tree revalidation: worktree == worker_commit re-verified after tests, before review, and before PR creation.
+- Metrics: the behaviour-preserving extraction to scripts/metrics_report.py + the corrected semantics (not_attributed_to_orchestrator; per-spec straight-through rate; null/N/A on zero denominator) — this is Phase 2's precondition and stays.
+- Whatever minimum venv/dependency provisioning is strictly required for the required tests to actually EXECUTE (they currently SKIP for missing pyyaml/jsonschema — that is the original bug). Keep it minimal: no content-addressed digest ladder, no wheelhouse.
+- The SPEC-015 replay regression through the REAL gate state machine with reviewer/PR spies at zero.
+- Non-vacuous validation: positive controls; mutation drill for every substantive assertion in trust-class tests.
+
+DEFERRED (move out of scope, into the Deferred section):
+- The full activation state machine (append-only activation ledger, CAS singleton head, genesis form, crash-phase durability oracles). Replace in the kernel with: operator-run installation that RECORDS the installed parent commit + digests in the attempt manifest, and a dispatcher check that its own recorded parent digest matches what is installed (simple, machine-checked, no ledger/CAS).
+- Dispatch 0's full frozen-profile verifier system (profiles per dispatch, Dispatch 5 profile). Replace with: the choke point (above) + independent human review of each trust-critical diff. State the accepted residual: candidate code cannot produce authoritative evidence, but the new gate's own tests are reviewed by humans rather than validated by a prior frozen verifier.
+- Content-addressed shared gate venv hardening, shadow-module/ABI ladder, fresh-box provisioning drills beyond the minimum above.
+- Sanitized reviewer log-tail machinery beyond passing the machine attestation summary (the summary is primary evidence; the raw log stays retained but is not prompt-injected).
+- Full evidence sealing / O_EXCL suite (already routed to the evidence-hashing plan).
+- The two/three-stage compatibility promotion sequence (keep only: a candidate that must change a required trust test triggers explicit human authorization naming the old and new blob).
+
+Restructure the dispatch decomposition accordingly (expect ~3 dispatches now, not 6), renumber requirements/acceptance/validation coherently, keep the PLAN-TEMPLATE section structure, update Residual risks to include the newly accepted residuals from the trim, and set frontmatter revision: 7. End with "## Disposition record (revision 7)" stating what was kept, what was deferred (with its future-spec owner), and confirming no accumulated fix inside the kernel was lost.
+
+
+=== OPERATOR DECISION R24 (binding) ===
+# DECISION — planning stop-rule + resequencing + Phase-1 trimmed kernel
+
+**Authority:** operator, 2026-07-14 ("Approve both"), in response to Claude's proposal.
+**Tier:** control-plane (governs when plans are authorized and what order work ships).
+
+## 1. Planning stop-rule (BINDING, effective immediately)
+
+A plan is AUTHORIZED when an adversarial review round returns **zero findings that are either
+(a) security-material or (b) executability-blocking**. Advisory notes, hardening suggestions, and
+re-litigation of explicitly recorded residuals do NOT block authorization.
+
+Rationale: an adversarial reviewer asked to find problems will always find problems. The planning
+loop previously had NO stopping condition — the same defect diagnosed in the deleted continuation
+timer (`R23-continuation-failure/REFRAME-outer-loop.md`) and the exact risk named as #1 by the
+vision gap review ("recursive control-plane accretion becoming the product").
+
+Escalation: if Claude and the reviewer disagree on whether a finding is material, it goes to the
+operator — never silently resolved, never silently iterated.
+
+## 2. Resequencing (BINDING)
+
+Implementation order — the outer loop OVERTAKES the measurement layer:
+
+1. **PLAN-005** — fail-closed isolation refusal (small, self-contained, closes a live hole).
+2. **PLAN-006** — the OUTER LOOP (autonomous continuation). This is what stops the operator having
+   to restart the session every ~5h; a factory that cannot survive the night is worth less than a
+   factory with better dashboards.
+3. **PLAN-003** — Phase 1 verdict integrity, TRIMMED KERNEL scope (see 3).
+4. **PLAN-004** — Phase 2 measurement layer.
+
+## 3. Phase-1 scope: TRIMMED TRUTHFUL KERNEL (BINDING)
+
+Phase 1 ships the smallest mechanism that makes the gate stop certifying unrun/vacuous/forged tests:
+
+**IN (the kernel):**
+- Machine-enforced TEST ATTESTATION: parent-owned required-test IDs + exact expected-assertion sets;
+  SKIP / missing / zero-assertion / forged ⇒ `failed_test` BEFORE the reviewer runs.
+- Producer-authenticated assertion events (controller outside the candidate UID; env scrub + FD
+  close before candidate exec) — without this, attestation is forgeable and the kernel is theatre.
+- Parent-content (blob-verified) required tests — candidate-modified copies are supplemental only.
+- Verdict schema v4: exact one-criterion-per-acceptance-criterion count/order/text binding; strict
+  JSON parse (duplicate-key rejection); launch-time persisted criteria vector.
+- Structured `advisory|blocker` findings + mechanical blocker predicate in `evaluate_binary_review`.
+- Credential/evidence CHOKE POINT: authoritative evidence roots + PR/push credential reachable only
+  via the root-owned launcher; direct dispatcher runs cannot produce authoritative artifacts.
+- Metrics extraction (`scripts/metrics_report.py`) + corrected semantics (Phase 2's precondition).
+- Reviewer receives the machine attestation summary (log tail secondary).
+
+**DEFERRED (recorded, not cancelled — each becomes its own later spec):**
+- Full activation state machine (append-only activation ledger + CAS singleton head + crash oracles).
+- The frozen bootstrap verifier's full profile system (Dispatch 0 as designed) — replaced in the
+  kernel by: the choke point + operator-run installation with recorded digests.
+- Shared content-addressed gate venv hardening beyond what the required tests need to run.
+- Sanitized reviewer log-tail hardening beyond the attestation summary.
+- Full evidence sealing (already routed to the separate evidence-hashing plan).
+
+**Residual accepted by the operator:** the trimmed kernel closes the FALSE-PASS class (the actual
+observed failure, SPEC-015) but leaves some self-gating hardening for later specs. This is a
+conscious trade to reach a working end-to-end factory sooner.
+
+## 4. Consequences
+- PLAN-003 is re-scoped to the kernel (revision 7) and re-reviewed under the stop-rule.
+- PLAN-004 keeps its dependency on corrected metrics semantics, which stay in the kernel.
+- Deferred items are tracked in the baton/ledger so the trim is not silent scope loss.
+
+
+=== BASE: PLAN-003 REVISION 6 (full scope) ===
+---
+id: PLAN-003
+created: 2026-07-14T05:42:58Z
+author_model: gpt-5.6-sol
+status: challenged
+task: "PHASE-1 PLAN (verdict integrity + metrics semantics) — redraft to the PLAN-TEMPLATE.md standard"
+ledger_ref: R19
+lane: mixed
+supersedes: drafts/verdict-integrity/PLAN-001
+revision: 6
+---
+
+# PLAN-003 — Phase 1 verdict integrity and metrics semantics
+
+## 1. Decision & non-goals
+
+Phase 1 will establish a non-self-gating path before changing the existing gate. A new Dispatch 0 will install a minimal frozen bootstrap verifier outside candidate-controlled repository content. That verifier will carry a frozen required-test inventory, a frozen expected-assertion-ID inventory, and the minimal strict approval parser/schema required for its own approvals; run candidate code through the worker boundary; provision root-owned trusted snapshots under `/srv/codexwork/installed/<commit>`; and issue machine-checked activation manifests. Its root-owned `bootstrapctl` launcher/service will be the exclusive pre-Dispatch-4 authorization choke point: only that path can reach authoritative attempt-evidence roots or the PR/push credential. It will gate Dispatches 1–5 and validate Dispatch 4’s activation; Dispatch 4 may not activate by selecting and passing only its own new policy or tests.
+
+After Dispatch 0:
+
+- Dispatch 1 performs a high-assurance, behavior-preserving metrics extraction.
+- Dispatch 2 performs the ordinary-risk metrics semantic correction.
+- Dispatch 3 performs the high-assurance assertion migration.
+- Dispatch 4 installs the repaired parent-owned test-attestation gate, isolated environment, source/target binding, tree revalidation, activation enforcement, and reviewer evidence.
+- Dispatch 5 installs verdict schema v4, positional criterion binding, duplicate-key rejection, and structured blocking findings under the activated Dispatch 4 parent and must also pass Dispatch 0’s frozen Dispatch 5 profile.
+
+The installed parent dispatcher—not candidate content—will select required tests from the exact approved base and candidate Git trees. Each required test will have a parent-owned exact expected-assertion-ID set. Authorization requires an exact set match: every expected ID exactly once, with no missing, unknown, or duplicate assertion.
+
+Trusted assertion events will be producer-authenticated operationally. The event-producing controller runs on the dispatcher/operator side, outside the `codex-worker` candidate UID and candidate process namespace. Candidate application processes receive neither an attestation nonce nor an assertion descriptor. Parent-owned command helpers scrub attestation and Python environment variables, close all non-whitelisted descriptors before every candidate `exec`, and use per-invocation nonces and separate trusted and supplemental pipes. The trusted controller alone converts observed command outcomes into assertion events and owns aggregation. If the UID/process separation cannot be established, the test phase aborts before candidate launch.
+
+Required test content, runner, policy, helpers, fixtures, schemas, wrappers, and interpreter identities will come from a root-owned, read-only installed snapshot materialized from the exact parent commit. Candidate-modified tests remain supplemental. The candidate tree will be revalidated after the test phase, immediately before review, and immediately before PR creation.
+
+Review verdict schema v4 will retain positional binding: one ordered entry for every acceptance criterion persisted in the attempt manifest before candidate work. Review JSON parsing will reject duplicate object keys and nonstandard constants. Structured scope, regression, and security blockers will mechanically prevent PASS.
+
+Metrics will retain the extraction/semantics split. Extraction parity baselines will be captured by the operator before candidate work and bound by the approval artifact. Straight-through metrics will be anchored by terminal-spec time while consulting the spec’s complete attempt history.
+
+Phase 2 implementation work requires all six Phase 1 dispatches—Dispatches 0–5—to be completed, merged where applicable, installed, activated, and validated, including a passing frozen Dispatch 5 profile. Dispatch 2 is necessary but not sufficient.
+
+PLAN-003 embeds the minimal strict approval parser/schema needed by Dispatch 0 in the independently reviewed, operator-installed frozen artifact. The parser, schema, and their exact digests are approval-bound, and Dispatch 0 refuses any schema-digest mismatch. The separate approval-schema plan is explicitly removed from PLAN-003’s critical path; it may upgrade the full native system later, after the non-self-gated bootstrap path exists.
+
+A commit created by a direct pre-Dispatch-4 repository invocation may later be presented only as untrusted candidate input to a new service-controlled attempt. No evidence, review output, attestation, test result, attempt identity, PR, push result, or other authorization artifact from the direct run is adopted. Readmission requires a fresh service-issued attempt identity, fresh authoritative evidence, fresh trusted tests, fresh review, and a broker-only push/ref and PR operation bound to that new attempt.
+
+Non-goals:
+
+- Do not create a complete second production gate in Dispatch 0. It is a deliberately minimal, frozen bootstrap verifier.
+- Do not require a read-only bind mount of the candidate tree in revision 4. Tree revalidation is mandatory; a read-only bind is optional hardening.
+- Do not duplicate the full sealing, terminal-manifest, and evidence-hash-chain design assigned to the separate `evidence-hashing` plan.
+- Do not claim that escaping or delimiting reviewer log text neutralizes semantic prompt injection.
+- Do not add a hash-locked wheelhouse or redesign dependency locking in this plan.
+- Do not change the worker model, reasoning depth, priority service tier, reviewer seat, branch topology, or human merge authority.
+- Do not permit candidate dispatcher, runner, policy, schema, helper, fixture, or test content to authorize itself.
+- Do not treat aggregate exit zero, a positive assertion count, free-form `test_command` output, or reviewer prose as proof that required tests ran.
+- Do not expose the operator’s home or `.venv`, install packages as `codex-worker`, enable candidate network access, or import Python modules from the candidate root into the trusted controller.
+- Do not alter `.orchestrator/attempts/SPEC-015/1/*`.
+- Do not retroactively authorize legacy verdicts or test logs.
+- Do not infer an unmatched merge’s actor.
+- Do not authorize an incompatible test change outside the three-state compatibility sequence or a separately approved external bootstrap.
+- Do not allow CI’s portable suite to substitute for an on-box activation artifact.
+- Do not allow direct pre-Dispatch-4 invocation of repository `scripts/dispatch` to create authoritative evidence, reach PR/push credentials, or select an active parent.
+- Do not adopt evidence, review output, attestations, test results, attempt identity, push results, or a PR produced by a direct pre-Dispatch-4 repository invocation.
+- Do not make the separate full-system approval-schema plan a prerequisite for Dispatch 0.
+- Do not claim power-loss or faulting-filesystem durability from the process-crash consistency oracle in this plan.
+
+## 2. Current-state evidence
+
+### 2.1 Observed facts
+
+1. The current test gate records `test.log` and trusts the child return code; it does not prove which required tests or assertions executed ([scripts/dispatch.py](/home/val/orchestrator/scripts/dispatch.py:935)).
+
+2. The repository wrapper maps a child exit code of zero to `PASS` and has no independent successful-skip authorization state ([scripts/test](/home/val/orchestrator/scripts/test:22)).
+
+3. SPEC-015 demonstrates the resulting false green:
+
+   - `dispatch_gate4.sh` skipped because PyYAML/jsonschema were absent ([test.log](/home/val/orchestrator/.orchestrator/attempts/SPEC-015/1/test.log:7)).
+   - `dispatch_parallel.sh` skipped for the same reason ([test.log](/home/val/orchestrator/.orchestrator/attempts/SPEC-015/1/test.log:10)).
+   - `worker_isolation.sh` skipped because on-box prerequisites were absent ([test.log](/home/val/orchestrator/.orchestrator/attempts/SPEC-015/1/test.log:30)).
+
+4. The reviewer received only an aggregate exit-zero statement rather than the omitted test evidence ([scripts/dispatch.py](/home/val/orchestrator/scripts/dispatch.py:1186); [scripts/dispatch.py](/home/val/orchestrator/scripts/dispatch.py:1188)).
+
+5. Current verdict evaluation examines only supplied criterion entries and can accept a supplied all-`MET` subset ([scripts/dispatch.py](/home/val/orchestrator/scripts/dispatch.py:1106)).
+
+6. Current artifact binding checks `spec_digest`, `base_sha`, and `worker_commit`, but not an immutable launch-time acceptance-criteria vector ([scripts/dispatch.py](/home/val/orchestrator/scripts/dispatch.py:1119)).
+
+7. Candidate-controlled diff text is already an untrusted semantic prompt channel ([scripts/dispatch.py](/home/val/orchestrator/scripts/dispatch.py:1141); [scripts/dispatch.py](/home/val/orchestrator/scripts/dispatch.py:1188)).
+
+8. The current parent cannot distinguish a substantive candidate test command from `true`; therefore Dispatches 1–4 require the independently installed bootstrap verifier.
+
+9. A nonce placed in the trusted test environment would label an event but would not authenticate its producer if candidate processes inherited the environment or event descriptor.
+
+10. A requirements-file-only venv address is insufficient across Python ABI and platform changes, and `PYTHONNOUSERSITE` alone does not prevent candidate-root import shadowing.
+
+11. Atomic rename alone provides neither no-replace evidence creation nor proof of the required syscall ordering and durability barriers.
+
+12. The existing approval path convention does not by itself provide the new attempt/test-blob bindings required here; Dispatch 0 therefore requires its own independently reviewed, frozen, digest-bound minimal approval parser/schema.
+
+13. The current repository dispatcher remains directly callable, so a declared preferred launcher is not by itself an exclusive authorization path.
+
+14. Immutable per-commit activation manifests do not by themselves select one current active parent or prevent stale and sibling manifests from being used concurrently.
+
+15. Environment, descriptor, and `/proc` pathname restrictions do not by themselves prevent same-UID direct process manipulation through `ptrace`, `process_vm_readv`, `process_vm_writev`, or `pidfd_getfd`.
+
+16. Candidate-modified Dispatch 5 tests are supplemental under the repaired gate and therefore cannot independently prove Dispatch 5’s own v4 requirements; an independently frozen Dispatch 5 oracle is required.
+
+### 2.2 Assumptions
+
+1. `scripts/requirements.txt` remains the trusted direct dependency input. This plan does not change dependency versions merely to implement the gate.
+
+2. The operator can install root-owned files below `/srv/codexwork/bootstrap`, `/srv/codexwork/installed`, `/srv/codexwork/venvs/gate`, `/srv/codexwork/activations`, and the authoritative Dispatch 0 evidence and credential-service locations.
+
+3. The independently reviewed Dispatch 0 artifact can embed and strictly validate the exact minimal approval bindings required by R1 and R9 without depending on candidate repository code or the separate full-system approval-schema plan.
+
+4. The root-owned bootstrap verifier can invoke candidate code through the existing `codex-worker` isolation boundary without exposing operator credentials, while its controller remains outside the candidate UID and process namespace.
+
+5. Parent-owned trust tests can be adapted so every candidate process launch passes through the parent-owned execution helper. A test that launches candidate code outside that helper is ineligible to authorize a candidate.
+
+6. Git commit and tree objects for the approved base, candidate, and installed parent remain available for snapshot materialization and tree comparison.
+
+7. Historical raw evidence may be absent from a clean CI checkout. The real SPEC-015 replay is therefore an on-box validation; a tracked synthetic fixture is only a portable companion test.
+
+8. A machine can prove exact assertion execution, provenance, and binding. It cannot prove that the assertions are semantically sufficient; high-assurance review and human authorization remain required.
+
+9. Full transitive dependency hash locking is outside this plan. The venv improvements in R6 reduce identity ambiguity and shadowing without claiming a hermetic supply-chain proof.
+
+10. Any drift in cited symbols before authorization requires citation refresh and renewed challenge.
+
+11. The activation crash oracle is scoped to process crashes on the installed filesystem. It does not prove persistence under sudden power loss, controller failure, storage-cache loss, or a faulting filesystem.
+
+### 2.3 Repository-access note
+
+No new path-and-line citations were introduced in revision 4. The citations above are the live locations repeated in revisions 2 and 3 and the independent critiques. Draft-time shell revalidation was attempted but blocked before command execution by `bwrap: loopback: Failed RTM_NEWADDR`; authorization must refresh these citations if the referenced symbols have moved.
+
+## 3. Requirements & acceptance criteria
+
+### R1. Independently installed authorization choke point and activation state machine
+
+Before Dispatch 1, the operator must install a frozen bootstrap verifier, embedded minimal strict approval parser/schema, exclusive authorization choke point, and inventories outside candidate-controlled content. The verifier must gate Dispatches 1–5, validate their candidate commits through the worker boundary, provision trusted installed snapshots, and issue strict activation manifests and atomic activation-head transitions. Dispatch 4’s activation must be authorized by this prior frozen verifier, not by Dispatch 4’s own new policy or tests.
+
+Acceptance criteria:
+
+1. **R1.1:** `/srv/codexwork/bootstrap/PLAN-003/<verifier-sha256>/` contains the root-owned verifier, embedded minimal strict approval parser/schema, bootstrap schema, frozen Dispatch 1–5 test profiles, exact expected assertion IDs, and `bootstrapctl`; the directory is not writable by `codex-worker`.
+2. **R1.2:** The verifier, embedded approval parser/schema, inventory, and launcher hashes are bound by the independently authorized Dispatch 0 approval artifact. Dispatch 0 strictly parses that artifact with the embedded parser and refuses if the embedded schema’s measured digest differs from the approval-bound schema digest.
+3. **R1.3:** Before native Dispatch 4 activation, authoritative attempt-evidence roots, activation-ledger append authority, and the PR/push credential are reachable only through the root-owned `bootstrapctl` launcher/service. Repository dispatchers, candidate processes, `codex-worker`, and ordinary direct shell invocations receive no write authority over authoritative evidence roots, no activation-ledger append authority, and no direct or brokered PR/push authority. Direct invocations may still create local worktrees or processes, but those are non-authoritative effects.
+4. **R1.4:** Direct pre-Dispatch-4 invocation of repository `scripts/dispatch` cannot write or alter authoritative attempt-evidence roots, append an activation-ledger record, use the PR/push credential, push, or create a PR. Its evidence, review output, attestations, test results, attempt identity, push result, PR result, and other local authorization artifacts are non-authoritative and cannot be imported, adopted, or promoted. A commit created by the direct invocation may be readmitted only as untrusted input to a new service-controlled attempt with a fresh service-issued attempt identity, fresh authoritative evidence, fresh trusted tests, fresh review, and broker-only push/ref and PR operations. The bypass regression requires the authoritative evidence roots and activation ledger to remain untouched and push and PR spies to remain at zero during the direct run; the promotion regression then presents the resulting commit to `bootstrapctl` and proves that all local artifacts are ignored, fresh authoritative artifacts are generated, and any push or PR occurs only through the broker for the new attempt. Neither regression requires failure before local worktree creation or process launch. Dispatch 4 installs the native mandatory authorization preflight in the repository dispatcher.
+5. **R1.5:** A Dispatch 1, 2, or 3 candidate that replaces `scripts/test`, a test helper, or its declared `test_command` with an exit-zero stub is rejected by the frozen verifier.
+6. **R1.6:** A Dispatch 4 candidate cannot activate from its own policy selection or self-run alone; the activation manifest records a passing frozen-verifier result produced by Dispatch 0.
+7. **R1.7:** `/srv/codexwork/activations/<commit>.json`, the root-owned append-only activation ledger, and the atomic singleton active-head record are all required before a parent can dispatch. Missing, malformed, duplicate-keyed, mismatched, writable, wrong-owner, or mutually inconsistent state causes refusal.
+8. **R1.8:** A non-genesis activation manifest binds the activated commit, previous active commit, installed-snapshot manifest hash, bootstrap/native verifier hash, inventory hash, venv identity, required on-box drill results, approval digest, exact integration-tip observation, Dispatch 0 artifact digest, and the identity of the transition that created that manifest. The creation transition identity is computed before manifest creation from the exact preimage defined in §4.8 and excludes both `transition_id` and `target_manifest_digest`.
+9. **R1.9:** The strict genesis manifest uses `previous_active_commit: null`; its activated commit must equal an approval-authorized anchor, and it binds that anchor, the exact Dispatch 0 artifact digest, embedded approval-schema digest, installed snapshot, verifier/inventory identities, required on-box result, and its creation transition identity.
+10. **R1.10:** Activation is a root-owned atomic compare-and-swap transition from the singleton selected head. Genesis compares against an absent head; later activation compares against the exact current commit and current selecting ledger transition identity. Before a ledger record is declared durable, the complete record is staged and fsynced, atomically published to a previously absent final path with no-replace semantics, and followed by an fsync of the ledger directory. Before a head replacement is declared durable, the complete temporary head is fsynced, atomically renamed over the singleton head while the checked predecessor remains locked, and followed by an fsync of the containing directory. A stale expected head fails without changing the selected head.
+11. **R1.11:** Before dispatch, every bootstrap or native dispatcher validates its own immutable historical manifest and creation transition, proves that its commit equals the commit selected by the singleton head, proves that the head’s transition ID identifies the current selecting ledger record, and proves that the selecting ledger record’s `target_manifest_digest` equals the hash of the selected manifest.
+12. **R1.12:** Concurrent sibling activations naming the same predecessor cannot both become selected. After a successor activates, the stale parent refuses before attempt creation, candidate launch, evidence writes, review, push, or PR creation.
+13. **R1.13:** An activation attempt without a prior-parent/bootstrap validation artifact fails even when the candidate’s own tests pass.
+14. **R1.14:** CI may emit a portable validation artifact, but activation still fails when the required on-box worker-isolation result is absent.
+15. **R1.15:** The activation checker rejects an intervening, unenumerated integration commit between the recorded previous parent and proposed active commit.
+16. **R1.16:** After Dispatch 4 activates, its native dispatcher independently requires a valid activation manifest, consistent ledger transition, and selection as the singleton active head before Dispatch 5 or any later dispatch.
+17. **R1.17:** Rollback never edits a historical manifest or head in place. It is a newly approved, append-only ledger transition that atomically compare-and-swaps from the current head to a previously manifested, installed, revalidated target commit. The rollback record has its own transition ID and binds the historical target through `ledger.target_manifest_digest == hash(manifest)`; rollback validation never requires the rollback transition ID to equal the creation transition ID stored in the target manifest.
+18. **R1.18:** The activation protocol guarantees process-crash consistency, verified by observed syscall ordering and SIGKILL injection between the defined barriers. A SIGKILL before the ledger record’s atomic final-path publication leaves the exact prior head bytes selected, with their referenced durable ledger record and manifest digest intact, and the promised prior parent dispatchable; staged ledger temporaries are ignored as non-records. A SIGKILL after ledger-directory fsync but before head rename leaves those exact prior head bytes selected, with their referenced ledger record and manifest digest intact and the promised prior parent dispatchable, while the new durable ledger record remains unselected. A SIGKILL after head rename and the final containing-directory fsync yields the exact new head bytes referencing the already durable transition and target manifest digest, with the promised target parent dispatchable. Ledger publication before ledger-directory fsync and head rename before containing-directory fsync are separately enumerated partial states outside those three promised crash points and may recover only to a fully consistent prior or new selection or fail closed. Power-loss, controller-cache-loss, and faulting-filesystem durability are outside this oracle.
+
+### R2. Exact required-test and assertion attestation with authenticated production
+
+The parent policy must map every required test and execution lane to an exact expected assertion-ID set. Required authorization requires exact-set equality and controller-authenticated events.
+
+Acceptance criteria:
+
+1. **R2.1:** Every required test is launched exactly once from trusted parent content and has exactly one final trusted result.
+2. **R2.2:** A required test that emits one trivial assertion while bypassing any expected substantive assertion fails with `missing_assertions`.
+3. **R2.3:** A missing, unknown, or duplicate assertion ID fails closed; assertion counts alone are never sufficient.
+4. **R2.4:** Every TRUST-class substantive assertion is mutation-tested to produce `ok: false` and nonzero status, or has a specific per-assertion written justification approved with the test inventory.
+5. **R2.5:** Representative-per-idiom mutation testing is permitted only for non-TRUST tests and does not replace R2.4.
+6. **R2.6:** Candidate application code attempting to forge trusted events through inherited environment, inherited descriptors, `/proc/<ppid>/environ`, `/proc/<ppid>/fd`, `ptrace` attach, `process_vm_readv`, `process_vm_writev`, or `pidfd_getfd` cannot read, alter, duplicate, or emit an accepted trusted event.
+7. **R2.7:** Trusted and supplemental invocations use distinct pipes, per-invocation nonces, source-class bindings, and controller state. A race using the same test ID cannot cross namespaces.
+8. **R2.8:** `test_command: true`, an exit-zero command with no assertions, or free-form test output is recorded as non-attested supplemental command output, never as successful test evidence and never as satisfaction of a required ID.
+9. **R2.9:** Candidate processes receive neither the trusted nonce nor any assertion pipe descriptor. The helper scrubs attestation variables and closes all non-whitelisted descriptors before every candidate `exec`.
+10. **R2.10:** The event-producing controller runs on the dispatcher/operator side under a UID distinct from `codex-worker` and outside the candidate service/process namespace. The launcher verifies this separation before any candidate process starts; missing, unsupported, or ineffective separation aborts the test phase fail-closed.
+11. **R2.11:** The trusted controller alone converts observed command outcomes to events; candidate-written JSON is not admitted as trusted evidence.
+12. **R2.12:** A side-effect counter proves each required test was launched once, including under parallel execution; launching twice and retaining one result fails.
+13. **R2.13:** Candidate-modified tests run only as supplemental tests. A supplemental process emitting trusted IDs, trusted nonces, or trusted source class fails without satisfying a required result.
+14. **R2.14:** A required skip, zero expected assertions, absent trusted test, malformed event, stale nonce, wrong binding, nonzero exit, inconsistent overall result, or missing aggregate yields `failed_test` before review.
+15. **R2.15:** The real SPEC-015 replay enters through the production gate state machine, produces `legacy_missing_attestation`, and leaves reviewer and PR spies at zero calls.
+16. **R2.16:** A constructed aggregate cannot independently authorize an attempt; the gate requires the invocation records and controller-produced result from the real isolated process.
+17. **R2.17:** Candidate-added tests remain supplemental until merged, installed, validated by the prior active verifier, and included in a later parent inventory. Dispatch 5 additionally remains subject to Dispatch 0’s independently frozen Dispatch 5 profile and exact assertion inventory.
+
+### R3. Trusted closure, canonical diff, and candidate-tree binding
+
+The authoritative gate closure must come from a root-owned installed snapshot of the exact parent commit. Policy classification must use immutable Git trees. The candidate checkout must be clean and equal to `worker_commit` at every transition named below.
+
+Acceptance criteria:
+
+1. **R3.1:** `/srv/codexwork/installed/<commit>` is materialized from the exact Git commit and contains a strict closure manifest covering dispatcher, wrapper, runner, policy, tests, helpers, fixtures, verdict/spec schemas, bootstrap/native verifier inputs, and interpreter identities.
+2. **R3.2:** Snapshot files and directories are root-owned, non-worker-writable, regular where required, and manifest-bound before use.
+3. **R3.3:** A candidate program or supplemental command that mutates tracked or untracked worktree content after emitting PASS causes the post-test revalidation to return `failed_test`.
+4. **R3.4:** The dispatcher revalidates clean status and exact tree identity immediately before reviewer invocation; mismatch produces `failed_review` and no reviewer call.
+5. **R3.5:** The dispatcher repeats the revalidation immediately before PR creation; mismatch produces `failed_review` and no PR call.
+6. **R3.6:** Review diff and policy classification derive from the bound Git commit trees, not mutable worktree bytes.
+7. **R3.7:** Concurrent replacement of a test, runner, policy, helper, fixture, schema, directory component, or interpreter between verification and execution fails; the verified component is not reopened through an untrusted pathname.
+8. **R3.8:** Required shell content executes through a verified Bash identity and an already-open script descriptor; closure support files are supplied through verified descriptors or dispatcher-owned immutable invocation material.
+9. **R3.9:** Drift in installed runner, policy, schema, helper, fixture, wrapper, or interpreter from the closure manifest prevents dispatch.
+10. **R3.10:** Canonical policy comparison covers content, executable/mode changes, symlink and object-type changes, submodules, `.gitmodules`, additions, deletions, and both paths of any inferred rename.
+11. **R3.11:** Policy authorization does not depend on rename heuristics: the complete base-tree and candidate-tree path maps are compared, so delete/add rename evasion still yields both path changes.
+12. **R3.12:** Every changed path property-tests to either a nonempty parent-required test set or a policy error.
+13. **R3.13:** Unknown root paths, generated control-plane configuration, dirty index state, and untracked files in control-plane areas fail closed.
+14. **R3.14:** A candidate changing `scripts/dispatch.py` while declaring `test_command: true` is still classified from the immutable tree diff and receives the full parent-selected trust suite.
+
+### R4. Verdict v4 parsing, immutable criterion provenance, and positional binding
+
+Verdict authorization must use strict JSON parsing and the digest-approved criteria vector persisted before candidate work.
+
+Acceptance criteria:
+
+1. **R4.1:** Launch-time attempt creation opens and validates the approved spec once, persists its exact ordered acceptance-criteria vector and vector digest using no-replace creation, and never reopens the mutable spec path for review authorization.
+2. **R4.2:** A concurrent spec-path replacement after launch cannot change the criteria used for verdict validation.
+3. **R4.3:** JSON parsing rejects duplicate top-level or nested object keys, including duplicate `verdict`, binding, `severity`, `criterion_index`, or `result` keys.
+4. **R4.4:** Parsing rejects `NaN`, positive/negative infinity, and all other nonstandard JSON constants.
+5. **R4.5:** For an N-criterion vector, only exactly N entries in exact positional order with sequential one-based indices may authorize PASS.
+6. **R4.6:** Missing, extra, duplicated, reordered, out-of-range, or invented criteria reject before binary evaluation.
+7. **R4.7:** NFKC and whitespace normalization remains exactly as defined in §4.9; case, punctuation, Markdown, or wording changes reject.
+8. **R4.8:** Wrong `spec_digest`, `base_sha`, `worker_commit`, criteria-vector digest, or activation-parent commit rejects.
+9. **R4.9:** v1–v3 verdicts remain displayable through enumerated legacy consumers but cannot authorize a new or resumed gate decision.
+10. **R4.10:** A complete consumer inventory proves that replacing the authorization schema does not silently break historical display-only readers.
+11. **R4.11:** Every §8.7 v4 validation case is exercised by the Dispatch-0-owned frozen Dispatch 5 profile and maps to an exact expected assertion ID in that profile.
+
+### R5. Structured blocking findings
+
+Verdict schema v4 must use strict structured scope, regression, and security finding arrays and the defensive blocker predicate retained from revision 2.
+
+Acceptance criteria:
+
+1. **R5.1:** An all-`MET` PASS with a blocker in any finding domain is rejected.
+2. **R5.2:** Empty arrays or advisory-only arrays remain eligible if all other bindings pass.
+3. **R5.3:** Unknown, null, empty, numeric, misspelled, or inferred severities reject; allowed values are exactly `advisory` and `blocker`.
+4. **R5.4:** Direct calls to `evaluate_binary_review()` reject malformed findings even without prior schema validation.
+5. **R5.5:** The top-level object, criterion objects, and finding objects reject undeclared properties.
+6. **R5.6:** Review rejection always leaves the PR-opening spy at zero calls.
+7. **R5.7:** The frozen Dispatch 5 profile exercises the R5 blocker, advisory, malformed-finding, undeclared-property, and zero-PR cases through Dispatch-0-owned exact assertions rather than candidate-modified tests.
+
+### R6. ABI/platform-addressed isolated gate environment and provisioning
+
+The trusted venv identity must include the trusted requirements bytes and Python ABI/platform. Trusted Python must run isolated from the candidate checkout.
+
+Acceptance criteria:
+
+1. **R6.1:** The venv address is `/srv/codexwork/venvs/gate/<venv-id>`, where `venv-id` is a digest of the trusted requirements bytes, Python implementation/cache tag or SOABI, normalized platform/machine identity, and the provisioning-format version.
+2. **R6.2:** A Python ABI or platform change produces a distinct address and does not collide with an existing environment.
+3. **R6.3:** Trusted Python runs with `-I`, a fixed safe cwd outside the candidate tree, a scrubbed `PYTHON*` environment, and no user-site or candidate-root import path.
+4. **R6.4:** `yaml` and `jsonschema` module origins are verified to resolve beneath the selected venv before required tests run.
+5. **R6.5:** Candidate `yaml.py`, `jsonschema.py`, `sitecustomize.py`, `usercustomize.py`, or similarly shadowing modules do not load into the trusted process.
+6. **R6.6:** Recursive ownership, ACL, symlink, and writability checks prove `codex-worker` can read/execute but cannot create, replace, remove, rename, chmod, or redirect venv content.
+7. **R6.7:** Missing, stale, mismatched, writable, shadowed, or unusable environments block before required tests and review, with no fallback.
+8. **R6.8:** A fresh-box test exercises the documented `scripts/setup-worker-user.sh` provisioning path for worker UID, installed snapshot, venv, systemd properties, ACLs, activation manifest, activation ledger/head, authoritative evidence root, and credential isolation.
+9. **R6.9:** A Python-version-change/idempotence test preserves the old environment, creates the correctly distinct new identity, and activates only after its verification.
+10. **R6.10:** Candidate requirements are never installed pre-merge. After merge, the previous frozen/native verifier provisions and validates the new venv from the newly installed merged-parent snapshot before activation.
+11. **R6.11:** CI-local venv creation is labelled portable validation and never claims to prove the on-box provisioning path.
+
+### R7. Bounded reviewer evidence with syntactic integrity only
+
+Machine-generated attestation summaries are primary reviewer evidence. A bounded sanitized log tail may be secondary untrusted evidence.
+
+Acceptance criteria:
+
+1. **R7.1:** Raw test output capture is capped at 16 MiB before hashing or prompt construction. Exceeding the cap terminates capture, fails the test gate with `log_limit_exceeded`, and does not invoke review.
+2. **R7.2:** The prompt includes the trusted required-test/assertion summary before the log tail.
+3. **R7.3:** The retained tail is limited to the final 16 KiB and final 80 logical lines.
+4. **R7.4:** Escaping, control removal, and fixed delimiters guarantee only syntactic prompt integrity: log bytes cannot close or restructure the evidence container.
+5. **R7.5:** The plan and tests make no claim that instruction-like content cannot semantically influence the reviewer.
+6. **R7.6:** The reviewer remains an untrusted fail-closed oracle layered after deterministic scope, tree, policy, test, assertion, and binding gates.
+7. **R7.7:** Missing, symlinked, replaced, raced, unreadable, or over-limit log evidence blocks review.
+8. **R7.8:** Log bytes never appear in process arguments or shell interpolation; the prompt is provided through stdin or a dispatcher-owned prompt file.
+
+### R8. Correct metrics semantics and approval-bound extraction parity
+
+Metrics extraction must preserve pre-candidate behavior; semantic correction must classify completed specs once and use a defined window anchor.
+
+Acceptance criteria:
+
+1. **R8.1:** Before Dispatch 1 candidate work, the operator captures baseline text, JSON, ordering, defaults, errors, and exit statuses from the installed parent; their hashes and capture commands are approval-bound.
+2. **R8.2:** Candidate-authored parity fixtures cannot replace, update, or bless the operator-captured baseline.
+3. **R8.3:** Dispatch 1 matches the approval-bound baseline byte-for-byte or field-for-field except enumerated module-origin metadata.
+4. **R8.4:** Non-metrics commands do not import or depend on `scripts/metrics_report.py`.
+5. **R8.5:** All actor-attributing unmatched-merge labels become exactly `not_attributed_to_orchestrator`, with actor identity stated as unknown.
+6. **R8.6:** The rate denominator is distinct eligible completed specs; the numerator is specs whose first and only attempt reached normal `merged` after all gates.
+7. **R8.7:** Eligibility is anchored by the canonical final spec terminal timestamp in the selected half-open window `[start, end)`.
+8. **R8.8:** Classification consults the spec’s complete retained attempt history, including attempts before the window and later attempts after it. A pre-window retry prevents straight-through classification; a later attempt moves terminal anchoring to the later final completion.
+9. **R8.9:** The five-spec fixture produces numerator `1`, denominator `3`, rate `1/3`, excluded-in-progress `1`, and malformed/incomplete `1`.
+10. **R8.10:** Adding attempts to a retrying spec does not change numerator or denominator except when it changes the canonical final terminal state/time.
+11. **R8.11:** Zero denominator produces JSON `null` and display `N/A`.
+12. **R8.12:** Dispatch 2 cannot modify dispatcher, gate-transition, authorization, attempt-serialization, activation, or test-policy paths.
+13. **R8.13:** Phase 2 remains blocked after Dispatch 2 and unblocks only after R10.4.
+
+### R9. Scoped no-replace evidence creation and embedded approval validation
+
+PLAN-003 must implement the B6 subset assigned here, use Dispatch 0’s embedded strict approval parser/schema for bootstrap authorization, and depend on the separate evidence-hashing plan for the remaining sealing work.
+
+Acceptance criteria:
+
+1. **R9.1:** Every new attestation aggregate, criteria vector, review request, review result, and activation-related attempt artifact is created once with `O_CREAT|O_EXCL` or an equivalent no-replace primitive.
+2. **R9.2:** Final evidence paths and parent directories are dispatcher-owned and not writable by the worker or candidate.
+3. **R9.3:** Worker output crosses bounded pipes; candidate processes receive no writable final evidence pathname.
+4. **R9.4:** Existing destinations, symlinks, hardlink aliases, rename swaps, concurrent writers, and resume-after-terminal attempts cannot replace a finalized aggregate, log, or review result.
+5. **R9.5:** A finalized attempt is never reopened for authorization writes. Resume requires a new attempt number or explicit non-authorizing display access.
+6. **R9.6:** SPEC-015 bytes and hashes remain unchanged after the real replay.
+7. **R9.7:** Full artifact sealing, terminal hash manifests, comprehensive retained-evidence integrity, and directory-fsync policy outside the exact activation ledger/head transaction defined in R1 and §4.8 remain assigned to the separate `evidence-hashing` plan.
+8. **R9.8:** Dispatch 0’s embedded strict approval parser/schema validates exact plan revision, dispatch, attempt, candidate digest, approval-authorized genesis anchor, Dispatch 0/verifier/inventory/schema digests, parity-baseline digest, expected test/assertion inventory, and every changed test’s old/new blob identity. The separate approval-schema plan may upgrade the full native system later but is not a PLAN-003 prerequisite.
+9. **R9.9:** Dispatch 0 measures its embedded parser and schema from the installed frozen artifact and refuses before evidence creation, candidate launch, activation, credential access, push, or PR creation if either measured digest differs from the digest bound by the approval.
+
+### R10. Compatibility, dependency, and Phase 2 sequence
+
+Test evolution and dependency upgrades must not rely on self-promotion.
+
+Acceptance criteria:
+
+1. **R10.1:** An ordinary compatible test implementation change passes both the installed parent test and the candidate supplemental test before later promotion.
+2. **R10.2:** A behavior change that contradicts the old strict test uses the complete three-state sequence in §4.7; each stage is a separate normal high-assurance dispatch and activation.
+3. **R10.3:** An end-to-end test exercises all three states and proves that no stage’s candidate test is authoritative during its own attempt.
+4. **R10.4:** Phase 2 implementation dispatch refuses until Dispatch 0 is installed; Dispatches 1–5 are merged, installed, activation-manifested, selected through valid atomic head transitions, and validated; and the Dispatch-0-owned frozen Dispatch 5 profile has passed with its exact expected assertion inventory.
+5. **R10.5:** If a compatibility bridge is impossible, the normal pipeline fails closed pending separately scoped operator bootstrap authority; this plan grants no such authority.
+
+## 4. Design / approach
+
+### 4.1 Dispatch decomposition and dependency order
+
+Dispatch 0’s independently reviewed frozen artifact includes the minimal strict approval parser/schema required to validate its own digest-bound approvals. The separate approval-schema plan is explicitly removed from this sequence’s critical path and may upgrade the full native system later.
+
+| Order | Dispatch | Lane | Dependency | Purpose |
+|---:|---|---|---|---|
+| 0 | Bootstrap verifier, authorization choke point, trusted snapshots, and activation state machine | operator-installed high-assurance bootstrap | Independently authorized frozen artifact and approval-authorized genesis anchor | Install the frozen non-candidate verifier, embedded approval parser/schema, Dispatch 1–5 inventories, exclusive evidence/credential launcher, append-only activation ledger, and CAS head; provision `/srv/codexwork/installed/<commit>`; gate Dispatches 1–5; create machine-checked activation state. |
+| 1 | Metrics extraction | high-assurance | Dispatch 0 installed; current parent selected as active head | Extract reporting while preserving approval-bound baseline behavior. |
+| 2 | Metrics semantics | ordinary | Dispatch 1 merged, frozen-verified, installed, activated, and selected | Correct attribution and straight-through semantics without dispatcher write scope. |
+| 3 | Assertion-event migration | high-assurance | Dispatch 2 merged, activated, and selected | Migrate tests to exact assertion IDs, exit-77 diagnostics, source/target separation, and per-assertion mutation proof. |
+| 4 | Attestation, trusted execution, venv, activation enforcement, tree binding, and reviewer evidence | high-assurance | Dispatch 3 merged, frozen-verified, installed, activated, and selected | Install the real parent gate under the frozen verifier and make activation enforcement native. |
+| 5 | Verdict v4 and blocking findings | high-assurance | Dispatch 4 activated by Dispatch 0 artifact, atomically selected as head, and accepted by native activation check; frozen Dispatch 5 profile installed in Dispatch 0 | Add strict JSON parsing, launch-time criteria vector, positional v4 binding, and blocker evaluation; require both the activated Dispatch 4 parent gate and the Dispatch-0-owned exact v4 oracle. |
+
+“Completed” means merged where repository content exists, exact installed snapshot provisioned, no intervening commit accepted, required verifier passed, immutable activation manifest and ledger transition accepted, and the exact commit selected by the singleton active head. For Dispatch 5, “completed” additionally requires the frozen Dispatch 5 profile to have passed.
+
+### 4.2 Per-dispatch allowed paths
+
+All repository allowances must expand to literal paths before authorization.
+
+**Dispatch 0 — operator-installed bootstrap outputs:**
+
+- `/srv/codexwork/bootstrap/PLAN-003/<verifier-sha256>/verify.py`
+- `/srv/codexwork/bootstrap/PLAN-003/<verifier-sha256>/approval_parser.py`
+- `/srv/codexwork/bootstrap/PLAN-003/<verifier-sha256>/approval.schema.json`
+- `/srv/codexwork/bootstrap/PLAN-003/<verifier-sha256>/bootstrap.schema.json`
+- `/srv/codexwork/bootstrap/PLAN-003/<verifier-sha256>/inventory.json`
+- `/srv/codexwork/bootstrap/PLAN-003/<verifier-sha256>/bootstrapctl`
+- `/srv/codexwork/installed/<commit>/`
+- `/srv/codexwork/activations/<commit>.json`
+- `/srv/codexwork/activations/ledger/`
+- `/srv/codexwork/activations/active-head.json`
+- The root-owned authoritative attempt-evidence root selected by `bootstrapctl`
+- The root-only PR/push credential store and broker used by `bootstrapctl`
+
+Dispatch 0 is installed from an operator-authorized frozen artifact, not a worker candidate. It may read the repository and Git object database but cannot silently edit tracked repository files. Its machine-enforced authority comes from root-owned evidence, credential, service, manifest, ledger, and head boundaries rather than a convention that callers voluntarily use the launcher.
+
+**Dispatch 1 — metrics extraction:**
+
+- `scripts/dispatch.py`, limited to removing metrics implementation and adding the lazy alias
+- `scripts/metrics_report.py`
+- `tests/metrics_report.sh`
+- `tests/dispatch_gate4.sh`, limited to alias parity and non-metrics import isolation
+
+**Dispatch 2 — metrics semantics:**
+
+- `scripts/metrics_report.py`
+- `scripts/delegation_report.py`
+- `tests/metrics_report.sh`
+- `tests/delegation_report.sh`
+- `tests/fixtures/metrics_semantics.json`
+
+**Dispatch 3 — assertion migration:**
+
+- `scripts/test`
+- `scripts/lib/test_attest.sh`
+- `tests/assertion_migration.sh`
+- The literal authorization-time output of `git ls-files 'tests/*.sh'`
+
+Dispatch 3 may not change gate transitions, policy, venv setup, activation enforcement, verdict handling, or reviewer construction.
+
+**Dispatch 4 — repaired test gate:**
+
+- `scripts/dispatch.py`, limited to test selection, invocation, aggregation, tree checks, activation checks, evidence capture, and reviewer construction
+- `scripts/test`
+- `scripts/test_runner.py`
+- `scripts/test-policy.json`
+- `scripts/setup-worker-user.sh`
+- `tests/dispatch_gate4.sh`
+- `tests/dispatch_parallel.sh`
+- `tests/worker_isolation.sh`
+- `tests/test_attestation.sh`
+- `tests/reviewer_evidence.sh`
+- `tests/activation_manifest.sh`
+- `tests/trusted_snapshot.sh`
+- `tests/tree_binding.sh`
+- `tests/fixtures/verdict_integrity/spec015_skips.log`
+- `.github/workflows/ci.yml`
+
+**Dispatch 5 — verdict v4:**
+
+- `scripts/dispatch.py`, limited to strict review parsing, criteria-vector persistence/binding, v4 evaluation, and prompt schema instructions
+- `scripts/verdict.schema.json`
+- `tests/dispatch_gate4.sh`
+- `tests/verdict_integrity.sh`
+- `tests/fixtures/verdict_v4.json`
+
+### 4.3 Dispatch 0 bootstrap verifier and exclusive authorization path
+
+Dispatch 0 is a small frozen verifier, not a duplicate production dispatcher. Its inventory has five immutable profiles, one for each of Dispatches 1–5. Each profile specifies:
+
+- exact allowed repository paths;
+- exact bootstrap test IDs;
+- exact expected assertion IDs per test;
+- immutable test/helper content hashes;
+- candidate command entry points;
+- required worker-boundary properties;
+- activation drills required after merge;
+- expected predecessor active commit and head transition;
+- required snapshot-closure components.
+
+The Dispatch 5 profile contains the complete frozen v4 oracle and exact assertion inventory listed in §8.7. That oracle is Dispatch-0-owned content outside the Dispatch 5 candidate and is itself hash-bound by the independently authorized Dispatch 0 artifact. Candidate-modified Dispatch 5 tests remain supplemental and cannot substitute for any frozen Dispatch 5 assertion.
+
+The frozen artifact also contains the minimal strict approval parser/schema needed by Dispatch 0. Independent authorization binds the exact parser and schema digests together with the verifier, launcher, inventory, plan revision, genesis anchor, and required dispatch-specific identities. `bootstrapctl` measures these files from the root-owned installed artifact and performs strict duplicate-key-rejecting validation before it requests any privileged operation. A parser/schema digest mismatch fails before evidence allocation or credential access. The separate approval-schema plan is neither invoked nor assumed for Dispatch 0.
+
+The verifier runs from `/srv/codexwork/bootstrap`, never from the candidate checkout. It invokes candidate components as data through the `codex-worker` boundary. Its assertions are computed by the frozen controller from observed results; candidate JSON does not count.
+
+For Dispatches 1–5, `bootstrapctl` is the exclusive operator-facing path to the frozen verifier. Before Dispatch 4 activation, a root-owned service behind it alone can allocate a directory in the authoritative attempt-evidence root, append activation records, compare-and-swap the active head, and use the PR/push credential. It supplies a single-use, attempt-bound launch manifest/capability only after verifying the approval, installed parent, selected head, inventory, candidate identity, and allowed dispatch. The repository dispatcher and candidate processes never receive the PR/push credential itself; a successful PR/push request is mediated by the service and bound to the already authorized commit and attempt.
+
+Direct pre-Dispatch-4 invocation of repository `scripts/dispatch` has no authority to allocate or write an authoritative evidence directory, append the activation ledger, compare-and-swap the active head, or obtain PR/push credential-broker authorization. Until Dispatch 4 installs the native repository preflight, such an invocation may still create local worktrees, launch local candidate or reviewer processes using ambient non-authoritative facilities, create local files, and create a Git commit. Its evidence, review output, attestations, test results, attempt identity, push result, PR result, and other authorization artifacts are explicitly non-authoritative and cannot be imported, adopted, or promoted into the authoritative path.
+
+A commit produced by such a direct invocation is not itself an authorization artifact. It may later be presented only as untrusted candidate input to a new `bootstrapctl` attempt. That new attempt receives a fresh service-issued identity and must generate fresh authoritative evidence, rerun all selected trusted tests, obtain a fresh review, and use only a service-controlled push/ref and brokered PR request. No direct-run branch/ref is treated as the broker-authorized ref, and no direct-run local evidence or review output is copied or linked into the authoritative attempt.
+
+The bypass regression invokes the repository path directly under the ordinary operator and worker contexts and requires the authoritative evidence roots and activation ledger to remain untouched and push and PR spies to remain at zero; it does not assert failure before worktree creation or process launch. The promotion regression then submits the direct-run commit to `bootstrapctl`, poisons the local evidence and review output to make adoption detectable, and proves that the new attempt ignores those artifacts, assigns a fresh identity, produces fresh evidence/tests/review, and permits push/PR only through the broker-bound service ref.
+
+After a candidate is merged, `bootstrapctl` verifies the exact integration commit, rejects intervening commits, provisions its installed snapshot, runs the applicable frozen post-merge profile, creates the immutable activation manifest and durable ledger transition, and atomically compare-and-swaps the singleton head.
+
+Dispatch 4 must pass both its candidate-phase frozen profile and its post-merge frozen activation profile. Its own new tests are supplemental to this activation decision. Once activated, Dispatch 4’s native dispatcher installs and enforces the mandatory repository authorization preflight before candidate work. Dispatch 5 must pass both that native parent gate and Dispatch 0’s frozen Dispatch 5 profile before activation and Phase 2 release.
+
+### 4.4 Installed snapshot and race-safe closure
+
+Snapshot provisioning materializes the exact Git commit into `/srv/codexwork/installed/<commit>` without using a mutable checkout as the final source. The provisioner:
+
+1. Resolves the commit and tree objects.
+2. Enumerates the full gate closure.
+3. Copies each expected blob into a new root-owned staging directory using no-follow creation.
+4. Records repository path, mode, object ID, content hash, size, and role.
+5. Records verified identities for Bash, trusted Python, and any other interpreter.
+6. Removes worker write access recursively.
+7. Atomically installs the previously absent commit directory.
+8. Verifies the installed closure against the manifest before activation.
+
+The native runner pins a directory descriptor and resolves closure components beneath it using no-follow, beneath-only semantics. Native executable components use already-open descriptors where supported. Required shell tests are passed to the verified Bash interpreter through an already-open script descriptor; helpers and fixtures are pre-opened or copied from verified descriptors into a dispatcher-owned, non-worker-writable invocation bundle. No verified candidate-writable pathname is later reopened for execution.
+
+Concurrent replacement tests target files and directory components, including helpers, fixtures, schemas, and interpreter shadows. Worker inability to write the root-owned snapshot is necessary but does not replace closure verification.
+
+### 4.5 Canonical Git change model and required-test policy
+
+Policy evaluation compares the complete path maps of `base_sha^{tree}` and `worker_commit^{tree}`. Each path state includes Git mode, object ID, and object type. Rename detection may be recorded for display, but requiredness is calculated from the underlying additions, deletions, and modifications, so rename thresholds cannot suppress coverage.
+
+The policy must cover:
+
+- regular-file content and mode changes;
+- symlink targets and regular/symlink type changes;
+- executable-bit changes;
+- gitlinks/submodules and `.gitmodules`;
+- additions and deletions;
+- both sides of displayed renames;
+- unknown paths at repository root;
+- generated control-plane configuration;
+- unrecognized paths below `scripts/`, `tests/`, `specs/`, `.github/workflows/`, and `.orchestrator/`.
+
+Every changed path yields a nonempty required-test set or a policy error. Candidate policy changes never affect their own attempt.
+
+Worktree state is a separate transition invariant. Untracked or dirty control-plane content fails even if it is absent from the committed tree.
+
+### 4.6 Assertion-producer privilege boundary and attestation protocol
+
+The event-producing controller runs on the dispatcher/operator side under a UID distinct from `codex-worker` and outside the candidate service/process namespace. Candidate programs and candidate-controlled test targets run as `codex-worker`. Before any candidate launch, the root-owned launcher verifies the controller UID, candidate UID, service/cgroup or namespace placement, dumpability and process-access policy, descriptor table, and absence of candidate authority over the controller. If the required separation or restriction cannot be established or verified, testing aborts fail-closed; “where supported” is not an authorization fallback.
+
+The installed parent controller owns:
+
+- the trusted and supplemental pipes;
+- all per-invocation nonces;
+- expected source class;
+- exact expected assertion IDs;
+- launch count;
+- command outcome observation;
+- aggregate construction;
+- final evidence paths.
+
+Trusted tests describe assertions and candidate commands through the parent-owned helper. For a candidate command, the controller/helper:
+
+1. Validates the requested assertion ID against the active expected set.
+2. Forks a candidate process through the worker boundary as `codex-worker`, outside the controller’s UID and process namespace.
+3. Sets a fixed candidate-safe environment without nonce or attestation variables.
+4. Scrubs `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`, and related variables.
+5. Closes all descriptors except the explicit stdin/stdout/stderr and command-specific data descriptors.
+6. Verifies that candidate-to-controller `ptrace`, `process_vm_readv`, `process_vm_writev`, and `pidfd_getfd` access is denied; inability to verify effective denial aborts before the candidate command.
+7. Observes the command outcome.
+8. Produces the assertion event itself.
+
+The event schema is:
+
+```json
+{
+  "version": 1,
+  "run_nonce": "<controller nonce>",
+  "source_class": "trusted",
+  "test_id": "tests/example.sh",
+  "assertion_id": "example.stable.condition",
+  "sequence": 1,
+  "event": "assertion",
+  "ok": true
+}
+```
+
+The exact assertion-ID set must equal the parent inventory set. Names or free-form text may be stored diagnostically but are not identities.
+
+Trusted and supplemental invocations receive independent pipes and nonces. Supplemental results are stored only under `candidate_supplemental_results`; they can block on failure but can never satisfy `trusted_required_results`.
+
+The aggregate records parent snapshot commit and manifest hash, policy hash, base and candidate tree IDs, expected and observed assertion-ID sets, invocation count, source class, controller and candidate UID/namespace identities, process-access-denial results, exit status, and overall status.
+
+### 4.7 Candidate tree transitions and three-state compatibility
+
+The candidate worktree is revalidated:
+
+1. After all trusted, supplemental-test, and free-form candidate commands complete.
+2. Immediately before reviewer invocation.
+3. Immediately before PR creation.
+
+Each check requires the expected `HEAD`, exact committed tree identity, clean index/tracked state, and no forbidden untracked content. Review and PR inputs use commit-object data.
+
+A behavior change that contradicts the installed strict test uses three states:
+
+1. **State A — bridge plus transitional test.** The old strict parent test remains authoritative. The candidate adds compatibility behavior and a transitional test that accepts the old and new behavior. Both old strict and supplemental transitional tests pass. After frozen/native verification, the transitional test becomes parent content.
+2. **State B — strict-new test promotion.** With the transitional test authoritative and the bridge still present, a second dispatch adds the strict-new test. The supplemental strict-new test passes. After activation, the strict-new test becomes parent content.
+3. **State C — bridge removal.** With the strict-new test authoritative, a third dispatch removes the compatibility bridge. The authoritative strict-new test must pass.
+
+No candidate test is authoritative during its own attempt. If any state is impossible, the sequence stops and requires external bootstrap authority.
+
+### 4.8 Activation manifest, ledger, and singleton head
+
+The strict activation manifest contains:
+
+```json
+{
+  "schema_version": 1,
+  "commit": "<activated commit>",
+  "previous_active_commit": null,
+  "approval_authorized_anchor": "<genesis anchor commit>",
+  "integration_tip": "<observed exact tip>",
+  "approval_digest": "<approval artifact digest>",
+  "dispatch0_sha256": "<exact frozen Dispatch 0 artifact digest>",
+  "approval_schema_sha256": "<embedded schema digest>",
+  "installed_snapshot": "/srv/codexwork/installed/<commit>",
+  "snapshot_manifest_sha256": "<digest>",
+  "verifier_sha256": "<bootstrap or native verifier digest>",
+  "inventory_sha256": "<required test/assertion inventory digest>",
+  "venv_id": "<ABI/platform-addressed identity>",
+  "portable_validation": {"status": "PASS", "artifact_sha256": "<digest>"},
+  "on_box_validation": {"status": "PASS", "artifact_sha256": "<digest>"},
+  "transition_id": "<manifest creation transition digest>",
+  "created_at": "<timestamp>"
+}
+```
+
+Before a new manifest is created, the service chooses `timestamp` and a collision-resistant `nonce` and computes:
+
+```text
+transition_id = SHA-256(canonical_json({
+  "prev_active_commit": <null for genesis, otherwise exact selected commit>,
+  "target_commit": <target commit>,
+  "verifier_digest": <exact verifier digest>,
+  "approval_digest": <exact approval digest>,
+  "timestamp": <chosen timestamp>,
+  "nonce": <chosen nonce>
+}))
+```
+
+The canonical preimage contains exactly those six named fields in the defined canonical JSON representation. It excludes `transition_id`, `target_manifest_digest`, the manifest digest, and every field derived from them. The transition ID is therefore defined before manifest creation and cannot be circular with the target manifest digest.
+
+Genesis is the only form permitting `previous_active_commit: null`. In that form, `commit` must equal `approval_authorized_anchor`, the approval must authorize that exact anchor, and the manifest must bind the exact Dispatch 0 and embedded approval-schema digests. Non-genesis manifests require a commit-valued `previous_active_commit` and reject `approval_authorized_anchor`. The strict conditional schema rejects undeclared fields and duplicate keys.
+
+A manifest’s `transition_id` permanently identifies the transition that created that immutable manifest. Historical manifests are root-owned, non-worker-writable, and created only if absent. They do not alone make a commit active.
+
+The root-owned activation state also contains:
+
+- an append-only ledger of strict, no-replace transition records;
+- a singleton `/srv/codexwork/activations/active-head.json`;
+- a root-service transition lock used only to serialize compare-and-swap evaluation.
+
+Each ledger record binds its own unique transition ID, kind (`genesis`, `activate`, or `rollback`), expected prior head commit and selecting transition ID, target commit, target manifest digest, verifier and approval identities, integration-tip observation where applicable, and timestamp. A genesis or activation record that creates a new manifest uses the transition ID computed before that manifest was created. A rollback or later reselection computes a new transition ID from its own six-field preimage; it does not alter or replace the target manifest’s creation transition ID.
+
+The append-only activation ledger is the sole historical evidence of activation and rollback selection history. The active-head file is a non-evidentiary, replaceable derived pointer that binds the currently selected commit, its manifest digest, and the ledger transition ID that currently selected it. The head’s transition ID identifies the current selecting ledger record, not necessarily the transition that originally created the selected manifest. Prior active-head file bytes are not historical evidence and need not be preserved when the pointer is atomically replaced.
+
+For every selection, validation requires:
+
+- `head.commit == selecting_ledger.target_commit`;
+- `head.transition_id == selecting_ledger.transition_id`;
+- `head.manifest_digest == selecting_ledger.target_manifest_digest`;
+- `selecting_ledger.target_manifest_digest == SHA-256(selected_manifest_bytes)`;
+- `selected_manifest.commit == head.commit`; and
+- the selected manifest’s own `transition_id` identifies its immutable creation record.
+
+For rollback and reselection, the selecting ledger transition ID is expected to differ from the immutable manifest’s creation transition ID. Rollback binds the target through `ledger.target_manifest_digest == hash(manifest)` and never through equality between the rollback transition ID and the manifest creation transition ID.
+
+A transition proceeds as follows:
+
+1. Acquire the root-service transition lock.
+2. Strictly parse and verify the current head, its current selecting ledger record, and its selected manifest, or prove that no head exists for genesis.
+3. Compare the current commit and current selecting transition ID with the transition’s expected prior head.
+4. Validate the target installed snapshot, verifier result, approval, integration relationship, transition kind, and existing historical manifest for rollback/reselection.
+5. Choose the transition timestamp and nonce and compute `transition_id` from the exact six-field preimage above.
+6. For a new activation or genesis, create the immutable target manifest with that creation transition ID using no-replace semantics, fsync the complete manifest file, and fsync the activation directory before allowing a ledger record to reference its digest. For rollback/reselection, verify the already durable immutable target manifest.
+7. Construct the complete ledger record including `target_manifest_digest`. Write it to a root-owned staging file in the ledger directory and fsync that file.
+8. Atomically publish the staged ledger record to its previously absent final pathname using no-replace semantics.
+9. Fsync the ledger directory. Only after this barrier is the ledger record declared durable.
+10. Write and verify a complete new head pointer in a root-owned temporary file in the head’s containing directory, then fsync the temporary file.
+11. Atomically rename the temporary head over the singleton head while the checked prior head remains locked.
+12. Fsync the head’s containing directory. Only after this final barrier is the head replacement declared durable.
+13. Release the transition lock.
+
+A stale compare fails without ledger publication or head replacement. Concurrent siblings therefore cannot both win.
+
+The promised crash oracle is process-crash consistency. The test harness observes the relevant `openat`, write, `fsync`/`fdatasync`, no-replace publication, and `rename` syscalls and sends SIGKILL only at the defined boundaries:
+
+1. **Before ledger publication:** the exact prior head remains selected and dispatchable. A complete or partial staging file is not a ledger record and is ignored or quarantined.
+2. **After ledger-directory fsync and before head rename:** the exact prior head remains selected and dispatchable, and the new ledger record is durable but unselected.
+3. **After head rename and final containing-directory fsync:** the exact new head remains selected and the target parent is dispatchable.
+
+The following are separately enumerated partial states and are not one of the three promised points:
+
+- a complete ledger record has been no-replace-published but the ledger directory has not yet been fsynced;
+- a fsynced temporary head exists but has not been renamed;
+- the head rename has occurred but the containing directory has not yet been fsynced;
+- stale staging files remain after a process crash.
+
+Recovery from an enumerated partial state may select only a fully validated prior or new state satisfying all manifest/ledger/head digest relationships, or fail closed. It may never accept a partial ledger record, a head lacking a fully published ledger record, or a ledger/head/manifest mismatch. The third promised crash point occurs only after the final containing-directory fsync.
+
+The process-crash tests do not claim to simulate sudden power loss or loss of writes acknowledged only to volatile controller or device caches. A power-loss or faulting-filesystem harness is outside this plan.
+
+Every dispatcher validates its immutable historical manifest and creation record and proves that its installed commit is the singleton selected head through the current selecting ledger record before attempt creation. A stale parent refuses even though its historical manifest remains valid.
+
+Rollback is a new approved `rollback` transition from the current selected head to a previously manifested, installed, closure-verified target. It appends a new ledger record and compare-and-swaps the replaceable head pointer; it never edits or deletes historical manifests or ledger records. Its new transition ID identifies the rollback selection, while the target manifest retains its original creation transition ID. Validation proves that the ledger records for the original activation, successor activation, and rollback all survive unchanged and that the rollback ledger’s `target_manifest_digest` equals the hash of the historical target manifest.
+
+### 4.9 Verdict v4 criterion normalization and binding
+
+At attempt launch, the dispatcher persists the exact ordered criteria vector from the digest-approved spec. It records raw text, normalized text, position, and vector digest. Review authorization never rereads the spec path.
+
+Normalization remains:
+
+1. Unicode NFKC.
+2. CRLF and CR to LF.
+3. Strip leading and trailing Unicode whitespace.
+4. Replace each remaining maximal Unicode-whitespace run with one ASCII space.
+
+There is no case folding, punctuation removal, Markdown rendering, link resolution, fuzzy matching, or clause reordering.
+
+Validation order is:
+
+1. Size bound.
+2. Strict JSON parse with duplicate-key and nonstandard-constant rejection.
+3. Schema v4.
+4. Artifact and activation-parent bindings.
+5. Criteria-vector digest.
+6. Exact count.
+7. Sequential indices.
+8. Positional normalized text equality.
+9. Binary review evaluation.
+
+### 4.10 Structured findings and blocker predicate
+
+The retained blocker predicate is:
+
+```text
+blocking =
+    findings is not an array
+    OR any entry is not an object
+    OR any required field is absent or invalid
+    OR any undeclared field is present
+    OR severity is not exactly "advisory" or "blocker"
+    OR any severity is exactly "blocker"
+```
+
+An empty array is the only “no findings” representation. `evaluate_binary_review()` rechecks the predicate even after schema validation.
+
+### 4.11 Gate venv and staged dependency upgrade
+
+The venv identity is a digest over a canonical record containing:
+
+- hash of the trusted parent `scripts/requirements.txt` bytes;
+- Python implementation and ABI/cache tag or SOABI;
+- normalized OS/platform/machine tuple;
+- provisioning-format version.
+
+Trusted Python is invoked with `-I`, from a fixed safe cwd, with Python variables scrubbed. Direct dependency imports and their resolved origins are verified beneath the selected venv.
+
+A candidate requirements change is staged:
+
+1. The candidate is tested using the active parent’s dependency environment; candidate requirements are not installed.
+2. After merge, the new commit is materialized as an inactive installed snapshot.
+3. The previous frozen/native verifier provisions a new ABI/platform-addressed venv from that merged snapshot.
+4. The verifier runs origin, isolation, and on-box tests.
+5. Only then may an activation manifest and atomic head transition name the new venv and commit.
+
+### 4.12 Reviewer evidence
+
+The controller enforces the raw-log limit while reading process output. It never permits an unbounded file and hashes only the bounded captured artifact.
+
+The reviewer receives:
+
+1. Fixed instructions.
+2. Machine-generated activation, tree, required-test, expected/observed assertion, and binding summaries.
+3. A secondary JSON-escaped log tail labelled untrusted.
+4. Fixed instructions after the evidence block.
+
+Escaping protects syntax only. Mechanically decidable properties are resolved before reviewer invocation and are never delegated to model judgment.
+
+### 4.13 Metrics extraction and definitions
+
+Dispatch 1 parity compares against operator-captured, approval-bound baselines created before the candidate branch. The candidate may add regression tests but cannot redefine the baseline.
+
+Dispatch 2 groups complete attempt history by spec. A spec’s canonical final terminal result determines its terminal timestamp. Window eligibility is based on that timestamp in `[start, end)`, while classification uses all retained attempts regardless of their timestamps.
+
+- **Straight-through:** attempt 1 is the only attempt, reached normal `merged`, and retained evidence shows all normal gates passed.
+- **Completed but not straight-through:** final terminal completion exists, but there was a retry, replacement, override, first-attempt failure, or later attempt.
+- **In progress:** no canonical final terminal completion.
+- **Malformed/incomplete:** safe classification is impossible.
+
+A retry before the selected window still prevents straight-through status for an in-window completion. A later attempt after the window means the spec’s final terminal anchor is later and the earlier result does not independently enter the earlier denominator.
+
+### 4.14 Scoped evidence handling and authorization authority
+
+The dispatcher creates new authorization artifacts only at dispatcher-owned paths with no-replace semantics. Candidate output is consumed through pipes. Finalized attempts refuse new authorization writes.
+
+Before Dispatch 4, only the root-owned `bootstrapctl` service can allocate or write the authoritative attempt-evidence root, append the activation ledger, replace the active-head pointer, or use the PR/push credential. A direct repository dispatcher has no authority to perform any of those operations. It may still create local worktrees, launch local processes, write local non-authoritative artifacts, and create a Git commit until Dispatch 4 installs the native repository preflight.
+
+No direct-run evidence, review output, attestation, test result, attempt identity, push result, PR result, or other authorization artifact can be imported, adopted, or promoted into the authoritative evidence root, activation ledger, active-parent selection, or credential path. A direct-run commit may be readmitted only as untrusted candidate input to a new service-controlled attempt. Readmission requires a fresh service-issued identity, fresh authoritative evidence, fresh trusted tests, fresh review, and a service-controlled push/ref and brokered PR request. The direct-run branch/ref, local evidence, and local review output are not reused.
+
+The bypass proof requires authoritative evidence roots and the activation ledger to remain untouched and push and PR spies to remain at zero during direct invocation; it does not require pre-worktree failure. The promotion proof then admits the commit through `bootstrapctl` and requires fresh artifacts and broker-only external effects.
+
+The service retains the PR/push credential and mediates its use only for the exact commit, service-controlled ref, and fresh attempt authorized by the launch manifest after all deterministic gates and head-selection checks pass.
+
+This plan intentionally stops short of defining the full evidence seal and hash-chain lifecycle. That work remains in the separate `evidence-hashing` plan.
+
+### 4.15 Alternatives considered
+
+1. **Continue with the existing gate until Dispatch 4.** Rejected because Dispatches 1–3 and Dispatch 4 activation would remain self-gated.
+2. **Build a second complete production gate.** Rejected as unnecessary scope; Dispatch 0 is a frozen minimal verifier.
+3. **Require merely one assertion.** Rejected because partial execution remains vacuous.
+4. **Allow candidate assertion JSON with a nonce.** Rejected because inherited secrets and descriptors do not authenticate the producer.
+5. **Make free-form `test_command` attestation evidence.** Rejected unless it is converted into a parent-owned ID/assertion contract; revision 4 treats it as non-evidentiary supplemental output.
+6. **Require a candidate read-only bind mount.** Deferred as optional hardening; mandatory transition-time tree revalidation provides the scoped revision 4 invariant.
+7. **Execute a verified shell script by reopening its pathname.** Rejected because it reintroduces a TOCTOU.
+8. **Run trusted content from the operator’s home checkout.** Rejected because D5 intentionally makes the operator home unreachable to workers.
+9. **Treat atomic rename as evidence immutability or a complete durability protocol.** Rejected; new authorization artifacts use no-replace creation, and activation records and head replacement use the explicit fsync barriers in §4.8.
+10. **Duplicate full evidence sealing here.** Rejected because it belongs to the separate evidence-hashing plan.
+11. **Claim reviewer log escaping prevents prompt injection.** Rejected; it provides syntactic containment only.
+12. **Address venvs only by requirements hash.** Rejected because Python ABI/platform changes can collide.
+13. **Add full wheelhouse hash locking now.** Deferred to dependency/supply-chain work.
+14. **Rely on rename detection for policy coverage.** Rejected; policy compares complete tree path maps.
+15. **Make the separate approval-schema plan a prerequisite.** Rejected because validating and activating that repository change through the current failure-prone gate would leave a self-gated or circular trust dependency. Dispatch 0 instead embeds its independently reviewed minimal strict parser/schema; the full-system plan may land later.
+16. **Reparse the spec at review time.** Rejected; the exact criteria vector is persisted at launch.
+17. **Allow JSON duplicate keys and trust the last value.** Rejected as ambiguous authorization input.
+18. **Unblock Phase 2 after metrics alone.** Rejected; Phase 2 requires all six Phase 1 dispatches.
+19. **Use the revision 2 two-stage compatibility bridge.** Rejected as incomplete; revision 4 specifies the full three-state sequence.
+20. **Declare `bootstrapctl` preferred while retaining parallel evidence and credential access.** Rejected because a convention does not remove the falsely-green dispatcher’s authorization path.
+21. **Treat immutable per-commit activation manifests as the current-state selector.** Rejected because historical validity does not prevent stale parents or sibling activations; the append-only ledger and CAS singleton head provide selection.
+22. **Run the event controller as `codex-worker` and rely on best-effort non-dumpability.** Rejected because same-UID process-access mechanisms remain; the controller/candidate UID boundary is mandatory and fail-closed.
+23. **Forbid later use of a commit merely because a direct invocation created it.** Rejected because the commit can safely be treated as untrusted input. What is prohibited is adoption of the direct run’s authorization artifacts; any later admission requires a wholly fresh service-controlled attempt.
+24. **Trust Dispatch 5’s candidate-modified v4 tests.** Rejected because they are supplemental during their own attempt. Dispatch 0 therefore freezes the complete Dispatch 5 oracle and exact assertion inventory.
+25. **Include the target manifest digest in `transition_id`.** Rejected because it creates a circular dependency when the manifest embeds that ID.
+26. **Require rollback transition ID equality with the target manifest ID.** Rejected because the historical manifest records its creation transition while rollback is a new selecting transition. Digest equality binds the rollback ledger to the immutable manifest.
+27. **Claim power-loss durability from clean remount or process restart tests.** Rejected. Revision 6 promises process-crash consistency verified by syscall ordering and SIGKILL; power-loss and faulting-filesystem durability remain residual.
+
+## 5. Affected boundaries & consumers
+
+| Boundary or consumer | Effect |
+|---|---|
+| Dispatch 0 embedded approval parser/schema | Provides the independently reviewed minimal strict approval validation required for bootstrap authorization; refuses digest drift. |
+| Dispatch 0 Dispatch 5 profile | Provides the frozen required-test and exact assertion oracle for every verdict-v4 case in §8.7, independent of Dispatch 5 candidate tests. |
+| Separate approval-schema plan | Is explicitly removed from PLAN-003’s critical path and may upgrade the full native system later. |
+| Operator bootstrap procedure | Installs frozen verifier and approval content outside the repository candidate path. |
+| `bootstrapctl` launcher/service | Becomes the exclusive pre-Dispatch-4 path to authoritative attempt evidence, activation transitions, and mediated PR/push authority, and the entry point for the frozen Dispatch 5 profile. |
+| Authoritative evidence root | Becomes root-owned and writable only through the bootstrap/native authorization service; direct repository-dispatch output is non-authoritative. |
+| Direct-run commit | May be readmitted only as untrusted input to a fresh service-controlled attempt; no direct-run artifact or external effect is adopted. |
+| PR/push credential | Moves behind the root-owned launcher/service and is never supplied to repository or candidate processes. |
+| `/srv/codexwork/installed/<commit>` | Becomes the worker-readable, root-owned source of trusted gate closure. |
+| Activation state | Becomes an immutable creation manifest plus append-only selecting ledger and atomically selected singleton head checked before dispatch. |
+| Activation crash oracle | Proves process-crash consistency and syscall ordering only; power-loss/faulting-filesystem durability is not claimed. |
+| Installed parent dispatcher | Becomes the authority for policy, authenticated test orchestration, aggregation, transition checks, v4 parsing, and blockers after Dispatch 4, subject to selected-head validation. |
+| Bootstrap verifier | Gates Dispatches 1–5 and independently authorizes Dispatch 4 activation and Dispatch 5’s v4 oracle. |
+| Candidate worktree | Supplies targets and supplemental content only; it is revalidated at three transitions. |
+| Candidate application process | Runs as `codex-worker`, receives no nonce or event descriptor, cannot access the controller through direct process-manipulation APIs, and cannot emit trusted assertions. |
+| Trusted controller | Runs on the dispatcher/operator side outside the candidate UID/process namespace and aborts if separation is unavailable. |
+| `scripts/test` users | Receive exact assertion-ID semantics and explicit PASS/SKIP/FAIL diagnostics. |
+| Existing `tests/*.sh` | Gain stable assertion IDs and per-assertion TRUST mutation coverage. |
+| Candidate test changes | Remain supplemental until later activation. |
+| `codex-worker` | Gains read/execute access to installed snapshots and one selected venv, never write access. |
+| Gate venv | Becomes ABI/platform-addressed and isolated with `python -I`. |
+| Reviewer | Receives machine summaries first and a secondary bounded untrusted log tail. |
+| `scripts/verdict.schema.json` | Becomes strict v4 authorization schema. |
+| Attempt manifest | Gains immutable criteria vector, vector digest, parent activation/head transition, tree IDs, and exact test/assertion inventory. |
+| Legacy review consumers | Must be inventoried and remain display-only. |
+| Metrics consumers | Receive neutral attribution and spec-level window-anchored semantics. |
+| CI | Produces portable validation only; it cannot activate a parent. |
+| Phase 2 | Remains blocked until Dispatches 0–5 are all complete, the frozen Dispatch 5 profile has passed, and the required commit is selected as active head. |
+| Historical SPEC-015 evidence | Remains immutable real-state-machine regression input. |
+| Evidence-hashing plan | Retains ownership of full sealing and terminal hash-chain design outside the exact activation transaction. |
+
+## 6. Ordered implementation steps
+
+1. Author and independently review the frozen Dispatch 0 artifact, including its minimal strict approval parser/schema; bind the exact parser, schema, verifier, launcher, Dispatch 1–5 inventory, plan revision, and approval-authorized genesis-anchor digests without using the current repository test gate.
+2. Freeze the current parent commit, integration tip, current outputs, SPEC-015 hashes, current test inventory, and current interpreter identities.
+3. Author Dispatch 0’s five frozen profiles and exact bootstrap assertion inventories outside candidate content, including the complete Dispatch 5 oracle and §8.7 mapping.
+4. Authorize and install the Dispatch 0 artifact root-owned under `/srv/codexwork/bootstrap`; provision the root-owned `bootstrapctl` service, authoritative evidence root, mediated PR/push credential store, append-only activation ledger, transition lock, and singleton active-head location.
+5. Provision and verify the current parent snapshot under `/srv/codexwork/installed/<commit>`.
+6. Run the initial on-box bootstrap drill; compute the genesis creation transition ID from the six-field preimage; create and durably install the strict genesis manifest with `previous_active_commit: null`; bind it to the approval-authorized anchor, Dispatch 0 digest, and embedded schema digest; stage, fsync, no-replace-publish, and directory-fsync the genesis ledger record; then fsync and atomically create and directory-fsync the singleton head.
+7. Prove direct repository `scripts/dispatch` invocation cannot change authoritative evidence roots or the activation ledger and leaves push and PR spies at zero; classify any local worktrees, processes, commits, or files as non-authoritative. Then present the direct-run commit to a new `bootstrapctl` attempt and prove fresh identity, tests, review, and evidence, rejection of poisoned local artifacts, and broker-only push/ref and PR operations.
+8. Capture Dispatch 1 metrics parity baselines before candidate work and bind their hashes and capture commands through Dispatch 0’s embedded strict approval schema.
+9. Add extraction regressions without allowing candidate fixtures to redefine the baseline.
+10. Extract metrics into `scripts/metrics_report.py` and retain the lazy alias.
+11. Run Dispatch 1 through both the installed parent and frozen bootstrap profile; merge, snapshot, verify, create its manifest and ledger transition, and atomically select the exact commit.
+12. Add Dispatch 2 semantic fixtures, including complete-history and window-boundary cases.
+13. Correct neutral attribution labels and per-spec straight-through calculation.
+14. Run Dispatch 2 through the frozen verifier; merge, snapshot, activate, and select it. Record that metrics are ready but Phase 2 remains blocked.
+15. Classify every tracked test assertion as TRUST or non-TRUST and assign stable assertion IDs.
+16. Create the exact per-test/per-lane expected assertion sets.
+17. Add an induced-failure mutation or approved specific justification for every substantive TRUST assertion.
+18. Add representative-per-idiom mutation coverage for remaining non-TRUST assertions.
+19. Implement the parent helper contract with attestation scrubbing and descriptor closure.
+20. Migrate the shell suite and source/target resolution without changing substantive conditions.
+21. Run Dispatch 3 through the frozen verifier, including wrapper/helper exit-zero substitution attacks; merge, snapshot, activate, and atomically select it.
+22. Add Dispatch 4 failing regressions for direct-dispatch bypass and artifact-adoption denial, producer forgery and direct process manipulation, exact assertion sets, single launch, namespace races, tree mutation, closure swaps, policy exhaustiveness, evidence no-replace, venv shadowing, approval-schema digest mismatch, activation absence, genesis, sibling races, stale parents, rollback, process-crash interruption and syscall ordering, and real SPEC-015 replay.
+23. Implement canonical tree-map classification and parent policy.
+24. Implement root-snapshot closure verification and descriptor-based trusted execution.
+25. Implement controller-only event production outside the `codex-worker` UID/process namespace, separate pipes/nonces, environment scrubbing, descriptor closure, `/proc` attacks, `ptrace`, `process_vm_readv/writev`, `pidfd_getfd` denial, separation preflight, and dispatcher-owned aggregation.
+26. Add post-test, pre-review, and pre-PR tree revalidation.
+27. Implement no-replace creation for new attestation/review artifacts and refusal to reopen finalized attempts.
+28. Extend `scripts/setup-worker-user.sh` with snapshot, ABI/platform venv, ACL, systemd, controller/worker privilege separation, activation manifest/ledger/head, authoritative evidence root, and credential-broker provisioning.
+29. Invoke trusted Python with `-I`, safe cwd, scrubbed environment, and verified module origins.
+30. Add the 16 MiB capture cap and syntactically safe secondary reviewer log tail.
+31. Add native activation-manifest, ledger, and singleton-head enforcement, including pre-manifest transition-ID computation, strict creation-versus-selection identity semantics, exact ledger/head fsync ordering, installed-commit chain checks, and stale-parent refusal.
+32. Update CI while retaining the single non-matrix job named `ci`; label its result portable-only.
+33. Replay real SPEC-015 through the actual state machine and verify reviewer/PR spies remain zero.
+34. Run Dispatch 4 candidate validation through the frozen verifier.
+35. Merge Dispatch 4, provision its installed snapshot and venv, and run the frozen post-merge activation profile. Do not use Dispatch 4’s own selection as its activation authority.
+36. Create and validate Dispatch 4’s activation manifest and append-only ledger transition using the §4.8 ordering; atomically compare-and-swap and durably select it as the singleton active head; only then enable its native gate.
+37. Validate Dispatch 0’s frozen Dispatch 5 profile, immutable test content hashes, and exact §8.7 assertion inventory against known passing and mutation fixtures before Dispatch 5 candidate work.
+38. Add Dispatch 5 supplemental regressions for duplicate keys, constants, launch-time criteria snapshots, spec replacement, positional binding, strict findings, legacy consumer inventory, and PR non-invocation.
+39. Persist the criteria vector at attempt launch with no-replace semantics.
+40. Implement strict JSON loading, v4 schema, positional binding, and blocker predicate.
+41. Run focused and full tests through the activated, singleton-selected Dispatch 4 parent and run the Dispatch-0-owned frozen Dispatch 5 profile. Candidate-modified tests remain supplemental.
+42. Complete high-assurance challenge, detached SOL review, operator authorization, merge, snapshot provisioning, manifest creation, ledger append, atomic head transition, and recorded frozen-profile PASS for Dispatch 5.
+43. Exercise the complete three-state compatibility sequence in a controlled fixture.
+44. Mark the Phase 2 prerequisite satisfied only after machine verification that all Dispatches 0–5 meet R10.4, the frozen Dispatch 5 profile passed with its exact assertion inventory, and Dispatch 5 is the consistent singleton selected head.
+
+## 7. Failure modes & blast radius
+
+| Trigger | Consequence | Mitigation |
+|---|---|---|
+| Direct pre-Dispatch-4 repository dispatcher remains usable | Local worktrees, processes, commits, or non-authoritative artifacts may consume resources or confuse an operator | Root-owned `bootstrapctl` exclusively controls authoritative evidence, activation-ledger append, active-head selection, and mediated PR/push authority; direct artifacts are non-authoritative. A direct-run commit is admitted only as untrusted input to a fresh service attempt with new evidence, tests, review, identity, and broker-controlled ref/PR. |
+| Direct-run evidence or review output is adopted during later admission | A fresh authoritative attempt could inherit untrusted authorization claims | Poisoned-artifact promotion regression; no copying, linking, identity reuse, or digest adoption; fresh authoritative production is mandatory. |
+| Embedded approval parser/schema drifts | Dispatch 0 accepts approvals under unreviewed rules | Approval binds exact parser/schema digests; measured mismatch refuses before privileged action. |
+| Pre-Dispatch-4 candidate stubs wrapper/helper | Existing gate could remain falsely green | Frozen Dispatch 0 verifier executes independent assertions. |
+| Dispatch 5 relies on candidate-modified v4 tests | Verdict v4 defects can activate under supplemental green output | Frozen Dispatch 5 profile and exact Dispatch-0-owned assertion inventory cover every §8.7 case and must pass before activation or Phase 2. |
+| One trivial assertion executes | Partial test body is certified | Exact expected assertion-ID set must match. |
+| Candidate application forges events | False trusted PASS | No nonce/FD inheritance; controller-only events; distinct controller UID/process namespace; `/proc`, ptrace, process-VM, and pidfd attack tests. |
+| Controller/candidate privilege separation is unavailable | Same-UID manipulation could expose or alter trusted state | Abort before candidate launch; there is no best-effort fallback. |
+| Trusted and supplemental tests race | Supplemental result contaminates trust namespace | Separate pipes, nonces, source class, and controller state. |
+| Required test launches twice | Side effects or selective result hiding | Controller launch counter and exact-one requirement. |
+| Candidate mutates tested tree | Reviewer sees different content | Post-test, pre-review, and pre-PR tree checks. |
+| Parent closure file swaps | Verified content differs from executed content | Root snapshot, closure manifest, pinned descriptors, race tests. |
+| Installed parent drifts | Wrong gate implementation runs | Activation and closure digest checks refuse dispatch. |
+| Historical manifest exists but commit is stale | Retired parent continues dispatching | Dispatcher must equal the singleton selected head and reference its current selecting ledger transition. |
+| Manifest creation ID is confused with current selection ID | Rollback or reselection is rejected incorrectly or bound circularly | Creation ID is computed before manifest creation from the six-field preimage; current head names the selecting ledger record; rollback binds by target manifest digest, never ID equality. |
+| Two sibling activations race | Multiple parents become active | Serialized atomic compare-and-swap permits only one transition from the expected head. |
+| Activation process crashes between writes | Ledger and head disagree or selection becomes ambiguous | Staged and fsynced ledger record, atomic no-replace publication, ledger-directory fsync, fsynced head temporary, atomic rename, final directory fsync, observed syscall ordering, SIGKILL tests at promised barriers, and explicit partial-state handling. |
+| Sudden power loss or filesystem fault violates assumed persistence | Process-crash tests may not predict post-power-loss state | No power-loss claim is made; a faulting-filesystem/power-loss harness is recorded as residual and outside this plan. |
+| Existing artifact is replaced | Authorization history changes | Dispatcher-owned paths, `O_EXCL`, finalized-attempt refusal. |
+| Log fills disk or memory | Availability loss before sanitization | 16 MiB capture cap enforced during capture. |
+| Reviewer follows log instructions | Advisory judgment may be influenced | Deterministic gates decide mechanics; log is secondary and untrusted. |
+| Candidate shadows Python package | Trusted test imports candidate code | `python -I`, safe cwd, scrubbed environment, origin verification. |
+| Python upgrade reuses venv path | Wrong environment identity | ABI/platform-addressed venv. |
+| Candidate requirements self-provision | Dependency change validates itself | Post-merge staged provisioning by prior verifier. |
+| Mode/symlink/submodule change escapes policy | Required coverage disappears | Complete tree-map classification and property tests. |
+| Approval lacks exact bootstrap or test-blob bindings | High-risk change is not authorized as claimed | Dispatch 0’s embedded strict approval parser/schema validates the exact bindings and its own bound digest. |
+| Duplicate verdict key | Human and machine interpretations differ | Strict duplicate-key rejection. |
+| Spec changes after digest check | Wrong criteria authorize PASS | Launch-time immutable criteria vector. |
+| CI passes without isolation | Parent activates without on-box proof | Activation manifest requires distinct on-box result. |
+| New policy selects its own activation tests | Dispatch 4 self-certifies | Frozen Dispatch 0 verifier authorizes activation. |
+| Metrics fixture shifts baseline | Extraction semantic drift is hidden | Operator pre-candidate approval-bound baseline. |
+| Retry lies outside selected window | Straight-through rate is misclassified | Terminal-time anchor plus complete-history classification. |
+| Phase 2 starts after metrics or native Dispatch 5 tests only | Integrity repair remains incomplete | Machine gate requires all six dispatches, frozen Dispatch 5 profile PASS, and the correct selected head. |
+| Transitional compatibility test remains weak | Bridge is removed before strict test promotion | Three separate states and activations. |
+
+The worst-case under-strict failure is an incorrectly authorized control-plane change or PR. On detection: stop new dispatches, preserve artifacts, and atomically roll back the selected head under the last trusted verifier using a new approved ledger transition. Availability loss from an over-strict gate is preferable to restoring exit-code-only authorization.
+
+## 8. Validation plan
+
+### 8.1 Regression proofs that fail before implementation
+
+1. An exit-zero required skip reaches the current gate’s PASS path.
+2. A required test with one trivial assertion omits substantive expected IDs.
+3. Candidate application code can observe or target inherited attestation state in a naïve implementation.
+4. A candidate command mutates the worktree after PASS.
+5. A verified-by-path test/helper can be swapped before execution.
+6. A duplicate-key verdict is accepted by a conventional last-key-wins parser.
+7. A candidate shadow module loads when Python runs from the target root.
+8. Current reporting disagrees with neutral attribution or spec-level window semantics.
+9. A legacy SPEC-015 adapter can reject a fixture without exercising the real transition; the new regression demands production state-machine entry and spies.
+10. Direct repository `scripts/dispatch` can enter the current worker/evidence path without a root-service launch capability.
+11. A modified approval schema can be consumed without proving an independently authorized exact schema digest.
+12. Two immutable manifests naming one predecessor can coexist without a singleton selected head, and a stale manifested parent can still run.
+13. A same-UID candidate can attempt controller access through `ptrace`, process-VM syscalls, or `pidfd_getfd` even when `/proc/<ppid>/fd` is hidden.
+14. A commit and local evidence produced by direct invocation can be confused with an authoritative attempt unless artifact adoption and fresh readmission semantics are enforced.
+15. Dispatch 5’s candidate-modified v4 tests are supplemental and cannot satisfy an independently frozen v4 assertion inventory.
+16. A transition digest that includes a manifest digest is circular when the manifest embeds the transition digest.
+17. A process crash after head rename but before directory fsync occurs before the claimed final durability barrier, and a clean restart/remount does not prove power-loss durability.
+
+### 8.2 Dispatch 0 validation
+
+- Verify root ownership and worker write denial for bootstrap content.
+- Verify exact verifier, launcher, embedded approval parser/schema, Dispatch 1–5 profiles, and inventory hashes against the independently authorized approval artifact.
+- Mutate or substitute the embedded schema and parser independently and require refusal before evidence allocation, candidate launch, credential access, activation, push, or PR.
+- Run each frozen profile against a known passing fixture and its required mutations.
+- Run the frozen Dispatch 5 profile independently of candidate-modified Dispatch 5 tests and require the exact assertion inventory in §8.7.
+- Replace candidate wrappers/helpers with exit-zero stubs and require rejection.
+- Invoke repository `scripts/dispatch` directly as the ordinary operator and as `codex-worker`; allow local worktree creation, process launch, local evidence, local review output, and a local commit, but require the authoritative evidence roots and activation ledger to remain byte-for-byte untouched and push and PR spies to remain at zero.
+- Prove direct invocation cannot write or promote an artifact into the authoritative evidence root, append an activation-ledger record, select an active parent, or read or use the PR/push credential.
+- Poison the direct run’s local evidence, review output, attestation, and test results; submit only its commit as untrusted input to a new `bootstrapctl` attempt; require a fresh attempt identity, fresh trusted invocation records, fresh evidence, fresh review, no adopted local artifact digest or pathname, a new service-controlled ref, and push/PR calls only through the broker.
+- Create genesis only with `previous_active_commit: null`, the exact approval-authorized anchor, and the bound Dispatch 0/schema digests.
+- Reject null previous commit on non-genesis and reject a string predecessor on the genesis path.
+- For genesis and non-genesis creation, compute `transition_id` before manifest creation from exactly `prev_active_commit`, `target_commit`, `verifier_digest`, `approval_digest`, `timestamp`, and `nonce`; prove that adding `transition_id` or `target_manifest_digest` to the preimage is rejected.
+- Race two sibling transitions from the same selected predecessor and prove exactly one CAS succeeds.
+- After a successor wins, invoke the predecessor dispatcher and require refusal before attempt creation or any spy call.
+- For every activation transaction, observe and assert the syscall order: write complete staged ledger record; fsync staged ledger record; atomic no-replace publish; fsync ledger directory; write complete temporary head; fsync temporary head; atomic rename; fsync containing directory.
+- Inject SIGKILL before ledger final-path publication and require the exact prior head bytes, their referenced durable ledger record, their manifest digest, and dispatchability of the promised prior parent. Ignore or quarantine staged ledger temporaries.
+- Inject SIGKILL after ledger-directory fsync but before head rename and require the exact prior head bytes, their referenced durable ledger record, their manifest digest, dispatchability of the promised prior parent, and survival of the new durable but unselected ledger record.
+- Inject SIGKILL after head rename and final containing-directory fsync and require the exact new head bytes, their reference to the already durable transition, the target manifest digest, and dispatchability of the promised target parent.
+- Inject SIGKILL after ledger publication but before ledger-directory fsync and treat it as a separately enumerated partial state; accept only a fully validated prior or new state or fail closed.
+- Inject SIGKILL after the fsynced temporary head is written but before rename and treat the unused temporary as a separately enumerated partial state.
+- Inject SIGKILL after head rename but before containing-directory fsync and treat it as a separately enumerated partial state; it is not the third promised crash point.
+- Prove none of the three promised process-crash tests passes merely because dispatch refuses.
+- Do not use a clean unmount, clean remount, or ordinary service restart as evidence of power-loss durability; record that no power-loss/faulting-filesystem harness is supplied.
+- Perform an approved activation followed by an approved rollback as new ledger/CAS transitions; prove the genesis, activation, successor, and rollback ledger records all survive byte-for-byte unchanged, while `active-head.json` is replaced as a non-evidentiary derived pointer and no historical manifest or ledger record changes.
+- During rollback, prove the head transition ID equals the rollback ledger transition ID, the target manifest retains its original creation transition ID, the two IDs need not equal, and `rollback_ledger.target_manifest_digest == SHA-256(target_manifest_bytes)`.
+- Attempt activation without the frozen result and require refusal.
+- Attempt activation with an intervening integration commit and require refusal.
+- Attempt Dispatch 4 activation using only its new tests and require refusal.
+- Attempt Dispatch 5 activation using only its candidate-modified tests and require refusal.
+- Run the fresh-box provisioning path.
+- Prove CI portable PASS cannot substitute for the on-box artifact.
+
+### 8.3 Dispatch 1 validation
+
+- Compare output against pre-candidate approval-bound baselines.
+- Prove candidate fixtures cannot update the baseline.
+- Invoke metrics through alias and standalone module.
+- Prove representative non-metrics commands do not import the module.
+- Make the module unavailable and prove non-metrics commands are unaffected.
+- Run focused tests, `./scripts/test`, and the frozen Dispatch 1 profile.
+
+### 8.4 Dispatch 2 validation
+
+- Prove neutral naming in text, JSON, help, and headings.
+- Prove numerator `1`, denominator `3`, and required exclusions.
+- Add a retry before the window and prove it prevents straight-through classification.
+- Add a later attempt after the window and prove the terminal anchor moves.
+- Prove empty denominator is `null`/`N/A`.
+- Prove no trust-closure path changed.
+- Run `./scripts/test` and the frozen Dispatch 2 profile.
+
+### 8.5 Dispatch 3 validation
+
+- Enumerate every TRUST assertion and its stable ID.
+- Force every substantive TRUST condition false and require the matching `ok: false` plus nonzero result, or verify its approval-bound justification.
+- Exercise every helper form and representative non-TRUST shell idiom.
+- Prove no unconditional pass-recording primitive exists.
+- Prove prerequisite absence yields diagnostic exit `77` and no passing assertion.
+- Prove source/target separation.
+- Replace the candidate wrapper/helper with exit-zero stubs and require frozen-verifier rejection.
+- Run full suite, challenge, approval, and frozen Dispatch 3 profile.
+
+### 8.6 Dispatch 4 validation
+
+- Run all R2 malformed and adversarial event cases through the real isolated process.
+- Run environment, inherited-FD, `/proc/<ppid>/environ`, and `/proc/<ppid>/fd` forgery attempts.
+- From a candidate `codex-worker` process, attempt `ptrace` attach, `process_vm_readv`, `process_vm_writev`, and `pidfd_getfd` against the controller and require each to fail without exposing, changing, or duplicating controller state.
+- Deliberately collapse controller and candidate UID/process separation or make its verification unavailable and require the gate to abort before candidate launch.
+- Race trusted and supplemental processes with identical test IDs.
+- Prove a double launch is detected by the side-effect counter.
+- Mutate tracked and untracked target content after PASS.
+- Swap tests, helpers, fixtures, schemas, interpreter paths, and directory components concurrently.
+- Drift installed runner, policy, schema, and helper from the recorded commit.
+- Property-test mode, symlink, type, submodule, `.gitmodules`, delete/add, root-path, untracked, and dirty cases.
+- Attempt overwrite via existing file, symlink, hardlink alias, rename swap, concurrent writer, and terminal resume.
+- Test candidate `yaml.py`, `jsonschema.py`, `sitecustomize.py`, and `usercustomize.py`.
+- Test fresh-box provisioning and Python ABI/version change.
+- Enforce raw-log cap before hashing; separately test tail escaping and syntactic delimiter integrity.
+- Replay real SPEC-015 through the production state machine with reviewer and PR spies.
+- Confirm a constructed aggregate without real invocation records cannot authorize.
+- Confirm CI PASS plus missing on-box artifact cannot activate.
+- Repeat genesis-schema, sibling-race, stale-parent, rollback-transition, creation-versus-selection identity, ledger-record-survival, exact fsync ordering, promised SIGKILL crash-point, and enumerated partial-state tests against native activation enforcement.
+- Confirm every native dispatcher validates its historical manifest and creation transition, exact selection by the active head, the current selecting ledger transition, and target-manifest digest equality.
+- Run Dispatch 4’s candidate and post-merge checks through the frozen verifier.
+
+### 8.7 Dispatch 5 validation
+
+The Dispatch 0 inventory contains one immutable required test ID, `bootstrap.dispatch5.verdict_v4`, whose frozen implementation, helpers, fixtures, and exact expected assertion set are owned by Dispatch 0. The test must emit every assertion ID below exactly once. Candidate-modified Dispatch 5 tests are supplemental and satisfy none of these IDs.
+
+| Validation case | Dispatch-0-owned exact assertion ID |
+|---|---|
+| N correct criteria: eligible | `d5.v4.criteria.exact_n_eligible` |
+| N−1 criteria: reject | `d5.v4.criteria.n_minus_1_reject` |
+| N+1 criteria: reject | `d5.v4.criteria.n_plus_1_reject` |
+| Duplicate criterion: reject | `d5.v4.criteria.duplicate_reject` |
+| Reordered criteria: reject | `d5.v4.criteria.reordered_reject` |
+| Wrong criterion index: reject | `d5.v4.criteria.wrong_index_reject` |
+| Invented criterion text: reject | `d5.v4.criteria.invented_text_reject` |
+| Exact text binds | `d5.v4.normalization.exact_text_binds` |
+| NFKC/whitespace-normalized text binds | `d5.v4.normalization.nfkc_whitespace_binds` |
+| Case change rejects | `d5.v4.normalization.case_change_reject` |
+| Punctuation change rejects | `d5.v4.normalization.punctuation_change_reject` |
+| Markdown change rejects | `d5.v4.normalization.markdown_change_reject` |
+| Wording change rejects | `d5.v4.normalization.wording_change_reject` |
+| Duplicate top-level key rejects | `d5.v4.json.duplicate_top_level_reject` |
+| Duplicate criterion key rejects | `d5.v4.json.duplicate_criterion_reject` |
+| Duplicate finding key rejects | `d5.v4.json.duplicate_finding_reject` |
+| Duplicate severity key rejects | `d5.v4.json.duplicate_severity_reject` |
+| Duplicate binding key rejects | `d5.v4.json.duplicate_binding_reject` |
+| Nonstandard constants reject | `d5.v4.json.nonstandard_constants_reject` |
+| Spec-path replacement leaves persisted vector authoritative | `d5.v4.vector.spec_replacement_ignored` |
+| Wrong spec binding rejects | `d5.v4.binding.wrong_spec_reject` |
+| Wrong base binding rejects | `d5.v4.binding.wrong_base_reject` |
+| Wrong worker binding rejects | `d5.v4.binding.wrong_worker_reject` |
+| Wrong vector binding rejects | `d5.v4.binding.wrong_vector_reject` |
+| Wrong active-parent binding rejects | `d5.v4.binding.wrong_active_parent_reject` |
+| Scope blocker rejects | `d5.v4.findings.scope_blocker_reject` |
+| Regression blocker rejects | `d5.v4.findings.regression_blocker_reject` |
+| Security blocker rejects | `d5.v4.findings.security_blocker_reject` |
+| Empty finding arrays remain eligible | `d5.v4.findings.empty_arrays_eligible` |
+| Advisory-only finding arrays remain eligible | `d5.v4.findings.advisory_arrays_eligible` |
+| Malformed findings passed directly to evaluator reject | `d5.v4.findings.direct_evaluator_malformed_reject` |
+| Undeclared properties reject | `d5.v4.schema.undeclared_properties_reject` |
+| v1 remains display-only | `d5.v4.legacy.v1_display_only` |
+| v2 remains display-only | `d5.v4.legacy.v2_display_only` |
+| v3 remains display-only | `d5.v4.legacy.v3_display_only` |
+| Inventory and exercise every legacy display consumer | `d5.v4.legacy.consumer_inventory_complete` |
+| Every rejected review leaves PR spy at zero | `d5.v4.pr.rejection_zero_calls` |
+
+The frozen test’s expected assertion set is exactly the complete set in this table. Missing, unknown, or duplicate IDs fail under R2. The profile must pass during Dispatch 5 candidate validation and again against the exact merged installed snapshot before Dispatch 5 activation and R10.4 release.
+
+### 8.8 Mapping of the critique’s 18 missing tests
+
+| Missing test | Numbered criterion |
+|---:|---|
+| 1. Pre-Dispatch-4 wrapper/helper stub | R1.5 |
+| 2. Candidate application event forgery | R2.6, R2.9–R2.11 |
+| 3. One trivial assertion | R2.2, R2.3 |
+| 4. `test_command: true` or no assertions | R2.8 |
+| 5. Worktree mutation after PASS | R3.3–R3.5 |
+| 6. Parent test/helper/fixture swap | R3.7, R3.8 |
+| 7. Installed closure drift | R3.9 |
+| 8. Trusted/supplemental race | R2.7, R2.13 |
+| 9. Double launch, one persisted result | R2.1, R2.12 |
+| 10. Finalized artifact overwrite | R9.1–R9.5 |
+| 11. Activation without prior verifier | R1.6, R1.13 |
+| 12. CI PASS without on-box artifact | R1.14 |
+| 13. Python shadow modules | R6.3–R6.5 |
+| 14. Fresh box and Python upgrade | R6.8, R6.9 |
+| 15. Duplicate verdict keys | R4.3 |
+| 16. Spec replacement | R4.1, R4.2 |
+| 17. Exhaustive policy classification | R3.10–R3.13 |
+| 18. Full compatibility sequence | R10.2, R10.3 |
+
+### 8.9 Mapping of the round-2 critique’s 4 material findings
+
+| Round-2 finding | Numbered criterion | Validation location |
+|---:|---|---|
+| 1. Dispatch 0 not exclusive | R1.3, R1.4 | §8.2 direct repository-dispatch bypass, artifact-adoption denial, fresh readmission, authority denial, and zero-spy tests |
+| 2. Approval-schema prerequisite provenance | R1.1, R1.2, R9.8, R9.9 | §8.2 embedded parser/schema digest, mutation, and pre-privilege refusal tests |
+| 3. Incomplete activation state machine | R1.7–R1.12, R1.16–R1.18 | §8.2 and §8.6 genesis, sibling-race, stale-parent, creation/selection identity, rollback, syscall-ordering, and process-crash tests |
+| 4. Same-UID producer manipulation | R2.6, R2.10 | §8.6 controller/candidate separation plus ptrace, process-VM, and pidfd negative tests |
+
+### 8.10 Falsely-green mitigation checks
+
+- Direct pre-Dispatch-4 repository `scripts/dispatch` invocation may perform local non-authoritative work and create a commit, but it must leave authoritative evidence roots and the activation ledger untouched and cannot push, create a PR, or select an active parent.
+- No evidence, review output, attestation, test result, attempt identity, push result, or PR result from a direct invocation is adopted. A direct-run commit is readmitted only as untrusted input to a fresh service-controlled attempt with new tests, review, evidence, identity, and broker-controlled external effects.
+- Dispatch 0 uses its independently reviewed embedded strict approval parser/schema; the separate approval-schema plan is not a prerequisite.
+- Every dispatcher must match the singleton active head as well as possess a valid historical manifest.
+- A manifest’s transition ID names its creation transition; the head’s ID names its current selecting ledger record; rollback binds by target-manifest digest and never by those IDs being equal.
+- Activation ordering is verified from observed syscalls, and promised recovery points use SIGKILL between barriers. Clean remounts are not treated as power-loss proof.
+- SPEC-015 must enter the real production state machine; fixture-only adapter success is insufficient.
+- Reviewer and PR spies are checked at the transition boundary.
+- Real isolated invocation records are required; constructed aggregates are insufficient.
+- Candidate-application forgery is tested separately from candidate-test substitution.
+- Controller/candidate privilege separation is mandatory, and direct process-manipulation APIs are tested independently of `/proc` pathname restrictions.
+- `./scripts/test` PASS does not authorize activation without the on-box artifact.
+- Dispatch 4 activation is decided by the frozen verifier, not its own policy.
+- Dispatch 5 must pass the Dispatch-0-owned frozen v4 oracle; candidate-modified v4 tests cannot satisfy it.
+- Extraction baselines are captured before candidate work and approval-bound.
+- Metrics window tests use terminal-spec anchoring and complete history.
+- Sanitizer tests assert syntactic containment only.
+- SPEC-015 hash stability is not treated as proof of general evidence sealing; R9 and the separate evidence-hashing plan cover that distinction.
+
+## 9. Rollback / irreversibility
+
+1. Stop new dispatches before changing the selected active head.
+2. Roll back in reverse dependency order, preserving every attempt, review, manifest, and activation-ledger artifact.
+3. An activated parent may be replaced only by a new approved atomic transition from the current selected head to a commit with a valid historical manifest and verified installed snapshot.
+4. Never edit or delete an activation manifest or activation-ledger record to reinterpret history. The append-only activation ledger is the sole historical evidence of activation and rollback selection history. `active-head.json` is a replaceable, non-evidentiary derived pointer; prior head-file bytes need not be preserved. Rollback/revocation appends a new operator-authorized ledger record and atomically replaces that pointer using the exact fsync ordering in §4.8. The target manifest retains its creation transition ID; the new head names the rollback selecting transition; rollback binds through `rollback_ledger.target_manifest_digest == SHA-256(target_manifest_bytes)`, never through transition-ID equality. Validation must prove that all pre-activation, activation, and rollback ledger records survive unchanged across both activation and rollback.
+5. Dispatch 5 rollback must preserve v4 artifacts and display-only readers. Do not authorize them through v3.
+6. Dispatch 4 rollback compare-and-swaps the selected head to the last activation-manifested, revalidated parent and keeps Dispatch 0 installed. Do not restore exit-code-only authorization or direct repository-dispatch authority for new work.
+7. Dispatch 3 rollback restores wrapper, helper, and migrated tests as one unit.
+8. Dispatch 2 may be reverted independently, but Phase 2 immediately becomes blocked again.
+9. Dispatch 1 rollback requires a high-assurance dispatcher change and approval-bound parity validation.
+10. Dispatch 0 removal is allowed only after a native parent gate has been independently validated, the native service exclusively owns authoritative evidence and credential authority, no active or rollback path depends on its frozen profiles, and the Dispatch 5 oracle has been safely incorporated into an independently validated later parent.
+11. Installed snapshots and ABI/platform venvs may remain inert for rollback. Remove them only after proving no active unit, manifest, ledger transition, or selected head references them.
+12. Existing attempts, activation records, and SPEC-015 are irreversible evidence.
+13. Full evidence-seal rollback rules remain owned by the separate `evidence-hashing` plan.
+14. This rollback procedure preserves process-crash consistency only. It does not claim recovery guarantees after power loss or faulting-filesystem behavior beyond what a separately supplied harness proves.
+
+## 10. Open questions / operator decisions
+
+None within this plan.
+
+The separate approval-schema plan is explicitly not a PLAN-003 prerequisite. Dispatch 0’s independently reviewed frozen artifact contains the minimal strict parser/schema required for its own authorization; a later full-system schema upgrade is separate work. A compatibility change that cannot pass the three-state sequence requires a new, separately scoped operator decision and is not authorized here.
+
+A power-loss or faulting-filesystem durability harness is explicitly outside PLAN-003. Adding one would require separate scope and would not be inferred from the process-crash tests.
+
+## 11. Provenance
+
+- **Challenge (Claude):** Revision 2 challenged with sustained/scaled dispositions for B1–B12, operational defects, Assumption 4, and validation gaps, dated 2026-07-14.
+- **Drafter response:** Revision 3 applied that disposition table, including its scoped reductions and recorded residual risks.
+- **Fresh-context review:** Revision 3 received `VERDICT: BLOCK` with exactly four material findings: non-exclusive Dispatch 0 authorization, circular approval-schema provenance, incomplete activation state, and insufficient producer-auth privilege separation. Everything else was assessed non-blocking.
+- **Claude disposition:** All four round-2 findings sustained. Revision 4 applies the chosen mechanisms without reopening accepted design.
+- **B11 routing:** Revision 4 replaces the separate-plan prerequisite with a minimal strict approval parser/schema embedded in the independently reviewed Dispatch 0 artifact. The separate full-system approval-schema plan may land later and is outside PLAN-003’s critical path.
+- **Revision 5:** Applied the sustained round-3 findings concerning authoritative-effect-only direct invocation, derived-head history semantics, and exact crash-phase state promises.
+- **Round-4 fresh-context review:** Revision 5 received `VERDICT: BLOCK` with four narrower findings: unvalidatable prohibition on later use of a direct-run commit, absence of an authoritative Dispatch 5 oracle, circular/ambiguous transition identity, and crash ordering/tests that did not support the promised durability oracle. The reviewer stated that the assertion model, controller/worker privilege boundary, metrics semantics, and append-only-ledger/derived-head distinction otherwise hold together.
+- **Claude round-4 disposition:** All four findings sustained. Revision 6 chooses untrusted commit readmission with no artifact adoption; adds a frozen Dispatch 5 profile and exact §8.7 inventory; defines transition IDs before manifest creation with distinct creation and current-selection semantics; and scales the crash oracle to syscall-verified process-crash consistency while recording power-loss durability as residual.
+- **Dual validation:** Fresh-context SOL and Claude review of revision 6 pending. Any unresolved blocker requires another revision.
+- **Authorization:** Pending authorized-revision digest, independent Dispatch 0 artifact authorization, approval-authorized genesis anchor, and per-dispatch approvals.
+- **Completion reconciliation:** Pending; record followed, authorized deviation, or unauthorized deviation for all six dispatches.
+
+## Residual risks (recorded)
+
+1. **Minimal bootstrap coverage:** Dispatch 0 is not a full second production gate. Its frozen Dispatch 1–5 profiles may cover less behavior than the completed native gate. This is the accepted B1 scaling; independent human high-assurance review remains required.
+
+2. **Candidate snapshot mutability:** Revision 4 mandates tree revalidation but does not require a read-only bind mount of the candidate tree. A read-only mount remains optional hardening. There remains a race window between checks, reduced by commit-object review inputs and the immediate pre-review/pre-PR validations.
+
+3. **Semantic prompt injection:** JSON escaping and fixed delimiters provide syntactic integrity only. Candidate-controlled diff and log content may still semantically influence the reviewer. The reviewer is therefore non-authoritative for mechanically decidable invariants.
+
+4. **Dependency supply-chain completeness:** Venv addressing includes requirements bytes and Python ABI/platform, but this plan does not add a fully hash-locked wheelhouse or prove all transitive artifact hashes. That remains deferred dependency/supply-chain work.
+
+5. **Full evidence sealing:** Revision 4 provides no-replace creation, dispatcher-owned paths, finalized-attempt refusal, and a protected authoritative-evidence choke point only. Complete artifact sealing, terminal manifests, directory durability outside the exact activation transaction, and comprehensive hash-chain verification remain assigned to the separate `evidence-hashing` plan.
+
+6. **Pre-Dispatch-4 direct-invocation local effects:** Until Dispatch 4 installs the native repository preflight, direct repository-dispatch invocation may waste compute and create local worktrees, processes, reviewer activity, commits, or other non-authoritative artifacts. The bounded consequence is local resource consumption and operator confusion: authoritative evidence roots and the activation ledger remain untouched, no PR/push authority is available, no active parent can be selected, and none of the local authorization artifacts can be promoted. A resulting commit may be considered only as untrusted input to a wholly fresh service-controlled attempt.
+
+7. **Power-loss and faulting-filesystem durability:** The activation oracle proves process-crash consistency by checking syscall ordering and injecting SIGKILL between barriers. It does not simulate sudden power loss, volatile controller or device-cache loss, torn writes contrary to the filesystem contract, or a faulting filesystem. A power-loss/faulting-filesystem harness is out of scope, so durability under those failures remains unproven.
+
+## Disposition record (revision 3)
+
+- **B1 — SUSTAINED, scaled.** Added Dispatch 0: a minimal operator-installed frozen verifier with frozen required-test/assertion profiles for Dispatches 1–4, trusted snapshot provisioning, and activation manifests. Dispatch 4 activation is decided by the prior verifier. The absence of a full second gate is recorded as a residual risk.
+
+- **B2 — SUSTAINED.** Replaced positive assertion count with parent-owned exact expected-assertion-ID sets. Missing, unknown, or duplicate IDs fail. Every substantive TRUST assertion requires an induced-failure mutation or specific approved justification. Free-form `test_command` output is non-evidentiary; `true` never counts as testing.
+
+- **B3 — SUSTAINED.** Candidate processes receive neither nonce nor event descriptor. Added environment scrubbing, FD closure before every candidate `exec`, controller-only event production, per-invocation nonces, and environment/FD/`/proc` forgery attacks.
+
+- **B4 — SUSTAINED, scaled.** Added mandatory clean-status and tree-identity revalidation after tests, immediately before review, and immediately before PR creation. A read-only bind mount remains optional and is recorded as residual hardening.
+
+- **B5 — SUSTAINED.** Added root-owned `/srv/codexwork/installed/<commit>` snapshots, a complete closure manifest, verified interpreter identities, descriptor-based execution, no reopening through candidate-writable paths, and concurrent file/directory/helper/fixture/interpreter swap tests.
+
+- **B6 — PARTIAL as dispositioned.** Added only `O_EXCL`/no-replace creation for new attestation/review artifacts, dispatcher-owned non-worker-writable paths, pipe-based worker output, and refusal to reopen finalized attempts. Full sealing and evidence hashing are explicitly routed to the separate `evidence-hashing` plan and recorded as residual.
+
+- **B7 — SUSTAINED.** Added distinct trusted/supplemental pipes, nonces, source-class bindings, dispatcher-owned aggregation, cross-namespace forgery rejection, and a single-launch side-effect counter.
+
+- **B8 — SUSTAINED with claim narrowing.** R7 now promises syntactic prompt integrity only. Machine summaries are primary; log tail is secondary untrusted evidence. The reviewer remains a fail-closed advisory oracle. Added a 16 MiB capture-time raw-log cap. Semantic injection remains recorded as residual.
+
+- **B9 — SUSTAINED, scaled.** Venv identity now includes requirements bytes plus Python ABI/platform; trusted Python uses `-I`, safe cwd, scrubbed variables, and verified module origins. Added shadow-module, fresh-box, Python-upgrade, recursive permission, and staged post-merge dependency tests. Full wheelhouse hash locking is recorded as residual.
+
+- **B10 — SUSTAINED, scaled.** Defined canonical complete-tree path-map comparison covering modes, symlinks, types, submodules, `.gitmodules`, additions/deletions, rename sides, unknown root paths, untracked control-plane files, and dirty state. Added the nonempty-required-set-or-policy-error property.
+
+- **B11 — SUSTAINED, routing option (a).** Declared the separate approval-schema plan a hard prerequisite. Exact dispatch, attempt, verifier, baseline, inventory, and changed-test blob bindings must use that schema. No unsupported approval claim remains in PLAN-003.
+
+- **B12 — SUSTAINED.** Added duplicate-key and nonstandard-constant rejection. The exact digest-approved acceptance-criteria vector is persisted at launch and used thereafter. Added spec-path replacement and legacy-consumer inventory tests.
+
+- **Operational — activation manifest: SUSTAINED.** “Merged and installed” is now a strict machine-checked manifest state with commit chain, snapshot, verifier, inventory, venv, approval, portable, and on-box bindings.
+
+- **Operational — Phase 2 gating: SUSTAINED.** Phase 2 implementation requires all six Dispatches 0–5 complete and active. Metrics alone is explicitly insufficient.
+
+- **Operational — compatibility sequence: SUSTAINED.** Replaced the incomplete two-stage procedure with three states: bridge plus transitional test, strict-new test promotion, then bridge removal.
+
+- **Operational — exact commit chain: SUSTAINED.** Activation records previous active commit and exact integration tip and rejects unenumerated intervening commits.
+
+- **Operational — fresh-box provisioning: SUSTAINED, scaled.** Extended the single `scripts/setup-worker-user.sh` path to cover worker UID, snapshot, venv, systemd properties, ACLs, and activation. CI is explicitly portable-only.
+
+- **Assumption 4 — SUSTAINED.** Removed representative-per-idiom as sufficient proof for TRUST migration. Exact per-test assertion inventory and per-substantive-assertion mutation/justification now govern TRUST tests.
+
+- **Eighteen missing acceptance tests — SUSTAINED.** Folded all eighteen into numbered R1–R10 criteria and mapped them explicitly in §8.8.
+
+- **Falsely-green validation paths — SUSTAINED.** Required real-state-machine SPEC-015 replay with reviewer/PR spies, actual isolated invocation provenance, candidate-application forgery tests, independent on-box activation, prior-verifier validation of Dispatch 4, pre-candidate approval-bound parity baselines, terminal-time metrics anchoring with complete history, syntactic-only sanitizer claims, and separation from full evidence sealing.
+
+## Disposition record (revision 4)
+
+- **Finding 1 — SUSTAINED; Dispatch 0 exclusive authorization choke point.** §1 defines root-owned `bootstrapctl` as the exclusive pre-Dispatch-4 authority. R1.3–R1.4 require authoritative evidence roots and the PR/push credential to be reachable only through its root-owned launcher/service and require direct repository `scripts/dispatch` invocation to fail before candidate work with evidence, reviewer, push, and PR spies at zero. §§4.2–4.3 and §4.14 define the protected evidence/credential boundary and non-authoritative status of direct-dispatch output. Steps 4 and 7 and §§8.1–8.2 add the installation and direct-bypass proofs. §§5, 7, 9, and 10 reflect the boundary and rollback consequences.
+
+- **Finding 2 — SUSTAINED; embedded minimal approval parser/schema.** §1 removes the separate approval-schema plan from PLAN-003’s critical path and embeds the minimal strict parser/schema in the independently reviewed frozen Dispatch 0 artifact. Observed fact 12, assumptions 2–4, R1.1–R1.2, and R9.8–R9.9 define its provenance, bindings, and schema-digest refusal. §4.1 removes the external prerequisite; §§4.2–4.3 define the installed files and validation flow; §4.15 rejects the circular alternative. Step 1 and §8.2 add independent digest, mutation, and pre-privilege refusal tests. §§5, 7, 10, and 11 remove the full-system schema plan from authorization sequencing.
+
+- **Finding 3 — SUSTAINED; complete activation state machine.** R1.7–R1.12 and R1.16–R1.18 require a strict genesis form with `previous_active_commit: null`, approval-authorized anchor and Dispatch 0 digest, immutable manifests, a root-owned append-only ledger, and an atomic compare-and-swap singleton head. §4.8 specifies genesis and non-genesis schemas, durable ledger-before-head transitions, stale/sibling exclusion, dispatcher manifest-plus-head checks, rollback transitions, and crash behavior. R10.4 and §§4.1, 5, 6, 7, and 9 make selected-head state part of completion and rollback. §§8.2, 8.6, and 8.9 add genesis, sibling-race, stale-parent-after-successor, rollback, and crash-interruption tests.
+
+- **Finding 4 — SUSTAINED; producer-auth privilege boundary.** §1 and assumption 4 place the event-producing controller on the dispatcher/operator side, outside the `codex-worker` candidate UID and process namespace. R2.6 and R2.10 require fail-closed separation and deny `ptrace`, `process_vm_readv`, `process_vm_writev`, and `pidfd_getfd`. §4.6 defines the mandatory pre-launch privilege check and removes best-effort fallback. Steps 22, 25, and 28 add implementation and provisioning work; §8.6 adds direct negative process-manipulation and unavailable-separation tests. §§5 and 7 record the controller boundary and failure response.
+
+## Disposition record (revision 5)
+
+- **Finding 1 — SUSTAINED, scaled to authoritative effects only.** R1.3–R1.4 now prohibit direct pre-Dispatch-4 repository invocation from authoritative evidence writes, activation-ledger append, active-parent selection, and PR/push authority while explicitly permitting local worktrees, processes, reviewer activity, and non-authoritative files until Dispatch 4 installs the native repository preflight. §§4.3 and 4.14 define the service-enforced authority boundary and prohibit import or promotion of direct-dispatch output. Step 7, the §7 failure-mode row, §8.2, and §8.10 replace the unenforceable pre-worktree oracle with authoritative-evidence and ledger immutability plus zero push/PR assertions. Residual risk 6 records the bounded wasted-compute and local-artifact exposure.
+
+- **Finding 2 — SUSTAINED; singleton head is a derived pointer.** §4.8 declares `active-head.json` a replaceable, non-evidentiary derived pointer and the append-only activation ledger the sole historical evidence of activation and rollback selection history. Prior head-file bytes need not survive replacement. §9.4 removes the prior-head-file preservation claim and requires activation and rollback to preserve every ledger record unchanged. §§4.8, 8.2, and 8.6 add ledger-record survival validation across activation and rollback.
+
+- **Finding 3 — SUSTAINED; exact crash-phase oracle.** R1.18 and §4.8 specify the exact promised state after an actual root-service restart or filesystem remount at each of the three crash points: exact head bytes, referenced durable ledger record, manifest digest, and dispatchability of the promised prior or target parent. §8.2 supplies a separate exact oracle for each crash injection and forbids a test from passing merely because dispatch fails closed. Generic fail-closed recovery is reserved for explicitly enumerated partial states outside the three promised crash points; §7 and §8.6 reflect that scope.
+
+## Disposition record (revision 6)
+
+- **Finding 1 — SUSTAINED; prohibit artifact adoption while permitting fresh untrusted commit readmission.** §1 and R1.4 now distinguish a Git commit from direct-run authorization artifacts. Direct-run evidence, review output, attestations, test results, attempt identity, push results, and PR results can never be imported, adopted, or promoted. §§4.3 and 4.14 permit the commit alone to be presented as untrusted input to a new service-controlled attempt requiring fresh identity, trusted tests, review, authoritative evidence, service-controlled ref, and broker-only push/PR. Step 7, §7, §8.1, §8.2, and §8.10 add the promotion regression with poisoned local artifacts and fresh-authority assertions.
+
+- **Finding 2 — SUSTAINED; add a frozen Dispatch 5 oracle.** §1, R1.1, R2.17, R4.11, R5.7, R10.4, and §§4.1–4.3 extend Dispatch 0 to five immutable profiles and make the Dispatch 5 profile mandatory. Steps 1, 3, 37, 41, 42, and 44 install, validate, execute, and record it. §8.7 defines the frozen required test `bootstrap.dispatch5.verdict_v4` and maps every v4 case to an exact Dispatch-0-owned assertion ID. Phase 2 cannot unblock until that exact profile has passed.
+
+- **Finding 3 — SUSTAINED; non-circular creation and selection identities.** R1.8, R1.10–R1.11, R1.17, §4.8, step 31, §§7–9, and the activation tests define `transition_id` before manifest creation as SHA-256 over exactly `prev_active_commit`, `target_commit`, `verifier_digest`, `approval_digest`, `timestamp`, and `nonce`, excluding `transition_id` and `target_manifest_digest`. The manifest ID names its creation transition; the head ID names the current selecting ledger record. Rollback and reselection bind through `ledger.target_manifest_digest == SHA-256(manifest_bytes)` and never require selecting-transition ID equality with the manifest creation ID.
+
+- **Finding 4 — SUSTAINED, scaled to process-crash consistency.** R1.10 and R1.18 and §4.8 specify exact ordering: stage and fsync the ledger record, atomically no-replace-publish it, fsync the ledger directory, fsync the temporary head, rename it, and fsync the containing directory. The third promised crash point is after that final barrier; ledger-publish-before-directory-fsync and head-rename-before-directory-fsync are separately enumerated partial states. Steps 6, 22, 31, and 36 and §§7, 8.1, 8.2, 8.6, and 8.10 require observed syscall ordering and SIGKILL between barriers. Assumption 11, §10, and residual risk 7 explicitly place power-loss and faulting-filesystem durability outside scope.

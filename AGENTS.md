@@ -6,7 +6,7 @@ Referenced by [CLAUDE.md](CLAUDE.md). Kept minimal; expanded as real conventions
 
 An orchestrator that dispatches Codex worker jobs from schema-validated specs, gates their output
 (integrity → scope → test → bound review), and opens PRs the human merges. Built gate by gate per
-`SETUP-BRIEF.md`.
+the invariants in `CLAUDE.md` (SETUP-BRIEF.md is not in any commit).
 
 ## Stack
 

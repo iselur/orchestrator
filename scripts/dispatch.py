@@ -9,7 +9,7 @@ One deterministic tool that encodes the Gate 1 procedure. Subcommands:
     dispatch await  <attempt-id>  bounded-sleep polling; exit with the attempt's result code
     dispatch cancel <attempt-id>  stop the attempt's systemd unit (never a recorded PID)
 
-Invariants (SETUP-BRIEF.md):
+Invariants (CLAUDE.md):
   - Every worker runs as a `systemd-run --user` transient unit in its own cgroup (Gate 2).
   - Validation first: schema-valid spec; approval digest matches; depends_on done; HALT absent;
     needs_network hard-refused (residual risk 13-B).
@@ -88,6 +88,9 @@ ERR_SANDBOX = "sandbox_denial"
 ERR_TIMEOUT = "timeout"
 ERR_INTEGRITY = "integrity"
 ERR_TEST = "test"
+ERR_TEST_NOT_RUN = "test_did_not_run"   # T1/R26: a required test SKIPped or produced no result
+ERR_NO_ISOLATION = "isolation_unavailable"   # T2/R26: D5 absent and exposure not accepted
+ERR_NO_ISOLATION_RC = 12                     # exit code for the refusal
 ERR_SCOPE = "scope"
 ERR_REVIEW = "review"
 ERR_WORKER = "worker_nonzero"
@@ -536,8 +539,12 @@ def isolation_available() -> bool:
     return ISO_WORKTREES.exists() and run(["sudo", "-n", "true"]).returncode == 0
 
 
-def worktree_root() -> Path:
-    return ISO_WORKTREES if isolation_available() else WORKTREES
+def worktree_root(iso: bool | None = None) -> Path:
+    """T2: pass the FROZEN launch decision. The default recomputes only for read-only callers
+    (reconcile/health); the launch path must always pass its decision explicitly."""
+    if iso is None:
+        iso = isolation_available()
+    return ISO_WORKTREES if iso else WORKTREES
 
 
 def grant_worker_acl(wt: Path) -> None:
@@ -686,6 +693,33 @@ def run_regression_gate(lc, wt, worker_commit, att, iso, ceiling_s) -> dict:
 
 # =============================================================== launch =======
 def cmd_launch(spec_id: str) -> None:
+    # T2 (decision R26) — ISOLATION FAILS CLOSED. Selected ONCE, FIRST — before preflight, the
+    # slot claim, the attempt directory, the worktree, and any worker-controlled code. Everything
+    # downstream is handed this decision; nothing recomputes it (a recomputation is a downgrade
+    # path). First deliberately: a box that cannot isolate cannot launch ANY spec, so no other
+    # error (missing spec, missing approval) may mask this refusal.
+    #
+    # The old behaviour silently fell back to running worker code as the operator whenever D5 was
+    # unavailable — with the operator's credentials, home, and network. That is the one catastrophe
+    # that is actually plausible on this box, and it was the DEFAULT on a fresh box or in CI.
+    #
+    # Break-glass is deliberately crude: an env var you type knowingly. No root secret, no
+    # single-use token, no sudoers helper, no redemption ledger — that machinery defends a
+    # single-tenant box from its own owner, and building it cost a day and shipped nothing.
+    iso = isolation_available()
+    exposed = os.environ.get("ORCH_ALLOW_UNISOLATED") == "1"
+    if not iso and not exposed:
+        die("REFUSING to launch: worker isolation (D5) is unavailable.\n"
+            "  Worker code would run as YOU — your home, your credentials, your network.\n"
+            "  Fix it:        ./scripts/setup-worker-user.sh\n"
+            "  Or accept it:  ORCH_ALLOW_UNISOLATED=1 ./scripts/dispatch launch " + spec_id + "\n"
+            "                 (that is FULL EXPOSURE, not a sandbox — it is recorded in the evidence)",
+            ERR_NO_ISOLATION_RC)
+    if not iso and exposed:
+        print("!!! UNISOLATED: worker code runs as the operator with full access to this host,\n"
+              "!!! its credentials and its network. You asked for this (ORCH_ALLOW_UNISOLATED=1).\n"
+              "!!! It is recorded in launch.json and in the reviewer's evidence.", file=sys.stderr)
+
     ctx = preflight(spec_id)
     spec, digest, approval = ctx["spec"], ctx["digest"], ctx["approval"]
 
@@ -714,8 +748,9 @@ def cmd_launch(spec_id: str) -> None:
         git("fetch", "--quiet", "origin", approval.get("base_branch", "integration"))
         base_sha = git("rev-parse", f"origin/{approval.get('base_branch', 'integration')}")
         branch = f"codex/{attempt_id}"
-        iso = isolation_available()
-        wt = worktree_root() / attempt_id
+        # T2: use the FROZEN decision from preflight. Never recompute — a second call to
+        # isolation_available() here is exactly the downgrade path we are closing.
+        wt = worktree_root(iso) / attempt_id
         if wt.exists():
             die(f"worktree {wt} already exists (attempt not unique?)", 9)
         git("worktree", "add", "--quiet", "-b", branch, str(wt), base_sha)
@@ -743,7 +778,10 @@ def cmd_launch(spec_id: str) -> None:
         "regression_command": spec.get("regression_command"),
         "regression_test_paths": spec.get("regression_test_paths", []),
         "hard_ceiling_hours": ceiling_h, "remediation": remediation,
-        "isolation": iso, "worker_unit": f"codex-worker-{attempt_id}",
+        # T2: the frozen decision + why it was allowed. `exposure_accepted` is the operator's
+        # knowing "yes, run this as me" — provenance never overstates the boundary.
+        "isolation": iso, "exposure_accepted": (not iso and exposed),
+        "worker_unit": f"codex-worker-{attempt_id}",
         "test_unit": f"codex-test-{attempt_id}", "created": now(),
     }, indent=2))
 
@@ -835,7 +873,15 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
         )
     (raw / "worker-prompt.txt").write_text(prompt)
 
+    # T2: consume the FROZEN launch decision — never recompute isolation here. A launch record that
+    # says "unisolated" without a recorded operator acceptance is not a thing cmd_launch can produce,
+    # so if we see one, the record was tampered with or hand-edited: refuse rather than run worker
+    # code as the operator on the strength of a file.
     iso = lc.get("isolation", False)
+    if not iso and not lc.get("exposure_accepted"):
+        finish("failed_launch", ERR_NO_ISOLATION,
+               detail="launch record has isolation:false without a recorded operator exposure "
+                      "acceptance — refusing to run worker code as the operator")
     ceiling_s = int(float(lc.get("hard_ceiling_hours", DEFAULT_CEILING_HOURS)) * 3600)
     # Codex flags common to both paths. Fast mode (priority service tier): faster wall-clock at the
     # SAME model + reasoning depth. `service_tier` is the real key (`model_service_tier` is rejected).
@@ -936,19 +982,70 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
     # The test_command runs WORKER-PRODUCED code — the real exfiltration path (SOL, D5). Under D5 it
     # runs as codex-worker with PrivateNetwork=yes (no API needed) and the operator's home inaccessible, so a
     # malicious test can neither read the operator's creds nor phone home. Otherwise it runs as the operator (fallback).
+    # T1 (R26): the runner writes a machine-readable PASS/SKIP/FAIL line per test to this path. The
+    # summary is written INSIDE the worktree (the worker's own writable area) but we only ever trust
+    # it to tell us what DIDN'T run — a worker that forges "PASS" for a test it deleted still fails,
+    # because the required set comes from the ORCHESTRATOR's checkout (required_tests()) and every
+    # required test must appear. The worker cannot add tests to our required list, only fail to
+    # satisfy it.
+    summary_path = wt / ".orch-test-summary"
+    test_env = {"ORCH_TEST_SUMMARY": str(summary_path)}
+
+    # T1b (R26) — HOLD THE GRADER OUT OF THE AGENT'S REACH.
+    # T1 made the orchestrator choose WHICH tests are required. That is not enough: the tests still
+    # EXECUTE from the worker's worktree, so a candidate whose approved scope includes tests/ can
+    # rewrite a required test to `exit 0` and pass the gate honestly. (Demonstrated, not theorised.)
+    # Every reward-hacking result in the literature reduces to the agent being able to touch the
+    # thing that scores it: METR observed o3 monkey-patching the evaluator and stealing the reference
+    # answer on 100% of trajectories for one task.
+    #
+    # So: the REQUIRED tests are restored from the ORCHESTRATOR's installed copy before the gate runs.
+    # A worker's edits to a required test are recorded and run only as SUPPLEMENTAL evidence — they
+    # can never satisfy the required set. A legitimately changed test becomes authoritative only once
+    # it is merged and installed (i.e. after a human has looked at it).
+    substituted = []
+    for rel in required_tests():
+        parent_copy, worker_copy = ROOT / rel, wt / rel
+        if not parent_copy.exists():
+            continue
+        parent_bytes = parent_copy.read_bytes()
+        if not worker_copy.exists() or worker_copy.read_bytes() != parent_bytes:
+            if worker_copy.exists():
+                (att / "raw" / f"worker-{Path(rel).name}").write_bytes(worker_copy.read_bytes())
+                substituted.append(rel)
+            worker_copy.parent.mkdir(parents=True, exist_ok=True)
+            worker_copy.write_bytes(parent_bytes)
+            worker_copy.chmod(0o755)
     if iso:
         with open(att / "test.log", "w") as tl:
             tcp = isolated_run(
                 lc["test_unit"], ["bash", "-c", lc["test_command"]], cwd=str(wt),
                 rw_paths=[str(wt)], private_network=True, ceiling_s=ceiling_s,
-                stdout=tl, stderr=subprocess.STDOUT)
+                env_extra=test_env, stdout=tl, stderr=subprocess.STDOUT)
         test_rc = tcp.returncode
     else:
-        tc = run(["bash", "-c", lc["test_command"]], cwd=str(wt))
+        tc = run(["bash", "-c", lc["test_command"]], cwd=str(wt), env={**os.environ, **test_env})
         (att / "test.log").write_text((tc.stdout or "") + (tc.stderr or ""))
         test_rc = tc.returncode
     if test_rc != 0:
         finish("failed_test", ERR_TEST, worker_commit=worker_commit, test_exit=test_rc)
+
+    # T1 (R26) — THE FIX for SPEC-015/1's false PASS. Exit code 0 is NOT evidence that the required
+    # tests ran: three trust-class tests SKIPped, `./scripts/test` still exited 0, and the reviewer
+    # certified them as proof. A test that did not RUN has not PASSED.
+    summary_txt = summary_path.read_text() if summary_path.exists() else ""
+    ran = parse_test_summary(summary_txt)
+    req = required_tests()
+    attested, detail = attest_tests(ran, req)
+    attestation = {"required": req, "observed": ran, "attested": attested, "detail": detail,
+                   # T1b: required tests the worker had modified. Their content was REPLACED with the
+                   # orchestrator's copy before the gate ran; the worker's versions are retained in
+                   # raw/ as evidence and are visible to the reviewer, but they graded nothing.
+                   "required_tests_restored_from_parent": substituted}
+    atomic_write(att / "test-attestation.json", json.dumps(attestation, indent=2))
+    if not attested:
+        finish("failed_test", ERR_TEST_NOT_RUN, worker_commit=worker_commit,
+               test_exit=test_rc, attestation=attestation)
 
     # --- step 7.5: OPTIONAL regression-proof gate (holistic-review #1) ----------
     # Prove the change's new test actually CATCHES the intended defect: the human-authored
@@ -962,7 +1059,7 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
             finish("failed_regression", ERR_REGRESSION, worker_commit=worker_commit, regression=reg)
 
     # --- step 8: reviewer (bound, fail-closed) --------------------------------
-    verdict, vraw = review(att, spec_id, lc, worker_commit)
+    verdict, vraw = review(att, spec_id, lc, worker_commit, detail)
     atomic_write(att / "review.json", json.dumps(verdict, indent=2) if verdict else "{}")
     binary_result = (evaluate_binary_review(
         verdict.get("verdict"), verdict.get("criteria", []),
@@ -1059,13 +1156,42 @@ def integrity(wt: Path, base: str, wc: str) -> tuple[dict, bool]:
     return res, ok
 
 
+def _glob_to_regex(g: str) -> re.Pattern:
+    """Translate a scope glob to a regex where `*` does NOT cross a path separator.
+
+    fnmatch's `*` matches `/` — so an approved scope of `scripts/lib/*.sh` also permitted
+    `scripts/lib/nested/evil.sh`. The scope gate is the only STRUCTURAL defence against a worker
+    writing outside its approved paths (everything else is a model being asked nicely), so a `*`
+    that silently descends is a hole in the one wall that does not depend on good behaviour.
+
+    Semantics now: `*` matches within one path segment; `**` (and a trailing `/**`) is recursive.
+    """
+    out, i = [], 0
+    while i < len(g):
+        c = g[i]
+        if c == "*":
+            if g[i:i + 2] == "**":            # `**` — recursive, may cross separators
+                out.append(".*")
+                i += 2
+                if g[i:i + 1] == "/":         # `a/**/b` — the `/` is optional (matches `a/b` too)
+                    out.append("/?")
+                    i += 1
+                continue
+            out.append("[^/]*")               # `*` — stays inside one segment
+        elif c == "?":
+            out.append("[^/]")
+        else:
+            out.append(re.escape(c))
+        i += 1
+    return re.compile("^" + "".join(out) + "$")
+
+
 def _match_glob(path: str, globs: list[str]) -> bool:
-    from fnmatch import fnmatch
     for g in globs:
-        if g.endswith("/**"):
+        if g.endswith("/**"):                 # keep the fast, explicit recursive-prefix case
             if path == g[:-3] or path.startswith(g[:-3] + "/"):
                 return True
-        elif fnmatch(path, g):
+        elif _glob_to_regex(g).match(path):
             return True
     return False
 
@@ -1103,6 +1229,58 @@ def _verdict_schema_for_attempt(att: Path) -> dict:
     return json.loads((pinned if pinned.exists() else VERDICT_SCHEMA).read_text())
 
 
+def parse_test_summary(text: str) -> dict[str, str]:
+    """Parse `scripts/test`'s machine-readable summary: one `PASS|SKIP|FAIL <path>` per line.
+
+    Only the summary lines are authoritative. Worker prose in test.log is NOT parsed — a worker
+    can print anything it likes, so the ONLY thing we trust is the runner's own per-test exit code,
+    which is what produced these lines (see scripts/test)."""
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2 and parts[0] in ("PASS", "SKIP", "FAIL"):
+            out[parts[1].strip()] = parts[0]
+    return out
+
+
+def attest_tests(summary: dict[str, str], required: list[str]) -> tuple[bool, str]:
+    """T1 (decision R26). A test that did not RUN has not PASSED.
+
+    This is the fix for the SPEC-015/1 false PASS: three trust-class tests SKIPped, the aggregate
+    command still exited 0, and the reviewer certified them as proof. Exit code 0 is NOT evidence
+    that the required tests ran.
+
+    Fail closed on:
+      - an EMPTY required set (round-10 finding: zero tests + zero assertions is a vacuous,
+        internally consistent "pass" — it must never authorize a review);
+      - any required test missing from the runner's summary (it never reported);
+      - any required test that SKIPped or FAILed.
+    """
+    if not required:
+        return False, ("no required tests selected — an empty required-test set cannot certify "
+                       "anything (fail closed)")
+    problems = []
+    for t in required:
+        status = summary.get(t)
+        if status is None:
+            problems.append(f"{t}: NO RESULT (test never reported)")
+        elif status != "PASS":
+            problems.append(f"{t}: {status}")
+    if problems:
+        return False, "required tests did not run and pass: " + "; ".join(problems)
+    return True, f"all {len(required)} required tests executed and passed"
+
+
+def required_tests() -> list[str]:
+    """Which tests MUST have run, selected by the ORCHESTRATOR from ITS OWN checkout — never from
+    the worktree, so a candidate cannot shrink its own required set by deleting test files.
+
+    Deliberately blunt: every test in the installed repo is required. One suite, it is fast, and a
+    cleverer selector is exactly the kind of mechanism we are no longer building speculatively
+    (R26 — gates are earned by real failures, not imagined ones)."""
+    return sorted(str(p.relative_to(ROOT)) for p in (ROOT / "tests").glob("*.sh"))
+
+
 def evaluate_binary_review(verdict: str, criteria: list[dict], scope_finding: str,
                            regression_finding: str, security_findings: str) -> str | None:
     """Evaluate only the binary rubric; advisory quality is deliberately not an input."""
@@ -1134,7 +1312,7 @@ def validate_review_verdict(verdict: dict, schema_obj: dict, lc: dict, wc: str) 
         verdict.get("security_findings")) is not None
 
 
-def review(att: Path, spec_id: str, lc: dict, wc: str):
+def review(att: Path, spec_id: str, lc: dict, wc: str, test_attestation: str = "unknown"):
     # policy-note item 2: mandatory structured rubric. The worker's plan/checklist is NEVER
     # included here (confirmation-bias contamination) — only spec, diff, and orchestrator evidence.
     wt = Path(lc["worktree"])
@@ -1184,7 +1362,11 @@ def review(att: Path, spec_id: str, lc: dict, wc: str):
         "\n\n=== SPEC ===\n" + spec_path(spec_id).read_text() +
         f"\n\n=== BINDING ===\nspec_digest: {lc['spec_digest']}\nbase_sha: {lc['base_sha']}\n"
         f"worker_commit: {wc}\n\n=== EVIDENCE (from the orchestrator, not the worker) ===\n"
-        f"integrity: PASS\nscope: PASS\ntest_command: {lc['test_command']} exited 0\n\n"
+        f"integrity: PASS\nscope: PASS\n"
+        # T1 (R26): the reviewer used to be told only "test_command exited 0" — which is how it
+        # certified SPEC-015's three SKIPPED tests as proof. It now gets the orchestrator's own
+        # per-test attestation. This is control-plane evidence, not worker-authored text.
+        f"tests: {test_attestation}\n\n"
         "=== DIFF ===\n" + diff
     )
     (att / "raw" / "review-request.txt").write_text(req)

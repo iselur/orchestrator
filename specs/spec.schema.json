@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/iselur/orchestrator/specs/spec.schema.json",
   "title": "Orchestrator spec",
-  "description": "Schema for specs/<id>.yaml. Specs are schema-validated, never regex-parsed (SETUP-BRIEF.md §Control plane). Approval lives in .orchestrator/approvals/, runtime state in .orchestrator/state/ — a spec carries NO status/branch/attempt fields.",
+  "description": "Schema for specs/<id>.yaml. Specs are schema-validated, never regex-parsed (see CLAUDE.md). Approval lives in .orchestrator/approvals/, runtime state in .orchestrator/state/ — a spec carries NO status/branch/attempt fields.",
   "type": "object",
   "additionalProperties": false,
   "required": ["id", "title", "risk_class", "objective", "in_scope", "acceptance_criteria", "test_command"],

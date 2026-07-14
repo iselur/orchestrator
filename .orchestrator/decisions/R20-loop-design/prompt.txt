@@ -1,0 +1,8 @@
+You are SOL (gpt-5.6) on the research/consult lane (web search ENABLED, repo read-only). Ledger R20, review-only — no implementation.
+
+TASK: The operator flagged this X/Twitter post describing an agent "loop design": https://x.com/0xcodila/status/2072329149520232639 (author @0xcodila). 
+1. Retrieve the thread's actual content (direct fetch, nitter/xcancel mirrors, search for the thread text, the author's blog/repo if the thread links one). If you cannot recover the substantive content, SAY SO EXPLICITLY and stop — do not invent its design from the handle or vibes.
+2. Reconstruct the loop design faithfully: control flow, roles, gating, memory/state, review/verification, human touchpoints.
+3. Compare against OUR orchestrator (read CLAUDE.md, AGENTS.md, scripts/dispatch.py, .orchestrator/plans/PLAN-003.md + PLAN-004.md): where their design is stronger/weaker/equivalent, and what specifically is worth reusing here (concrete mechanisms, not slogans).
+4. Recommend: reuse-candidates ranked, each with effort estimate and which existing plan/spec it would slot into.
+CAPTURE SOURCES: cite every URL used with retrieval evidence (claim-level, not vendor-level). End with "REVIEW COMPLETE".

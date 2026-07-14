@@ -1,4 +1,4 @@
-# Orchestrator runtime — tracked vs untracked per SETUP-BRIEF.md §Control plane.
+# Orchestrator runtime — tracked vs untracked (see CLAUDE.md).
 # Approval artifacts and per-attempt manifests/results/reviews ARE tracked (provenance).
 # Raw logs, event streams, mutable state, and worktrees are NOT (size/secrets).
 

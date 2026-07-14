@@ -1,0 +1,13 @@
+Two material defects remain.
+
+1. **The authorization and replay boundary collapses after one authorized exposure.** Sections 3.3–3.5 and 4.2 place pending artifacts and consumption records under operator-controlled storage, owned by the invoking EUID. Section 4.3 deliberately gives exposure-mode payloads that same EUID and full host-state access. Such payloads can therefore mint apparently valid future artifacts, supply arbitrary `authorized_by` labels, or delete consumption records and replay an already authorized artifact. A later dispatch can then run as the operator without a fresh human decision. This violates criterion (a), and the claimed human provenance is unvalidatable under criterion (d).
+
+   Minimal amendment: issuance and consumption must cross a trust boundary unavailable to exposure-mode payloads. For example, use a separately privileged authorization broker or hardware-backed human-presence signature, with an append-only redemption ledger the operator UID cannot modify or delete. Sign all binding fields and redeem atomically. Add a regression where an authorized exposure payload attempts to forge an artifact, erase consumption, and replay authorization; every subsequent dispatch must refuse without new human authorization.
+
+2. **The live canary lacks a positive control for the worker-side read probe.** Sections 3.13, 4.5, and 8.5 prove that the operator can read the protected canary, but they never prove that the isolated worker’s read primitive and exact-path transfer work. A worker command can emit the start marker and classify any command, quoting, executable, or path-transfer failure as “unreadable,” producing a green test without testing filesystem isolation. This violates criterion (c).
+
+   Minimal amendment: create a second, worker-readable control token and require the same service, probe implementation, and path-passing mechanism to read and compare it successfully before attempting the operator-home canary. Require separate markers for successful control read, protected-path attempt, and observed denial; distinguish probe/tool failures from acceptable isolation outcomes. Add sabotage cases proving that skipping the read, breaking the probe command, or supplying the wrong path makes the drill fail.
+
+The frozen-mode design otherwise covers all cited execution sites: §§4.1–4.3 and 8.3 make the selector the sole caller, thread the required decision through the sites corresponding to lines 540, 623, 717, 860, and 946, and place selection before `claim_slot` and attempt creation. The no-downgrade tests are adequate. The exposure-mode naming and warnings cannot reasonably be mistaken for protection, and the two mandatory environments are executable and sufficiently specified.
+
+VERDICT: BLOCK

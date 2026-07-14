@@ -1,0 +1,437 @@
+---
+id: PLAN-005
+revision: 2
+created: 2026-07-14
+author: gpt-5.6-sol
+status: draft
+ledger_ref: R16
+lane: high-assurance
+supersedes: PLAN-005 revision 1 (working draft labeled PLAN-001)
+---
+
+# PLAN-005 — Refuse dispatch when D5 isolation is unavailable
+
+> **Brief-caliber standard (operator, 2026-07-13):** every plan artifact must reach the depth of the
+> original SETUP-BRIEF — a standalone document detailed enough that an agent can execute it
+> autonomously with NO further clarification. Not a bullet sketch. If a section is genuinely N/A, write
+> "N/A because …". Codex drafts to this template; Claude challenges + authorizes; both then follow it.
+
+## 1. Decision & non-goals
+
+Dispatch will make one immutable execution-mode decision after validating the requested spec and before `claim_slot`, attempt-directory creation, branch/worktree creation, or execution of worker-authored code. If D5 isolation is available, every worker, TEST, regression, retry, remediation, and related execution path must use it. If D5 isolation is unavailable, dispatch must refuse without creating durable attempt state or launching code, unless the operator supplies both the exact invocation-scoped value `ORCH_ALLOW_UNISOLATED=1` and a valid, unused, separately created human authorization artifact. That exception is named and documented as `UNISOLATED_EXPOSURE`: it accepts full exposure of operator credentials and host state and provides no security boundary.
+
+Non-goals:
+
+- Building, describing, or testing a “hardened” same-user fallback.
+- Detecting whether operator credentials happen to exist. Credential discovery is not a safe authorization predicate.
+- Adding environment scrubbing, user/network/mount/PID namespaces, filesystem filtering, IPC filtering, descendant containment, or an `unshare` capability ladder.
+- Claiming that break-glass execution protects secrets, files, sockets, processes, or the host network.
+- Redesigning the established `codex-worker` UID, hardened systemd services, ACL layout, `/srv/codexwork/worktrees`, or `scripts/setup-worker-user.sh`.
+- Changing spec semantics, gate order, branch targets, merge authority, or review policy.
+- Solving unrelated audit findings.
+- Making break-glass persistent, automatic, reusable, or suitable for normal operation.
+- Auto-merging this trust-critical change.
+
+The deleted hardened-fallback requirements are preserved in this plan only as an entry bar for any future proposal.
+
+## 2. Current-state evidence (facts, with citations)
+
+### Repository facts reported and re-verified by the challenge
+
+Claude’s 2026-07-14 challenge re-verified the following at commit `995cc13`. These are quoted audit facts, not a claim that this revision independently re-read the repository:
+
+- [`scripts/dispatch.py:527`](/home/val/orchestrator/scripts/dispatch.py:527) contains the isolation availability decision whose false result currently permits silent fallback instead of refusal.
+- [`scripts/dispatch.py:540`](/home/val/orchestrator/scripts/dispatch.py:540) calls `isolation_available()` independently while selecting the worktree root.
+- [`scripts/dispatch.py:623`](/home/val/orchestrator/scripts/dispatch.py:623) begins `run_regression_gate`; its same-user branch near line 649 executes both worker-authored regression runs as the operator with an inherited environment and host networking.
+- Durable attempt setup currently begins around [`scripts/dispatch.py:701`](/home/val/orchestrator/scripts/dispatch.py:701), with `claim_slot` recording `launching` state around line 707.
+- [`scripts/dispatch.py:717`](/home/val/orchestrator/scripts/dispatch.py:717) performs another independent isolation decision for launch behavior.
+- [`scripts/dispatch.py:860`](/home/val/orchestrator/scripts/dispatch.py:860) begins the fallback worker launch, which runs Codex as the operator with host access.
+- [`scripts/dispatch.py:946`](/home/val/orchestrator/scripts/dispatch.py:946) begins the fallback TEST launch; the quoted implementation near lines 946–949 is equivalent to `run(["bash", "-c", test_command])`, inheriting the operator environment, UID, filesystem access, and network.
+- `AGENTS.md` defines the intended D5 boundary: worker and gate TEST run as `codex-worker` in hardened systemd services, their worktrees live below `/srv/codexwork/worktrees`, and the operator’s home and credentials are inaccessible.
+- `./scripts/test` is the repository test entry point and discovers `tests/*.sh`.
+
+Before implementation, the executor must re-inventory these locations at the implementation HEAD. The inventory must include initial worker launch, retries, remediation launches, primary TEST, both regression runs, review processes that can execute tools, and post-test commands capable of running worker-controlled hooks or configuration. If the control flow has materially changed, implementation must stop and PLAN-005 must be re-challenged rather than partially applied by stale line number.
+
+### Host facts retained as background
+
+The challenge also verified on Ubuntu 24.04.4, kernel 6.8.0-111:
+
+```text
+unshare --user --map-current-user --net /bin/true
+# fails while writing /proc/self/uid_map: Operation not permitted
+
+unshare --user --net /bin/true
+# succeeds
+```
+
+The reported cause is the host’s AppArmor restriction on unprivileged user-namespace UID mapping. These facts explain why revision 1’s mapped-user probe was invalid on the primary host. They do not select or validate any mechanism in revision 2: the entire probe ladder and namespace fallback have been deleted.
+
+### Security fact governing the redesign
+
+Same-user code retains the operator’s host filesystem identity for ordinary VFS access even when it displays an overflow UID inside an unmapped user namespace. It can therefore read operator-readable credential files, interact through visible pathname sockets and shared host facilities, write secrets into output or the worktree, and leave descendants or state for later processes. Environment and IP-network isolation alone cannot establish the required credential boundary.
+
+## 3. Requirements & acceptance criteria (numbered, testable)
+
+1. **Single preflight decision.** For each dispatch invocation, `isolation_available()` shall be evaluated exactly once for execution-mode selection, after spec parsing and schema validation but before `claim_slot`, attempt-directory creation, branch/worktree creation, or any worker, TEST, regression, review, retry, or remediation execution.
+
+2. **Default refusal.** If that evaluation returns false and `ORCH_ALLOW_UNISOLATED` is absent or is any value other than the literal string `1`, dispatch shall exit nonzero with a distinct preflight-refusal classification. It shall not claim a slot, create an attempt directory, branch, or worktree, or launch any subprocess containing worker-authored code.
+
+3. **Authorization required in addition to the environment variable.** If isolation is unavailable, `ORCH_ALLOW_UNISOLATED=1` without a valid, unused, invocation-bound human authorization artifact shall refuse with the same no-state and no-execution guarantees.
+
+4. **Per-use authorization.** A break-glass authorization artifact shall be accepted only when it is a regular, non-symlink file under the configured operator-controlled authorization directory; is owned by the invoking operator; has mode `0600`; matches the current spec ID and digest, repository HEAD, repository identity, and operator UID; contains the exact exposure acknowledgement; is within its validity window; and has never been consumed. Validation errors shall fail closed without consuming the artifact.
+
+5. **Replay prevention.** Immediately after successful authorization validation and before `claim_slot`, dispatch shall create an atomic `O_CREAT|O_EXCL` consumption record for the authorization ID. A previously consumed ID shall refuse. A crash after consumption shall spend the authorization rather than make it reusable.
+
+6. **Immutable modes.** The only launchable execution modes shall be `ISOLATED` and `UNISOLATED_EXPOSURE`. The selected decision shall be immutable and passed explicitly to `worktree_root`, worker launch, retries, remediation, primary TEST, both regression-gate runs, and every other process-capable consumer found by the implementation inventory.
+
+7. **No recalculation or downgrade.** No consumer other than the preflight selector shall call `isolation_available()` or infer mode independently. Failure, timeout, cleanup error, retry, or remediation transition after selecting `ISOLATED` shall fail the attempt and shall never select or invoke `UNISOLATED_EXPOSURE`.
+
+8. **No false protection claim.** `UNISOLATED_EXPOSURE` shall use the existing same-user behavior without presenting environment scrubbing, namespace probes, credential detection, or other partial controls as a security boundary. Its stderr warning and documentation shall say that worker, TEST, regression, review, retry, and remediation code may access all operator-readable credentials and host state and may communicate over the operator’s available channels.
+
+9. **Break-glass observability.** A launched exposure-mode attempt shall record the mode, authorization ID, authorization artifact SHA-256, authorizer label, reason, issue/expiry timestamps, and consumption-record path in existing launch/evidence metadata. Secret values shall never be added to diagnostics or evidence.
+
+10. **Healthy D5 remains mandatory and preferred.** If isolation is available, dispatch shall select `ISOLATED` even when break-glass variables or an authorization artifact are present. It shall not consume the unnecessary authorization.
+
+11. **Non-vacuous refusal tests.** Every refusal test shall prove that it passed spec validation, reached the intended preflight branch, created no durable attempt state, and launched no worker-controlled payload. Each fixture shall also have a positive control that reaches a launch under either healthy D5 or a valid break-glass authorization.
+
+12. **Two mandatory validation environments.** Release acceptance shall require one report from a real D5-unavailable/userns-restricted environment proving refusal and one report from a real D5-available environment exercising the isolated worker and gate path. A refusal-only result shall be reported as incomplete security validation, not as a full pass.
+
+13. **Non-vacuous live canary drill.** `tests/worker_isolation.sh` shall dynamically resolve the invoking operator’s passwd home, create a harmless disk canary there, prove the operator can read it, prove a live isolated worker attempted and failed to read it, and fail if canary creation, the worker probe, or result verification did not occur. It shall contain no hard-coded `/home/val` and shall clean up reliably.
+
+14. **Current broken state is demonstrated.** A regression test shall fail against commit `995cc13` because the D5-unavailable fixture reaches the same-user launch marker, and shall pass after implementation because dispatch refuses before that marker or durable state exists.
+
+15. **Full validation cannot be skipped.** Missing D5 in the D5-required environment, an unexecuted canary probe, an unavailable required fixture, or an early return shall produce failure or an explicit incomplete result. It shall never be counted as the paired high-assurance validation passing.
+
+## 4. Design / approach
+
+### 4.1 Immutable decision object
+
+Add equivalents of:
+
+```python
+class ExecutionMode(Enum):
+    ISOLATED = "isolated"
+    UNISOLATED_EXPOSURE = "unisolated_exposure"
+
+
+@dataclass(frozen=True)
+class ExecutionDecision:
+    mode: ExecutionMode
+    isolation_available: bool
+    authorization_id: str | None = None
+    authorization_sha256: str | None = None
+```
+
+There is no launchable `AUTO`, `FALLBACK`, or mutable boolean mode. Refusal is an exception/result from preflight, not a mode that downstream code can reinterpret.
+
+`select_execution_decision(...)` is the sole caller of `isolation_available()`:
+
+1. Evaluate D5 availability once.
+2. If available, return `ISOLATED`. Ignore and do not consume unnecessary break-glass authorization.
+3. If unavailable and the override is not exactly `1`, raise the dedicated preflight refusal.
+4. If unavailable and the override is exactly `1`, validate and consume the separate authorization artifact.
+5. Return `UNISOLATED_EXPOSURE` carrying its non-secret evidence identifiers.
+
+The selector runs before attempt-directory creation and before `claim_slot`.
+
+### 4.2 Human authorization artifact
+
+Break-glass requires:
+
+```text
+ORCH_ALLOW_UNISOLATED=1
+ORCH_UNISOLATED_AUTHORIZATION=/absolute/path/to/pending/<authorization-id>.json
+```
+
+The artifact is a separate operator action, not something dispatch may synthesize in response to the environment variable. Its schema is:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "unisolated-exposure",
+  "authorization_id": "<unique identifier>",
+  "repository": "<canonical repository identity>",
+  "repository_head": "<40-hex commit>",
+  "spec_id": "SPEC-NNN",
+  "spec_sha256": "<64-hex digest>",
+  "operator_uid": 1000,
+  "authorized_by": "<human identity label>",
+  "issued_at": "<UTC RFC3339>",
+  "expires_at": "<UTC RFC3339, no more than 15 minutes after issued_at>",
+  "reason": "<nonempty operational justification>",
+  "acknowledgement": "I authorize unisolated execution with full exposure of my credentials and host state for this dispatch."
+}
+```
+
+The pending file must reside below `.orchestrator/unisolated-authorizations/pending/`, be a regular non-symlink file, be owned by the invoking EUID, and have mode `0600`. Unknown fields, malformed timestamps, future issue times, expired artifacts, excessive validity windows, identity mismatches, digest mismatches, or missing fields refuse.
+
+After complete validation, dispatch creates `.orchestrator/unisolated-authorizations/consumed/<authorization-id>.json` atomically with `O_CREAT|O_EXCL`, mode `0600`. The consumption record contains the artifact digest, binding fields, consumption time, and process ID. Existing consumption means refusal. A valid consumption record is preserved and included in attempt evidence; a crash after consumption requires new human authorization.
+
+This mechanism proves a separate, invocation-bound operator action. It does not make same-user execution safe.
+
+### 4.3 Control-flow threading
+
+The selected `ExecutionDecision` becomes a required argument, with no default, for:
+
+- `worktree_root`, replacing its independent call at line 540;
+- launch metadata construction near line 717;
+- initial worker launch and every retry;
+- remediation launches;
+- primary TEST;
+- both base-overlay and candidate calls in `run_regression_gate`;
+- review processes that can execute tools;
+- any post-test command identified during inventory that can execute worker-controlled hooks or configuration.
+
+`ISOLATED` always selects the existing `codex-worker`/systemd path. An isolated launch failure is terminal for that attempt.
+
+`UNISOLATED_EXPOSURE` explicitly selects the existing same-user worker and command paths. Those paths must be renamed in diagnostics and internal APIs so they cannot be mistaken for a security fallback. No credential registry or namespace launcher is added.
+
+### 4.4 Refusal behavior
+
+A refusal emits a concise stderr diagnostic containing:
+
+- that D5 isolation is unavailable;
+- that no worker-controlled code was launched;
+- the D5 recovery action, `scripts/setup-worker-user.sh`;
+- that `ORCH_ALLOW_UNISOLATED=1` alone is insufficient;
+- where the per-use human authorization contract is documented.
+
+It must not reveal environment values or credential contents. Invalid authorization does not create an attempt directory, claim a slot, create Git state, or create a consumption record.
+
+### 4.5 Live isolation canary
+
+Extend `tests/worker_isolation.sh` with a clearly separated live drill:
+
+1. Resolve the operator home from the passwd database for `id -u`; do not trust `$HOME`.
+2. Create a uniquely named mode-`0700` temporary directory under that home and a mode-`0600` harmless random canary file.
+3. Read and compare the canary as the operator, proving the positive side.
+4. Launch the actual isolated service as `codex-worker`.
+5. Have the worker emit a fixed probe-started marker and attempt to read the exact canary path without printing its contents.
+6. Require the probe-started marker and an access-denied/unreadable result.
+7. Fail if the canary was absent, the positive operator read failed, the service did not run, or the probe result was not observed.
+8. Remove the canary through an EXIT/interrupt trap and verify cleanup. Cleanup failure fails the drill.
+
+### 4.6 Future hardened-fallback entry bar
+
+Any future plan proposing protected execution without D5 must, before authorization, provide all of:
+
+- A filesystem boundary that excludes operator homes, credential locations, `/run/user/$UID`, host `/proc`, and unrelated writable shared state.
+- Pathname Unix-socket and relevant IPC/shared-memory isolation.
+- A private, deliberately constructed `/proc` view.
+- Descendant lifecycle containment using a PID boundary plus reliable whole-tree kill/cgroup enforcement.
+- Direct and indirect network containment.
+- Coverage of the worker itself and every TEST, regression, review, retry, remediation, hook-capable, and post-test execution.
+- One exact immutable sandbox submode; no payload-time probe ladder or downgrade.
+- Representative compatibility probes rather than `/bin/true`.
+- Mandatory positive execution in a capable environment plus mandatory refusal in an incapable environment.
+- Disk, environment, `/proc`, pathname-socket, network, and double-fork canaries with positive controls.
+
+Credential-file or environment-name discovery may provide warnings but shall not authorize same-user execution.
+
+### 4.7 Alternatives considered
+
+1. **Minimal fail-closed refusal with separately authorized exposure — selected.** It closes the automatic fail-open immediately and makes the emergency exception truthful and auditable without claiming an incomplete sandbox is safe.
+
+2. **Environment scrub plus user/network namespace.** Rejected. It leaves operator-readable files, pathname sockets, host state, output channels, and descendant lifecycle exposed. The mapped form also fails on the verified primary host.
+
+3. **Credential-registry-based automatic allowance.** Rejected. Credential discovery is incomplete, racy, and unable to prove that arbitrary same-user code lacks access to secrets.
+
+4. **Remove break-glass entirely.** Stronger, but not selected because the governing disposition retains an emergency path. The retained path therefore requires a separate, one-use human authorization and an explicit full-exposure acknowledgement.
+
+## 5. Affected boundaries & consumers
+
+- **Operator-to-worker trust boundary:** automatic same-user execution is removed. Break-glass crosses this boundary only through explicit exposure acceptance.
+- **Preflight-to-durable-state boundary:** refusal must precede attempt-directory creation, `claim_slot`, Git branch/worktree creation, and evidence initialization.
+- **Execution-mode contract:** `worktree_root`, launch selection, worker/retry/remediation, TEST, regression, review, and hook-capable post-processing consume the same immutable object.
+- **D5 boundary:** existing `codex-worker`, systemd hardening, ACLs, and `/srv/codexwork/worktrees` remain authoritative.
+- **Authorization/evidence boundary:** pending and consumed exposure artifacts are operator-controlled records; the artifact digest and authorization ID become launch evidence.
+- **Test boundary:** deterministic state-machine regressions are necessary but insufficient. Live D5 and D5-unavailable reports form the high-assurance acceptance pair.
+- **Documentation boundary:** `CLAUDE.md` and operator-facing diagnostics must describe break-glass as full exposure.
+- **Downstream consumers:** attempt manifests, launch metadata readers, integrity hashing, bound review, retries, remediation, and cleanup must tolerate and preserve the new mode and authorization fields.
+
+No spec-schema change is intended unless implementation exposes mode or authorization as spec input. It should not: break-glass is an operator invocation control, not worker-controlled spec content.
+
+## 6. Ordered implementation steps
+
+1. Re-inventory `scripts/dispatch.py` at HEAD, beginning with the quoted sites at lines 527, 540, 623, 717, 860, and 946. Record every process-capable consumer and the first durable mutation. Stop for plan refresh if the audited topology has materially changed.
+
+2. In `scripts/dispatch.py`, add the frozen execution-mode types, dedicated preflight-refusal result, and the single selector. Place selection after complete spec validation but before attempt-directory creation and `claim_slot`.
+
+3. Implement strict authorization-artifact parsing, path/ownership/mode checks, binding validation, expiry enforcement, exact acknowledgement validation, canonical hashing, and atomic one-use consumption.
+
+4. Change `worktree_root` and launch metadata construction to require the immutable decision. Remove their independent isolation checks.
+
+5. Thread the decision through initial worker launch, retries, remediation, TEST, both `run_regression_gate` executions, review execution, and every additional consumer found in step 1. Remove automatic fallback and make isolated launch failures terminal.
+
+6. Retain the existing same-user mechanics only behind the explicit `UNISOLATED_EXPOSURE` decision. Rename warnings and evidence so the path is never described as isolated, sandboxed, hardened, or credential-safe.
+
+7. Add refusal, artifact, replay, single-probe, no-downgrade, and consumer-routing regressions. Every negative case must include durable-state snapshots, payload markers, exact reason assertions, and a positive control.
+
+8. Extend `tests/worker_isolation.sh` with the dynamic-home live canary drill, positive operator read, observed worker probe, denial assertion, and reliable cleanup.
+
+9. Update `CLAUDE.md` with the exact two-variable invocation, artifact schema, one-use semantics, full-exposure warning, recovery guidance, prohibition on persistence, and requirement for per-use human authorization.
+
+10. Add or update evidence-schema handling for `execution_mode`, authorization identifiers, artifact digest, and consumption record. Preserve integrity hashing.
+
+11. Run deterministic repository tests, then produce the two mandatory environment reports. Do not request authorization based on only one environment.
+
+12. Submit the implementation through the high-assurance lane. The resulting trust-critical PR is never eligible for automatic merge.
+
+## 7. Failure modes & blast radius
+
+| Trigger | Consequence | Required mitigation |
+|---|---|---|
+| D5 probe returns false | Routine dispatch unavailable | Refuse before state; restore D5. |
+| D5 probe falsely returns true | Isolated launch may fail later | Fail the attempt; never downgrade. |
+| Probe result changes after preflight | Runtime reality differs from snapshot | Preserve the immutable decision; isolated failure remains terminal. |
+| Override is absent, misspelled, or truthy-looking | Emergency launch refused | Accept only literal `1` plus a valid artifact. |
+| Artifact is malformed, stale, mismatched, unsafe, or missing | Break-glass refused | No consumption, attempt state, or execution. |
+| Authorization is replayed | Repeated exposure without new consent | Atomic consumption causes refusal. |
+| Crash follows consumption | Authorization is spent without launch | Require a fresh human artifact; safety wins over convenience. |
+| A consumer recalculates isolation | Mixed roots or silent downgrade | Required decision argument, call-count regression, and consumer markers. |
+| Isolated retry/remediation falls into same-user code | Unauthorized credential exposure | Terminal failure and explicit no-fallback tests. |
+| Break-glass is used | Full operator credential and host-state exposure | Prominent warning, per-use artifact, evidence, incident-aware operator decision. |
+| Evidence omits authorization | Exposure becomes unauditable | Treat attempt as integrity failure. |
+| Canary or worker probe never runs | Vacuous green isolation test | Fail the live drill. |
+| Only the refusal environment is available | Hardened path remains untested | Report validation incomplete; do not authorize. |
+| Only the D5 environment is available | Broken-state refusal remains unproven | Report validation incomplete; do not authorize. |
+| Canary cleanup fails | Harmless test artifact remains in operator home | Fail visibly and report the exact cleanup target. |
+
+Worst case if this ships incorrectly: worker-authored code runs as the operator without a valid human authorization and can read or exfiltrate credentials, mutate host state, or persist descendants. Recovery is to stop dispatches, preserve evidence, revoke or rotate potentially exposed credentials, inspect host and repository state, remove persistence, restore D5, revert or repair the dispatcher while it remains paused, and repeat both validation environments. Secret disclosure is irreversible.
+
+## 8. Validation plan (falsifiable)
+
+### 8.1 Regression that fails on the current state
+
+Using a valid temporary spec and repository fixture:
+
+1. Arrange for the real preflight path to observe D5 as unavailable.
+2. Install unique markers for worker, TEST, both regression runs, review, retry, and remediation execution.
+3. Snapshot attempt directories, slot state, branches, and worktrees.
+4. Invoke the real dispatch entry point without break-glass.
+5. Require the dedicated nonzero refusal status and exact decision reason.
+6. Require every execution marker to be absent.
+7. Require the durable-state snapshot to remain unchanged.
+8. Require diagnostics to state that no worker was launched.
+9. Run the same valid fixture with healthy isolation and require an isolated launch marker.
+
+Against commit `995cc13`, the unavailable-D5 case fails because it reaches same-user execution. After revision 2 implementation, it passes by refusing before state.
+
+### 8.2 Authorization cases
+
+Mechanically test:
+
+- Literal `1` without an artifact refuses.
+- `true`, `yes`, `01`, whitespace variants, and empty values refuse even with an otherwise valid artifact.
+- Malformed JSON, symlink, wrong owner/mode, wrong repository, wrong HEAD, wrong spec ID/digest, wrong UID, missing acknowledgement, future issue time, expiry, and overlong validity refuse without consumption or launch.
+- A valid artifact plus literal `1` reaches the harmless exposure-mode payload, emits the full-exposure warning, creates one consumption record, and records matching evidence.
+- Reuse of that artifact refuses and does not launch.
+- A crash after consumption leaves the authorization unusable.
+- Healthy D5 selects `ISOLATED` and does not consume a supplied exposure authorization.
+
+Every refusal case must assert that the valid spec passed parsing and that removing the targeted defect changes the outcome.
+
+### 8.3 Immutable-decision and routing cases
+
+Instrument `isolation_available()` to return alternating values if called more than once. Require:
+
+- Exactly one call per dispatch.
+- `worktree_root`, launch metadata, worker, TEST, both regression runs, retry, remediation, and review observe the same decision object.
+- An injected isolated-launch failure invokes the isolated launcher first, fails the attempt, and never invokes exposure mode.
+- An injected failure in isolated TEST, regression, retry, remediation, or cleanup never recalculates or downgrades.
+- Static inspection finds no call to `isolation_available()` outside its definition and the selector.
+
+Positive markers must prove each relevant payload actually ran in the corresponding success case.
+
+### 8.4 Mandatory environment A: D5 unavailable, userns restricted
+
+On a real host/container where D5 is unavailable and unprivileged mapped user namespaces are denied:
+
+1. Record OS, kernel, AppArmor userns setting, repository commit, spec digest, and D5 probe result.
+2. Run the valid-spec refusal test through the real entry point.
+3. Prove no worker-controlled process or durable attempt state was created.
+4. In a disposable, non-secret fixture, create one valid exposure authorization and prove the harmless positive-control payload launches only with both required inputs.
+5. Prove mapped `unshare` denial only as host background evidence; dispatch must not call `unshare`.
+
+This environment proves fail-closed behavior. It does not prove D5 isolation.
+
+### 8.5 Mandatory environment B: D5 available
+
+On a host with the real worker account, ACLs, worktree root, sudo policy, and hardened systemd services:
+
+1. Record the same host and commit metadata plus successful D5 preflight.
+2. Dispatch a harmless valid fixture through the real isolated worker path.
+3. Prove the worker, primary TEST, and both regression runs execute as `codex-worker` in their expected services and worktree location.
+4. Inject an isolated launch failure and prove no same-user process runs.
+5. Run `tests/worker_isolation.sh` and require the dynamic-home canary drill to execute fully.
+6. Prove the operator can read the canary, the isolated worker emits its probe marker, and the worker cannot read the canary.
+7. Require cleanup and absence of hard-coded `/home/val`.
+
+This environment proves the intended boundary actually executes.
+
+### 8.6 Completion rule
+
+Produce one machine-readable report from each environment, bound to the same implementation commit and test digest. The high-assurance validation is complete only when both reports pass. A single refusal report, a simulated isolated result, an early success, or a skipped live canary is explicitly `INCOMPLETE`, never `PASS`.
+
+Run, at minimum:
+
+```text
+python3 -m py_compile scripts/dispatch.py
+./tests/isolation_fail_closed.sh
+./tests/worker_isolation.sh
+./scripts/test
+```
+
+Any environment-specific prerequisite failure must be reported against the corresponding mandatory report; it cannot be converted into a full-suite success.
+
+## 9. Rollback / irreversibility
+
+There is no data migration. The authorization and evidence fields are additive.
+
+To roll back an implementation defect:
+
+1. Stop all new dispatches.
+2. Preserve attempt, authorization, consumption, and validation evidence.
+3. Restore and verify D5.
+4. Revert the implementation only while dispatch remains administratively paused.
+5. Correct the fail-closed implementation and repeat both mandatory environments before resuming.
+
+Rollback must never restore automatic same-user fallback. The safe degraded state is “dispatcher unavailable.”
+
+Break-glass exposure is irreversible if code observes or copies a credential. After any suspicious use, treat credentials and host state as potentially compromised and follow the recovery procedure in section 7.
+
+## 10. Open questions / operator decisions
+
+None. Claude’s disposition establishes the governing choices: minimal fail-closed refusal, separately authorized full-exposure break-glass, paired non-vacuous validation, and the folded live canary drill.
+
+Each future break-glass use still requires its own human authorization artifact; that is an operational authorization, not an unresolved design question.
+
+## 11. Provenance (filled during challenge/authorization — NOT by the drafter)
+
+- **Challenge (Claude):** Revision 2 challenge pending. The 2026-07-14 challenge of revision 1 identified two blocking defects and required the non-vacuous worker-isolation drill.
+- **Disposition (drafter):** Pending revision 2 challenge. The prior SOL review dispositions implemented by this draft are recorded below.
+- **Dual-validation (high-assurance/control-plane):** Prior fresh-context SOL design review: `BLOCK`, one round. Revision 2 SOL and Claude verdicts pending.
+- **Authorization:** Pending. No digest has been authorized; silent edits after authorization will void it.
+- **Completion reconciliation:** Pending implementation.
+
+## Disposition record (revision 2)
+
+1. **Finding 1 — mooted-and-recorded.** No protected same-user TEST is being built. Filesystem separation from operator credentials is recorded as a mandatory entry condition for any future hardened fallback.
+
+2. **Finding 2 — mooted-and-recorded.** Credential assessment has been deleted as an authorization predicate. Future credential discovery may warn but cannot establish safety or permit fallback.
+
+3. **Finding 3 — sustained-applied.** One frozen execution decision is selected before durable state and consumed by `worktree_root`, launch, worker, TEST, both regression runs, retry, remediation, review, and all additional process-capable consumers. Recalculation and runtime downgrade are forbidden.
+
+4. **Finding 4 — mooted-and-recorded.** No netns security claim remains. Pathname-socket, IPC, shared-state, host `/proc`, and indirect exfiltration containment are recorded in the future-fallback entry bar.
+
+5. **Finding 5 — mooted-and-recorded.** The mapped/unmapped probe ladder is deleted. Any future sandbox must select one exact immutable submode during preflight, run representative compatibility probes, and never retry a real payload under a weaker mode.
+
+6. **Finding 6 — mooted-and-recorded.** No same-user lifecycle sandbox is claimed. PID isolation and reliable whole-tree termination are mandatory for any future hardened fallback.
+
+7. **Finding 7 — sustained-applied.** Refusal, authorization, routing, and isolation tests require positive controls, exact decision reasons, payload markers, durable-state snapshots, and proof that relevant branches executed.
+
+8. **Finding 8 — sustained-applied.** High-assurance acceptance requires both a real D5-unavailable/userns-restricted refusal environment and a real D5-available execution environment. Refusal-only validation is explicitly incomplete.
+
+9. **Finding 9 — condition-accepted.** The dynamic operator-home, positive disk-canary, observed worker-probe, denial, and reliable-cleanup drills are folded into `tests/worker_isolation.sh`.
+
+10. **Finding 10 — sustained-applied.** The strongest counterargument governs revision 2: automatic and purportedly protected same-user fallback is deleted. D5 unavailability refuses by default; the only exception is separately authorized, one-use, explicitly documented full operator-credential and host-state exposure.
