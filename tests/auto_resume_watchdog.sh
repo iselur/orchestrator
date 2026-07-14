@@ -32,6 +32,8 @@ S="$FAKE_TMUX_STATE"
 echo "tmux $*" >> "$S/invocations.log"
 cmd=$1; shift
 [ "$cmd" = "${FAKE_TMUX_FAIL:-}" ] && exit 1
+# HALT-injection hook DURING a tmux action (round-3 review: HALT after new-session, before send-keys)
+[ "$cmd" = "${FAKE_TMUX_MAKE_HALT_ON:-}" ] && [ -n "${FAKE_TMUX_HALT_PATH:-}" ] && touch "$FAKE_TMUX_HALT_PATH"
 name=""; args=()
 while (($#)); do
   case "$1" in
@@ -415,6 +417,33 @@ inst uninstall
 grep -q 'disable --now.*orchestrator-watchdog.timer' "$TS/invocations.log" && bad "uninstall disabled a unit it does not own" || ok "uninstall did not disable the foreign unit"
 [ ! -e "$IH/.config/systemd/user/orchestrator-watchdog.service" ] && ok "uninstall removed its own service" || bad "uninstall left its own service"
 [ -e "$IH/.config/systemd/user/other.timer" ] && ok "unrelated unit untouched" || bad "unrelated unit deleted"
+
+echo "== W17b: failed initial send-keys -> empty session torn down, fresh id next launch, no --resume of a ghost"
+reset; open_row
+export FAKE_TMUX_FAIL=send-keys
+run_wd                                             # new-session ok, prompt delivery fails
+unset FAKE_TMUX_FAIL
+[ ! -e "$WDIR/launched" ] && [ ! -e "$WDIR/last-run" ] && ok "undelivered launch left no launched/run marks" || bad "ghost launch marked as launched/run"
+run_wd                                             # incomplete launch detected
+tmux_has() { [ -e "$TS/sessions/orch-auto" ]; }
+tmux_has && bad "empty session survived" || ok "empty session torn down"
+grep -q -- '--resume' <(keys) && bad "a never-started conversation was --resume'd" || ok "no --resume of the ghost id"
+run_wd                                             # fresh launch
+grep -q -- '--session-id 00000000-0000-4000-8000-000000000002' <(keys) && ok "relaunched fresh with a NEW id" || bad "relaunch did not mint a new id"
+[ "$(cat "$WDIR/launched" 2>/dev/null)" = "00000000-0000-4000-8000-000000000002" ] && ok "launched marker matches the new id" || bad "launched marker wrong"
+
+echo "== W12c (e): HALT landing AFTER session creation -> no prompt, then clean teardown and relaunch"
+reset; open_row
+export FAKE_TMUX_MAKE_HALT_ON=new-session FAKE_TMUX_HALT_PATH="$R/.orchestrator/HALT"
+run_wd
+unset FAKE_TMUX_MAKE_HALT_ON FAKE_TMUX_HALT_PATH
+[ -z "$(keys)" ] && ok "post-new-session HALT: no prompt delivered" || bad "prompt delivered despite HALT"
+[ ! -e "$WDIR/launched" ] && ok "post-new-session HALT: not marked launched" || bad "HALTed launch marked launched"
+rm -f "$R/.orchestrator/HALT"
+run_wd                                             # teardown of the incomplete session
+[ ! -e "$TS/sessions/orch-auto" ] && ok "incomplete session removed after HALT cleared" || bad "incomplete session kept"
+run_wd                                             # fresh launch
+grep -q -- '--session-id' <(keys) && ok "fresh launch after recovery" || bad "no relaunch after recovery"
 
 echo "== W17: hermetic — fakes answered every risky call; the fake claude was never truly executed"
 reset; open_row

@@ -120,10 +120,13 @@ launch_new() {
   halted && return 0
   if tmux send-keys -t "$SESSION" \
        "claude --session-id $sid --dangerously-skip-permissions \"\$(cat $PROMPT_REL)\"" Enter; then
+    # The launched marker is written ONLY after the prompt was delivered: a session whose
+    # conversation never started must never be --resume'd (the id names nothing).
+    put "$WD/launched" "$sid"
     record_run
     note "created session '$SESSION', launched claude --session-id $sid"
   else
-    note "send-keys failed after session creation; will retry next tick"
+    note "send-keys failed after session creation; the empty session will be torn down next tick"
   fi
 }
 
@@ -137,6 +140,16 @@ respawn() {
   if ! valid_uuid "${sid:-}"; then
     alert_raise corrupt-session-id "session exists without a valid recorded id (foreign session or wiped state); refusing to relaunch"
     return 1
+  fi
+  # An id without its launched marker names a conversation that never started (send-keys failed
+  # or HALT landed after session creation): --resume of it can only error forever. Tear the empty
+  # session down instead; the next tick launches fresh with a new id.
+  if [ "$(get "$WD/launched")" != "$sid" ]; then
+    halted && return 0
+    tmux kill-session -t "$SESSION" 2>/dev/null
+    rm -f "$WD/session-id"
+    note "incomplete launch detected (id $sid never received its prompt); removed the empty session, will relaunch next tick"
+    return 0
   fi
   # A respawn storm (claude dying instantly every tick) refreshes last-run each time and would
   # otherwise never alert; count consecutive respawns and say so.
