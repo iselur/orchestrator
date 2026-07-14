@@ -1,65 +1,41 @@
-# orchestrator — your AI engineering manager
+# Orchestrator
 
-**You bring the idea. One AI manages the work; another builds it.** You approve a small spec, a
-sandboxed worker implements it, hard checks and a reviewer from the other vendor judge the result,
-and a pull request lands for you. `main` is yours alone — always.
+This repository keeps a software backlog moving through specification, implementation, review,
+testing, and a human-controlled merge.
 
-**New here?** Open **[how-it-works.html](how-it-works.html)** in a browser — one page, one diagram,
-the whole system.
+## How work moves
 
-## The short version
+Give the orchestrator (Claude) a task. It turns the request into a checked spec, then delegates the
+build to the worker (Codex), a sub-agent from another vendor. They inspect and challenge the result
+for up to three review rounds.
 
-1. You drop an idea: one line, plus how you'll know it's done.
-2. The manager (Claude) grills it and writes a small spec. Risky work waits for your written
-   approval, tied to that exact spec — edit the spec and the approval is void.
-3. The worker (Codex) builds it in a sandbox: its own user, no access to your home or credentials,
-   no network during tests. No sandbox means no launch.
-4. Hard checks run before anyone opines: changes in scope, tests actually ran — a skipped test is
-   a failure, and the worker's word counts for nothing.
-5. A reviewer from the other vendor judges the exact diff, with no tools. Three rounds maximum,
-   then ship or escalate.
-6. A pull request lands on `integration` only with CI green. You merge to `main` by hand.
+Once started, a watchdog can continue the work while you are away. It restarts work when the
+five-hour usage window ends or backlog tasks are waiting. Every change must pass its tests and
+verification checks.
 
-## Why two vendors
+The [visual explanation](how-it-works.html) shows the whole process on one page.
 
-Models from the same vendor fail the same way, so the reviewer is never the author's vendor and
-nothing reviews its own work. Where a test can decide, the test outranks model agreement — two
-models agreeing is not evidence.
+## Roles
 
-## Honest limits
-
-The sandbox protects *your* credentials; it is not perfect. The worker holds its own login and has
-network while building, approval files record intent rather than prove it, and the test grade is
-not yet safe against a deliberately malicious worker. `SECURITY.md` states exactly what holds (with
-the test that proves it) and what does not hold yet; the fixes are queued in the backlog.
+| Who | Job |
+|---|---|
+| owner (you) | Chooses the work, approves specs, and alone merges `integration` to `main` |
+| orchestrator (Claude) | Manages the backlog, records evidence, and opens passing pull requests |
+| worker (Codex) | Implements each spec in an isolated worktree and runs the required tests |
 
 ## Quick start
 
-You need: an **Ubuntu 24.04** VPS, **Claude Code** installed on it, **Claude** and **Codex**
-subscriptions, a **GitHub repo** you own, and (recommended) **Tailscale** for private SSH.
+You need: an **Ubuntu 24.04** VPS, **Claude Code** on it, **Claude** and **Codex**
+subscriptions, and a **GitHub repo** you own.
 
-1. Click **"Use this template"** (default branch only) and clone your new repo onto the VPS.
-2. In Claude Code on the box, paste:
+1. Use this template, clone your new repo onto the VPS.
+2. Open Claude Code there and paste:
 
    ```
    Read BOOTSTRAP.md and set me up gate by gate, pausing at each human step.
    ```
 
-It stops at the steps only you can do: provisioning, branch protection, and the Claude/Codex
-logins.
-
-## What's in here
-
-| Path | What it is |
-|---|---|
-| `how-it-works.html` | the one-page visual explanation |
-| `scripts/dispatch.py` / `scripts/dispatch` | launch, checks, review, merge, health, reconcile |
-| `scripts/intake` | task gate: no work without a goal and a checkable definition of done |
-| `scripts/review` / `scripts/codex-plan` | bounded cross-vendor review (3 rounds max) / tiered plans |
-| `scripts/setup-worker-user.sh` | one-time privileged host setup for worker isolation |
-| `CLAUDE.md` / `AGENTS.md` / `SECURITY.md` | operating rules, role-to-model map, honest security model |
-| `specs/`, `.orchestrator/` | specs and the tracked approval/attempt records |
-| `tests/` | the repo suite, including isolation drills and the prose caps |
+It stops at the steps only you can do.
 
 ## License
 
