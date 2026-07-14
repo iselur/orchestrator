@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Intake gate (R29 rule 1): no task starts without a one-line goal AND a checkable definition of
+# done. This script is the only sanctioned way to open a ledger row; it REFUSES incomplete intake,
+# so "I'll define done later" cannot happen silently.
+#
+# Usage: scripts/intake -g "one-line goal" -d "done when <checkable criterion>"
+# Prints the new request id. The ledger itself is private (gitignored).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+LEDGER=".orchestrator/REQUEST-LEDGER.md"
+goal="" done_when=""
+while getopts "g:d:" opt; do
+  case "$opt" in
+    g) goal="$OPTARG" ;;
+    d) done_when="$OPTARG" ;;
+    *) exit 2 ;;
+  esac
+done
+
+fail() { echo "INTAKE REFUSED: $1" >&2; exit 1; }
+
+[ -n "$goal" ]      || fail "missing -g goal. One line: what is being asked."
+[ -n "$done_when" ] || fail "missing -d definition of done. A CHECKABLE criterion — if you cannot state one, ask the operator before starting. Refusing to start is correct (R29)."
+case "$goal" in *$'\n'*) fail "goal must be ONE line" ;; esac
+[ "${#done_when}" -ge 10 ] || fail "definition of done too thin to be checkable: '$done_when'"
+[ -f "$LEDGER" ] || fail "$LEDGER not found (private file; create it on this box first)"
+
+last=$(grep -oE '^\| R[0-9]+' "$LEDGER" | grep -oE '[0-9]+' | sort -n | tail -1)
+id="R$(( ${last:-0} + 1 ))"
+printf '| %s | %s | %s | — | — | open | DONE WHEN: %s |\n' \
+  "$id" "$(date +%m-%d)" "$goal" "$done_when" >> "$LEDGER"
+echo "$id"
