@@ -674,8 +674,11 @@ def worker_codex_runtime():
     node = _trusted_runtime_file(Path("/usr/bin/node"))
     entry = _trusted_runtime_file(CODEX_PKG / "bin/codex.js", want_exec=False)
     if node and entry and trusted_runtime_tree(CODEX_PKG):
-        return (["/usr/bin/node", "/opt/codex/bin/codex.js"],
-                [(str(CODEX_PKG), "/opt/codex")], entry)
+        # Bind and exec the RESOLVED real paths, never the unresolved strings (round-5 review): a
+        # symlink component the checks followed could be repointed before systemd resolves the
+        # bind source. `node` and the package root below are both already symlink-resolved.
+        return ([str(node), "/opt/codex/bin/codex.js"],
+                [(str(CODEX_PKG.resolve()), "/opt/codex")], entry)
     import shutil
     cands = [OPERATOR_HOME / ".codex/bin/codex", OPERATOR_HOME / ".local/bin/codex",
              Path("/usr/local/bin/codex"), Path("/usr/bin/codex")]

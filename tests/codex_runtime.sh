@@ -190,6 +190,30 @@ else:
     print("  ok: sticky world-writable parent (like /tmp) is accepted")
 shutil.rmtree(base, ignore_errors=True)
 
+# 12. round-5: the recorded npm bind SOURCE is the RESOLVED real path, never the unresolved
+#     (possibly symlinked) string that could be repointed before systemd mounts it.
+if pathlib.Path("/usr/bin/node").exists():
+    home = pathlib.Path(tempfile.mkdtemp())
+    realpkg = home / "real/node_modules/@openai/codex"
+    (realpkg / "bin").mkdir(parents=True); (realpkg / "bin/codex.js").write_text("// e\n")
+    link = home / "link"; os.symlink(home / "real/node_modules/@openai/codex", link)
+    d.CODEX_PKG = link                       # reached via a symlink
+    d.OPERATOR_HOME = home
+    rt = d.worker_codex_runtime()
+    if not rt:
+        fails.append("symlinked npm package did not resolve at all")
+    else:
+        src = rt[1][0][0]
+        if pathlib.Path(src).is_symlink() or "/link" in src:
+            fails.append(f"npm bind source is the UNRESOLVED path: {src}")
+        elif pathlib.Path(src).resolve() != realpkg.resolve():
+            fails.append(f"npm bind source {src} != resolved real pkg")
+        else:
+            print("  ok: npm bind source is the resolved real path (not the symlink)")
+    shutil.rmtree(home, ignore_errors=True)
+else:
+    print("  skip: resolved-bind-source case (/usr/bin/node absent)")
+
 for f in fails:
     print(f"  FAIL {f}")
 sys.exit(1 if fails else 0)
