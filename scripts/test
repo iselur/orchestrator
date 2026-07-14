@@ -27,7 +27,13 @@ if [ ${#tests[@]} -eq 0 ]; then
 fi
 
 summary="${ORCH_TEST_SUMMARY:-}"   # optional path: machine-readable results for the gate
+# STRICT (CI): a skip is a FAILURE. Without this, a runner that cannot execute the trust tests
+# reports a green suite while asserting nothing — which is exactly how CI hid the SPEC-015 false
+# PASS for a week. In CI there is no excuse for a skip: the deps are installed, so anything that
+# skips is a broken environment, and a broken environment must not certify the code.
+strict="${ORCH_TEST_STRICT:-0}"
 failed=0
+skipped=0
 declare -a results=()
 
 for t in "${tests[@]}"; do
@@ -36,7 +42,7 @@ for t in "${tests[@]}"; do
   rc=$?
   case "$rc" in
     0)  echo "PASS $t";              results+=("PASS $t") ;;
-    77) echo "SKIP $t (did not run)"; results+=("SKIP $t") ;;
+    77) echo "SKIP $t (did not run)"; results+=("SKIP $t"); skipped=$((skipped + 1)) ;;
     *)  echo "FAIL $t (exit $rc)";   results+=("FAIL $t"); failed=1 ;;
   esac
 done
@@ -47,6 +53,13 @@ printf '%s\n' "${results[@]}"
 
 if [ -n "$summary" ]; then
   printf '%s\n' "${results[@]}" > "$summary"
+fi
+
+if [ "$strict" = "1" ] && [ "$skipped" -gt 0 ]; then
+  echo
+  echo "STRICT: $skipped test(s) did not run. A suite that asserts nothing is not a green suite."
+  echo "        (This is what let a false PASS through once. Install the deps or fix the env.)"
+  failed=1
 fi
 
 exit "$failed"

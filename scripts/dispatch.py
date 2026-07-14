@@ -1154,13 +1154,42 @@ def integrity(wt: Path, base: str, wc: str) -> tuple[dict, bool]:
     return res, ok
 
 
+def _glob_to_regex(g: str) -> re.Pattern:
+    """Translate a scope glob to a regex where `*` does NOT cross a path separator.
+
+    fnmatch's `*` matches `/` — so an approved scope of `scripts/lib/*.sh` also permitted
+    `scripts/lib/nested/evil.sh`. The scope gate is the only STRUCTURAL defence against a worker
+    writing outside its approved paths (everything else is a model being asked nicely), so a `*`
+    that silently descends is a hole in the one wall that does not depend on good behaviour.
+
+    Semantics now: `*` matches within one path segment; `**` (and a trailing `/**`) is recursive.
+    """
+    out, i = [], 0
+    while i < len(g):
+        c = g[i]
+        if c == "*":
+            if g[i:i + 2] == "**":            # `**` — recursive, may cross separators
+                out.append(".*")
+                i += 2
+                if g[i:i + 1] == "/":         # `a/**/b` — the `/` is optional (matches `a/b` too)
+                    out.append("/?")
+                    i += 1
+                continue
+            out.append("[^/]*")               # `*` — stays inside one segment
+        elif c == "?":
+            out.append("[^/]")
+        else:
+            out.append(re.escape(c))
+        i += 1
+    return re.compile("^" + "".join(out) + "$")
+
+
 def _match_glob(path: str, globs: list[str]) -> bool:
-    from fnmatch import fnmatch
     for g in globs:
-        if g.endswith("/**"):
+        if g.endswith("/**"):                 # keep the fast, explicit recursive-prefix case
             if path == g[:-3] or path.startswith(g[:-3] + "/"):
                 return True
-        elif fnmatch(path, g):
+        elif _glob_to_regex(g).match(path):
             return True
     return False
 
