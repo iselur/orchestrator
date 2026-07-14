@@ -36,7 +36,8 @@ Past decisions, one line each: DECISIONS.md. Everything else lives in git histor
 - `main` is human-only, permanently. `integration` changes only via PR with `ci` green.
 - Workers run isolated: dedicated `codex-worker` user, operator home unreachable, no network
   during tests. No isolation → no launch, checked before any state is created.
-  `ORCH_ALLOW_UNISOLATED=1` is recorded exposure, typed knowingly by the operator only.
+  `ORCH_ALLOW_UNISOLATED=1` is full, recorded exposure — never set it without the operator's
+  explicit instruction (it records use; it cannot prove who set it — SECURITY.md gap 2).
 - A test that did not RUN did not PASS. Required tests are restored from the orchestrator's own
   checkout before grading; an empty required set fails. Worker prose is never a verdict.
 - High-risk specs need the operator's per-dispatch approval file. Claude never creates one.

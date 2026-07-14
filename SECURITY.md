@@ -1,20 +1,29 @@
 # SECURITY — what actually holds, and what does not yet
 
-This file is the source of truth for the security model. A claim may appear in README or CLAUDE.md
-only if a test listed here proves it. Known gaps stay listed until a shipped fix closes them.
+This file is the source of truth for the security model. Security claims come in three kinds and
+README/CLAUDE.md may not state one as stronger than its kind: **tested guarantees** (a CI/box test
+proves them), **configured assumptions** (set up outside this repo, verified manually), and
+**known gaps** (stated, queued, not defended). Gaps stay listed until a shipped fix closes them.
 
-## Guarantees, each with its proof
+## Tested guarantees
 
 | Guarantee | Proof |
 |---|---|
 | Worker commands cannot read the operator's home or any credential in it | `tests/worker_isolation.sh` (box-only) |
-| No isolation → no launch; the override requires the operator to type it | `tests/isolation_fail_closed.sh` |
-| A test that did not run did not pass; empty required set fails; worker-edited required tests are restored from the orchestrator's checkout before grading | `tests/test_attestation.sh` |
+| No isolation → no launch; launching unisolated requires an explicit override variable, and its use is recorded in the evidence | `tests/isolation_fail_closed.sh` |
+| A missing, skipped, or empty test result fails the gate before review; worker-edited required tests are restored from the orchestrator's checkout before grading (detection against accidental skips — see gap 3 for the malicious case) | `tests/test_attestation.sh` |
 | Worker changes outside the spec's declared scope are rejected | `tests/dispatch_gate4.sh`, `tests/scope_glob.sh` |
 | A verdict is bound to the exact diff and base; a stale base is refused | `tests/dispatch_gate4.sh` |
-| Direct pushes to `main` are rejected; `integration` requires a PR with `ci` green | GitHub ruleset (verified during bootstrap) |
 | The rulebook and repo prose cannot silently grow back | `tests/rulebook_cap.sh`, `tests/prose_cap.sh`, `tests/plain_language.sh` |
-| Review rounds are capped at two per topic, in code | `tests/review_cap.sh` |
+| Review rounds are capped at two per topic, in code, and the Codex-run reviewer refuses Codex-authored artifacts | `tests/review_cap.sh` |
+
+## Configured assumptions (outside this repo; verify during bootstrap and after any GitHub change)
+
+- Direct pushes to `main` are rejected; `integration` requires a PR with the `ci` check green —
+  GitHub ruleset, not a repo test.
+- Approvals bind to the spec digest and instance identity; the reviewer runs with all tools
+  denied; autonomy applies only to `dispatch merge` — enforced by `scripts/dispatch.py` code
+  paths that the repo suite exercises only partially.
 
 ## Known gaps (fixes queued in `.orchestrator/BACKLOG.md`)
 
@@ -25,13 +34,14 @@ only if a test listed here proves it. Known gaps stay listed until a shipped fix
    unreachable — but "workers get no network / no credentials" is not yet true and is not claimed.
 2. **Approvals record intent; they do not prove a human.** An approval is a JSON file; the
    isolation override is an environment variable. Software running as the operator could create
-   either. They are an audit trail, not an authorization boundary. A mechanism Claude cannot
-   fabricate (e.g. GitHub environment approval or a separate human-held account) is the planned
-   replacement.
+   either — a test can prove the file or variable must be present, never who set it. They are an
+   audit trail, not an authorization boundary. A mechanism software on this box cannot fabricate
+   (e.g. GitHub environment approval or a separate human-held account) is the planned replacement.
 3. **The test grade is produced inside worker-writable territory.** The per-test result file lives
    in the worktree, and `scripts/test` itself is not part of the restored required set — a worker
-   that edits the runner could in principle influence its own grade. The grader must move fully
-   outside the worker's reach.
+   that edits the runner could in principle forge its own grade. Until the grader moves fully
+   outside the worker's reach, the tests-must-run gate is protection against accidental skips and
+   honest failures, not against a deliberately malicious worker.
 4. **Evidence is an audit record, not immutable.** Attempt files and their hashes are ordinary
    files owned by the account that writes them. Treat them as good-faith provenance.
 5. **The dispatcher currently targets this repository.** Pointing workers at an arbitrary product

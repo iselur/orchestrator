@@ -56,21 +56,41 @@ case "${1:-}" in
     echo "$id done"
     ;;
   stale)
-    # A stalled row this check cannot SEE is worse than a stalled row: every ledger line must be
-    # the header, a separator, blank, or a well-formed row, or the check itself cannot be trusted.
-    # (The pre-reset ledger had rows appended outside the table and hand-written statuses this
-    # check silently missed — that is the failure this validation exists for.)
-    bad=$(grep -nvE '^\| id \||^\|[-| ]+\|$|^[[:space:]]*$|^\| R[0-9]+ \|.*\|$' "$LEDGER" || true)
-    if [ -n "$bad" ]; then
-      echo "LEDGER FORMAT ERROR — lines outside the table (fix these before trusting stale):" >&2
-      printf '%s\n' "$bad" >&2
-      exit 1
-    fi
-    if grep -E '^\| R[0-9]+ \|' "$LEDGER" | grep -v '| done |'; then
-      echo "^ rows that never reached done — surface to the operator" >&2
-      exit 1
-    fi
-    echo "no open rows"
+    # A stalled row this check cannot SEE is worse than a stalled row: every line must be the
+    # header, a separator, blank, or a row with exactly 7 cells whose STATUS cell (and only the
+    # status cell — evidence text containing the word 'done' must not count) is open or done.
+    # (The pre-reset ledger had rows appended outside the table and hand-written statuses the old
+    # substring check silently missed — that is the failure this validation exists for.)
+    rc=0
+    report=$(awk -F'|' '
+      /^\| id \|/ || /^\|[-| ]+\|$/ || /^[[:space:]]*$/ { next }
+      {
+        if ($0 !~ /^\| R[0-9]+ \|/ || NF != 9) {
+          printf "FORMAT %d: %s\n", NR, $0; bad = 1; next
+        }
+        status = $7; gsub(/^[[:space:]]+|[[:space:]]+$/, "", status)
+        if (status != "open" && status != "done") {
+          printf "FORMAT %d: %s\n", NR, $0; bad = 1; next
+        }
+        if (status == "open") { printf "OPEN %d: %s\n", NR, $0; open = 1 }
+      }
+      END { exit (bad ? 2 : (open ? 1 : 0)) }
+    ' "$LEDGER") || rc=$?
+    case "$rc" in
+      2)
+        echo "LEDGER FORMAT ERROR — fix these lines before trusting stale:" >&2
+        printf '%s\n' "$report" | grep '^FORMAT ' >&2
+        exit 1 ;;
+      1)
+        printf '%s\n' "$report" | sed -n 's/^OPEN //p'
+        echo "^ rows that never reached done — surface to the operator" >&2
+        exit 1 ;;
+      0)
+        echo "no open rows" ;;
+      *)
+        echo "INTAKE INTERNAL ERROR: stale check failed to run (awk exit $rc)" >&2
+        exit 1 ;;
+    esac
     ;;
   open|-*|"")
     [ "${1:-}" = "open" ] && shift

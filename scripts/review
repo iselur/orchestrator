@@ -3,7 +3,11 @@
 # look (round 2) → ship or escalate to the operator. Round 3 does not exist — this script refuses
 # it. The cap lives in code because a prose cap already lost once to a ten-round loop.
 #
-# Usage: scripts/review --topic <slug> [--context FILE]... [--] [PROMPT...]
+# The reviewer this script invokes is Codex, so it may only review Claude-authored artifacts:
+# --author is required and 'codex' is refused (never Codex-grades-Codex). Codex-authored work is
+# reviewed by Claude (worker diffs: bound reviewer in the dispatcher; plans: Claude in-session).
+#
+# Usage: scripts/review --topic <slug> --author <claude|codex> [--context FILE]... [--] [PROMPT...]
 #        PROMPT as arguments or on stdin. Output: .orchestrator/reviews/<slug>/round-N.md
 # Callers run this detached (it can take hours — see AGENTS.md); never wrap it in a short timeout.
 set -euo pipefail
@@ -12,6 +16,7 @@ cd "$(dirname "$0")/.."
 MODEL="gpt-5.6-sol"
 out_root=".orchestrator/reviews"
 topic=""
+author=""
 contexts=()
 prompt_parts=()
 
@@ -20,8 +25,9 @@ die() { printf 'review: %s\n' "$*" >&2; exit 2; }
 while (($#)); do
   case "$1" in
     --topic)   (($# >= 2)) || die "--topic requires a slug"; topic="$2"; shift 2 ;;
+    --author)  (($# >= 2)) || die "--author requires claude or codex"; author="$2"; shift 2 ;;
     --context) (($# >= 2)) || die "--context requires a file"; contexts+=("$2"); shift 2 ;;
-    --help|-h) sed -n '2,9p' "$0"; exit 0 ;;
+    --help|-h) sed -n '2,13p' "$0"; exit 0 ;;
     --)        shift; prompt_parts+=("$@"); break ;;
     -*)        die "unknown option: $1" ;;
     *)         prompt_parts+=("$1"); shift ;;
@@ -29,6 +35,14 @@ while (($#)); do
 done
 
 [[ "$topic" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "--topic must be a lowercase slug (a-z, 0-9, -)"
+case "$author" in
+  claude) ;;
+  codex)
+    echo "review: REFUSED — this script's reviewer is Codex, and the artifact's author is Codex." >&2
+    echo "        Never Codex-grades-Codex (CLAUDE.md). Have Claude review this artifact instead." >&2
+    exit 4 ;;
+  *) die "--author is required and must be 'claude' or 'codex' (who produced the artifact under review)" ;;
+esac
 
 if ((${#prompt_parts[@]})); then
   prompt="${prompt_parts[*]}"
@@ -45,6 +59,13 @@ done
 
 dir="$out_root/$topic"
 mkdir -p "$dir"
+
+# The round counter is the safety property, so it must not race: two detached invocations counting
+# the same directory could both claim round 2. The lock is held from counting through the final
+# rename, so a concurrent invocation waits and then sees the truth.
+exec 9>>"$dir/.lock"
+flock 9
+
 rounds=$(find "$dir" -maxdepth 1 -name 'round-*.md' | wc -l)
 round=$((rounds + 1))
 if ((round > 2)); then

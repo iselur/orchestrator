@@ -12,28 +12,39 @@ LIST=tests/banned-terms.txt
 [ -f "$LIST" ] || { echo "FAIL plain_language.sh: $LIST missing"; exit 1; }
 
 fails=0
-patterns=$(grep -v '^#' "$LIST" | grep -v '^[[:space:]]*$')
+patterns=$(grep -v '^#' -- "$LIST" | grep -v '^[[:space:]]*$')
+[ -n "$patterns" ] || { echo "FAIL plain_language.sh: $LIST has no patterns — the sweep would be vacuous"; exit 1; }
 
-# Case-insensitive sweep over every tracked markdown file.
-while IFS= read -r f; do
-  hits=$(grep -inE -f <(printf '%s\n' "$patterns") "$f" || true)
-  if [ -n "$hits" ]; then
+# A malformed pattern must fail the test, never silently disable the sweep: grep exits 2 on a bad
+# regex, and only 0 (match) / 1 (no match) are acceptable outcomes below.
+printf '%s\n' "$patterns" | grep -qiEf /dev/stdin -- /dev/null
+[ $? -le 1 ] || { echo "FAIL plain_language.sh: invalid regex in $LIST"; exit 1; }
+
+mapfile -t md_files < <(git ls-files | grep -iE '\.(md|markdown|mdown|mkd)$')
+[ "${#md_files[@]}" -gt 0 ] || { echo "FAIL plain_language.sh: no tracked markdown found — scan broken"; exit 1; }
+
+for f in "${md_files[@]}"; do
+  hits=$(printf '%s\n' "$patterns" | grep -inEf /dev/stdin -- "$f"); rc=$?
+  if [ "$rc" -eq 0 ]; then
     echo "  FAIL: banned term in $f (plain words or a name of real code, please):"
     printf '%s\n' "$hits" | sed 's/^/    /'
     fails=1
+  elif [ "$rc" -ge 2 ]; then
+    echo "  FAIL: grep error scanning $f (exit $rc) — a check that cannot run must not pass"
+    fails=1
   fi
-done < <(git ls-files '*.md')
-
-# "SOL" is case-sensitive (the lowercase model id gpt-5.6-sol in config lines is fine; the
-# uppercase character name that colonized the old prose is not).
-while IFS= read -r f; do
-  hits=$(grep -nE '\bSOL\b' "$f" || true)
-  if [ -n "$hits" ]; then
+  # "SOL" is case-sensitive: the lowercase model id gpt-5.6-sol in config lines is fine; the
+  # uppercase character name that colonized the old prose is not.
+  hits=$(grep -nE -- '\bSOL\b' "$f"); rc=$?
+  if [ "$rc" -eq 0 ]; then
     echo "  FAIL: 'SOL' used as a name in $f — say 'Codex'; the model id belongs only in config/scripts:"
     printf '%s\n' "$hits" | sed 's/^/    /'
     fails=1
+  elif [ "$rc" -ge 2 ]; then
+    echo "  FAIL: grep error scanning $f (exit $rc) — a check that cannot run must not pass"
+    fails=1
   fi
-done < <(git ls-files '*.md')
+done
 
 [ "$fails" -eq 0 ] && echo "PASS plain_language.sh" || echo "FAIL plain_language.sh"
 exit "$fails"

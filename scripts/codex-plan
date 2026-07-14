@@ -155,7 +155,7 @@ fi
 # Hard size cap: a plan past this length is doing the work instead of describing it (the pre-reset
 # repo accumulated 2,200-line plans re-emitted almost verbatim across review rounds). Split the
 # task or use --small; raising the cap is a reviewed edit to this script, never drift.
-body_lines=$(wc -l < "$stdout_path")
+body_lines=$(awk 'END { print NR }' "$stdout_path")   # NR counts a final unterminated line; wc -l does not
 if ((body_lines > 150)); then
   printf 'codex-plan: REFUSED — plan body is %d lines (cap 150). Split the task or use --small. Raw output retained at %s\n' \
     "$body_lines" "$stdout_path" >&2

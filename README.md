@@ -18,7 +18,8 @@ request. `main` is yours alone, permanently.
   it is recorded). Proven by `tests/worker_isolation.sh`.
 - **Tests that did not run are not passes.** A skip, a missing result, or an empty required-test
   set fails the gate before the reviewer is invoked. (This repo shipped a false PASS once — a
-  reviewer certified three tests that had silently skipped. That is why this gate exists.)
+  reviewer certified three tests that had silently skipped. That is why this gate exists.) This
+  protects against accidental skips; the deliberately-malicious-worker case is SECURITY.md gap 3.
 - **Review bound to the exact diff and base.** The reviewer has no tools, sees only spec + diff +
   evidence, and its verdict is valid only for the base it was bound to; a stale base is refused.
 - **Human-gated merges.** Merges to `main` are human-only. Optional autonomy (off by default) lets

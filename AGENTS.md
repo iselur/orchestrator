@@ -35,7 +35,10 @@ merges.
 - Consultations run detached (background or `systemd-run --user`) and may legitimately take hours —
   never a minute-scale timeout. The Codex sandbox cannot read the repo on this host: inline the
   context. The final answer is recoverable from the `--json` stream (last `agent_message`).
-- Adversarial reviews go through `scripts/review` — it counts rounds per topic and refuses a third.
+- Adversarial reviews of **Claude-authored** work go through `scripts/review` (its reviewer is
+  Codex; it requires `--author` and refuses Codex-authored artifacts, counts rounds per topic, and
+  refuses a third round). Codex-authored work is reviewed by Claude — worker diffs by the bound
+  reviewer in the dispatcher, plans in-session — under the same two-round cap.
   Plan drafts go through `scripts/codex-plan` — it refuses a plan body over 150 lines.
 
 ## Test command

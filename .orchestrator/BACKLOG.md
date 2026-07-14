@@ -9,6 +9,7 @@ definition of done. Item #1 must be a real product outside this repo (CI checks 
    (`~/orchestrator-private/IDEAS-shortlist/`), give it its own repo, and push one deliberately
    small feature through idea → brief → tickets → build → test → review → merge → running.
    This is the finish line every process change is judged against.
+   product: new repo from the private shortlist (name it at intake)
 2. **Close the worker credential/network gap** (SECURITY.md gap 1): remove or broker the Codex
    login exposure and block build-phase network, or state per-spec why it must stay.
 3. **Make approvals human-provable** (SECURITY.md gap 2): replace file/env-var approvals with a

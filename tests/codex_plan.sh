@@ -223,8 +223,10 @@ assert_file "$run_dir/PLAN-011.stdout"
 assert_file "$run_dir/PLAN-011.stderr"
 
 # A plan body over 150 lines is refused (a plan that long is doing the work instead of describing
-# it); the raw output is retained, no plan is minted, and a body at the cap still passes.
-oversized="$(python3 -c 'print("\n".join(f"line {i}" for i in range(152)))')"
+# it); the raw output is retained and no plan is minted. Exact boundary, and the fixtures have NO
+# terminal newline (the stub prints with printf '%s') — the cap must count a final unterminated
+# line, which wc -l would miss.
+oversized="$(python3 -c 'print("\n".join(f"line {i}" for i in range(151)), end="")')"
 if PATH="$tmp/bin:$PATH" \
   CODEX_STUB_ARGS="$args_file" \
   CODEX_STUB_PROMPT="$prompt_file" \
@@ -234,13 +236,13 @@ if PATH="$tmp/bin:$PATH" \
 fi
 assert_no_file "$run_dir/PLAN-012.md"
 assert_file "$run_dir/PLAN-012.stdout"
-at_cap="$(python3 -c 'print("\n".join(f"line {i}" for i in range(149)))')"
+at_cap="$(python3 -c 'print("\n".join(f"line {i}" for i in range(150)), end="")')"
 PATH="$tmp/bin:$PATH" \
   CODEX_STUB_ARGS="$args_file" \
   CODEX_STUB_PROMPT="$prompt_file" \
   CODEX_STUB_STDOUT="$at_cap" \
     scripts/codex-plan --out "$run_dir" 'plan at the cap' >/dev/null \
-  || fail "a body under the cap was refused"
+  || fail "a 150-line body (exactly at the cap) was refused"
 assert_file "$run_dir/PLAN-013.md"
 
 echo "PASS codex_plan.sh"

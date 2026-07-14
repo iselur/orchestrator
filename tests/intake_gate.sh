@@ -77,10 +77,13 @@ if scripts/intake close R99 "ev" 2>/dev/null; then bad "closed a nonexistent id"
 scripts/intake stale >/dev/null 2>&1 && ok "stale exits 0 when all rows are done" || bad "stale still failing after close"
 
 # --- ledger integrity: stale must not be evadable -------------------------------------------------
-# 16. A hand-written status (anything but 'done') is still flagged — the pre-reset ledger used
-# forms like '**IN-PROGRESS**' that the old check silently missed.
+# 16. A hand-written status (anything but open/done) is a loud FORMAT error — the pre-reset ledger
+# used forms like '**IN-PROGRESS**' that the old substring check silently missed.
 printf '| R9 | 07-14 | hand-edited row | — | — | **IN-PROGRESS** | working on it |\n' >> "$LEDGER"
-if scripts/intake stale >/dev/null 2>&1; then bad "stale exit 0 despite a non-done row with a hand-written status"; else ok "stale flags a hand-written non-done status"; fi
+stale_out=$(scripts/intake stale 2>&1); rc=$?
+[ "$rc" -ne 0 ] && echo "$stale_out" | grep -q "FORMAT ERROR" \
+  && ok "stale refuses a hand-written status as a format error" \
+  || bad "stale did not flag a hand-written status (rc=$rc)"
 sed -i '$d' "$LEDGER"
 
 # 17. A line outside the table format makes stale fail loudly as a FORMAT error — a row the check
@@ -91,6 +94,18 @@ stale_out=$(scripts/intake stale 2>&1); rc=$?
 [ "$rc" -ne 0 ] && echo "$stale_out" | grep -q "FORMAT ERROR" \
   && ok "stale refuses a ledger with lines outside the table" \
   || bad "stale did not flag an out-of-table line (rc=$rc)"
+sed -i '$d' "$LEDGER"
+
+# 18. Only the STATUS cell decides staleness: the word 'done' in the evidence cell of an open row
+# must not hide it, and a row with a forged extra cell is a format error, not a pass.
+printf '| R9 | 07-14 | tricky row | — | — | open | done earlier, honest |\n' >> "$LEDGER"
+if scripts/intake stale >/dev/null 2>&1; then bad "an open row with 'done' in its evidence cell evaded stale"; else ok "stale reads only the status cell"; fi
+sed -i '$d' "$LEDGER"
+printf '| R9 | 07-14 | forged row | — | — | wip | done | extra |\n' >> "$LEDGER"
+stale_out=$(scripts/intake stale 2>&1); rc=$?
+[ "$rc" -ne 0 ] && echo "$stale_out" | grep -q "FORMAT ERROR" \
+  && ok "stale refuses a row with a forged extra cell" \
+  || bad "a row with a forged extra cell evaded stale (rc=$rc)"
 sed -i '$d' "$LEDGER"
 
 # --- first use ----------------------------------------------------------------------------------
