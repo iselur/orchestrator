@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# Bounded adversarial review (CLAUDE.md rule 3): draft → up to three review rounds, each followed
+# by one revision → ship when clean or escalate to the operator. Round 4 does not exist — this
+# script refuses it. The cap lives in code because a prose cap already lost once to a ten-round
+# loop. Only round-N.md files are rounds: sibling artifacts (dispositions, notes) never count.
+#
+# The reviewer this script invokes is Codex, so it may only review Claude-authored artifacts:
+# --author is required and 'codex' is refused (never Codex-grades-Codex). Codex-authored work is
+# reviewed by Claude (worker diffs: bound reviewer in the dispatcher; plans: Claude in-session).
+#
+# Usage: scripts/review --topic <slug> --author <claude|codex> [--context FILE]... [--] [PROMPT...]
+#        PROMPT as arguments or on stdin. Output: .orchestrator/reviews/<slug>/round-N.md
+# Callers run this detached (it can take hours — see AGENTS.md); never wrap it in a short timeout.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+MODEL="gpt-5.6-sol"
+out_root=".orchestrator/reviews"
+topic=""
+author=""
+contexts=()
+prompt_parts=()
+
+die() { printf 'review: %s\n' "$*" >&2; exit 2; }
+
+while (($#)); do
+  case "$1" in
+    --topic)   (($# >= 2)) || die "--topic requires a slug"; topic="$2"; shift 2 ;;
+    --author)  (($# >= 2)) || die "--author requires claude or codex"; author="$2"; shift 2 ;;
+    --context) (($# >= 2)) || die "--context requires a file"; contexts+=("$2"); shift 2 ;;
+    --help|-h) sed -n '2,13p' "$0"; exit 0 ;;
+    --)        shift; prompt_parts+=("$@"); break ;;
+    -*)        die "unknown option: $1" ;;
+    *)         prompt_parts+=("$1"); shift ;;
+  esac
+done
+
+[[ "$topic" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "--topic must be a lowercase slug (a-z, 0-9, -)"
+case "$author" in
+  claude) ;;
+  codex)
+    echo "review: REFUSED — this script's reviewer is Codex, and the artifact's author is Codex." >&2
+    echo "        Never Codex-grades-Codex (CLAUDE.md). Have Claude review this artifact instead." >&2
+    exit 4 ;;
+  *) die "--author is required and must be 'claude' or 'codex' (who produced the artifact under review)" ;;
+esac
+
+if ((${#prompt_parts[@]})); then
+  prompt="${prompt_parts[*]}"
+else
+  prompt="$(cat; printf '\034')"
+  prompt="${prompt%$'\034'}"
+fi
+[[ "$prompt" =~ [^[:space:]] ]] || die "prompt must not be empty"
+
+for context in "${contexts[@]}"; do
+  [[ -f "$context" && -r "$context" ]] || die "context is not a readable file: $context"
+  prompt+=$'\n\n'"Context file: $context"$'\n---\n'"$(cat -- "$context")"
+done
+
+dir="$out_root/$topic"
+mkdir -p "$dir"
+
+# The round counter is the safety property, so it must not race: two detached invocations counting
+# the same directory could both claim the last round. The lock is held from counting through the final
+# rename, so a concurrent invocation waits and then sees the truth.
+exec 9>>"$dir/.lock"
+flock 9
+
+# Rounds are the CONTIGUOUS run of regular, non-symlink round-N.md files from 1. Counting names
+# alone was exploitable: with only round-2.md present, every invocation would claim round 2 and
+# overwrite it forever — unlimited rounds. Any round-N.md beyond the contiguous prefix (a gap, a
+# symlink, a directory) is a corrupt state and refuses outright rather than guessing.
+rounds=0
+while [ -f "$dir/round-$((rounds + 1)).md" ] && [ ! -L "$dir/round-$((rounds + 1)).md" ]; do
+  rounds=$((rounds + 1))
+done
+# Regex, not a glob: round-[0-9].md misses a stray round-10.md (reads as clean), and
+# round-[0-9]*.md would re-admit sibling artifacts like round-1-dispositions.md.
+named=$(find "$dir" -maxdepth 1 -regextype posix-extended -regex '.*/round-[0-9]+\.md' | wc -l)
+if [ "$named" -ne "$rounds" ]; then
+  echo "review: REFUSED — '$dir' holds a corrupt round state (a gap, symlink, or non-file among round-N.md)." >&2
+  echo "        Fix the directory by hand before any further review; nothing was run or written." >&2
+  exit 5
+fi
+round=$((rounds + 1))
+if ((round > 3)); then
+  echo "review: REFUSED — '$topic' has already had 3 review rounds ($dir)." >&2
+  echo "        Ship it or escalate to the owner; a fourth round is not allowed (CLAUDE.md rule 3)." >&2
+  exit 3
+fi
+
+out="$dir/round-$round.md"
+errf="$dir/round-$round.stderr"
+if ! codex exec \
+    -m "$MODEL" \
+    -c model_reasoning_effort=high \
+    -c service_tier=priority \
+    --sandbox read-only \
+    --skip-git-repo-check \
+    - <<<"$prompt" >"$out.partial" 2>"$errf"; then
+  printf 'review: Codex failed; stderr at %s\n' "$errf" >&2
+  rm -f "$out.partial"
+  exit 1
+fi
+grep -q '[^[:space:]]' "$out.partial" || { printf 'review: empty review output\n' >&2; rm -f "$out.partial"; exit 1; }
+mv "$out.partial" "$out"
+printf 'Review round %d of 3: %s\n' "$round" "$out"

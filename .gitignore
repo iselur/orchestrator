@@ -1,4 +1,4 @@
-# Orchestrator runtime — tracked vs untracked per SETUP-BRIEF.md §Control plane.
+# Orchestrator runtime — tracked vs untracked (see CLAUDE.md).
 # Approval artifacts and per-attempt manifests/results/reviews ARE tracked (provenance).
 # Raw logs, event streams, mutable state, and worktrees are NOT (size/secrets).
 
@@ -14,6 +14,10 @@
 # Kill switch is a local signal, not repo content
 .orchestrator/HALT
 
+# Auto-resume watchdog runtime (locks, transcripts, offsets, session ids, alert incidents,
+# mode-600 env with the alert credential — R39 brief: local-only, never tracked)
+.orchestrator/watchdog/
+
 # Per-attempt worktrees
 .worktrees/
 
@@ -28,5 +32,13 @@ __pycache__/
 .orchestrator/instance.json
 .orchestrator/AUTONOMY.local.json
 
-# SOL consultation raw event-logs — verbose machine logs; keep prompt+response+DECISION+sha256 only
-.orchestrator/decisions/**/sol-events.jsonl
+# Process prose is transient: plans and review rounds are untracked working files, deleted after
+# the work ships. A decision that still binds gets one line in DECISIONS.md; arguments live in git
+# history and PR descriptions. tests/prose_cap.sh enforces this.
+.orchestrator/plans/
+.orchestrator/decisions/
+.orchestrator/reviews/
+
+# --- private: never publish (operator, 2026-07-13) ---
+.orchestrator/REQUEST-LEDGER.md
+.orchestrator/REQUEST-LEDGER.md.lock

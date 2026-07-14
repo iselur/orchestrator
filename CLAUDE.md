@@ -1,174 +1,80 @@
-# CLAUDE.md — orchestrator invariants
+# CLAUDE.md — operating rules
 
-Short by design. Conventions/stack/test commands live in [AGENTS.md](AGENTS.md); the full build
-log and findings live in `SETUP-REPORT.md`. On any conflict, `SETUP-BRIEF.md` invariants win.
+This file is the whole rulebook; CI caps its size. A new rule is admitted only for a failure real
+shipped work hit, and it REPLACES a line, never stacks. Roles here, never model names: **owner**
+(the human), **orchestrator**, **worker**, **reviewer** — AGENTS.md maps roles to today's models and
+holds the commands; SECURITY.md says what the protections do and do not prove.
 
-## Autonomy level
+## Working rules
 
-**Autonomy is OFF by default (safe by default).** The tracked `.orchestrator/AUTONOMY.json` ships
-DISABLED, so a clone/template never merges anything on its own. An operator opts into **Level 1.5 —
-plan-scoped autonomy** by creating a gitignored `.orchestrator/AUTONOMY.local.json` (the local
-override wins in `load_autonomy`; being untracked, it never travels with the repo). When enabled, the
-operator agrees a plan scope, then the orchestrator may **merge in-scope PRs to `integration`
-autonomously** — no per-PR human click — via `./scripts/dispatch merge <attempt-id>`, which is
-fail-closed and enforces every gate: attempt `passed_pr_opened`; bound reviewer PASS; `ci` green;
-PR head == the reviewed `worker_commit`; and the **merge-time base-check** (base still == bound
-`base_sha`, closing the post-PR stale-base hole). Delete the local override (or set `enabled:false`)
-to revert to Level 1. **`main` promotion stays human-only, permanently** — never auto-merged.
-Spec approval still binds each attempt to intent; the operator reviews results after the fact; `HALT` pauses
-everything. This grant is per-project and does NOT transfer to the eventual real-product repo, which
-gets its own explicit policy decision. Rationale + adversarial validation: `SETUP-REPORT.md` G4-A.
+1. **Intake:** no task starts without a one-line goal and a checkable definition of done; ask the
+   owner if either is missing. Log it with `scripts/intake` before work, close it with evidence, and
+   run `scripts/intake stale` at session end — anything that never reached done is raised with the
+   owner, never quietly dropped. The request ledger stays private, never in this repo.
+2. **One workstream:** one active execution stream. New ideas go to `.orchestrator/BACKLOG.md`, never
+   in beside current work. Business ideas stay private. A real product outside this repo is always
+   somewhere on that backlog — self-improvement may be scheduled first, but never be the only thing.
+3. **Review cap:** draft, then up to three adversarial review rounds, each answered by one
+   revision; ship when clean. Never a fourth round — `scripts/review` refuses it. Trust-critical
+   work with an unresolved critical finding stays BLOCKED: escalate, never ship on a spent cap.
+4. **Communication:** at most five plain bullets — Outcome / Verified / Not done / Risk / Next. A
+   coined term is allowed only when it names code that exists in this repo.
+5. **Every program gets ONE brief.** Pick the tier; when it could be two, take the higher one.
+   - *Small* — one change, in one place, easy to undo, nothing else depends on it: the intake gate
+     is enough. Any plan stays under 40 lines.
+   - *Standard* — a bigger job that is still one job: a plan settling what is in and out, the steps,
+     how it is checked, how it is undone. 100–150 lines, hard cap 250.
+   - *Full brief* — several jobs sharing one goal; work you must approve part-way through; anything
+     touching safety, credentials, money, live systems, or data that cannot be undone; or a design
+     decision that changes several parts at once. About 250 lines, hard cap 400. It says: what
+     exists at the end that does not now; what is deliberately not being done; the decisions you
+     already made and what would justify reopening one (a technical guess is never one of those — it
+     goes in the assumptions, with its evidence); the smallest end-to-end run that would prove the
+     whole approach wrong, done FIRST; each checkpoint with the command that proves it passed, who
+     decides, and what happens when it fails; how the work is verified; how it is undone; what is
+     left for later; and how anyone outside can tell it is done.
+   Reviewed once, then the program runs end to end — the owner steps in only at the checkpoints. One
+   brief per program: reference it, never copy it; what we learn later is added to it with a date and
+   reopens the checkpoints it touches. Plans and briefs are working files: delete them once the work
+   ships, git keeps them. `scripts/codex-plan` enforces the caps and sections. This tiering is a
+   hypothesis built on one success (the 235-line founding brief) — revisit after three programs.
+6. **Cross-checking earns its cost** on ideas, briefs, and trust-critical code. Everywhere else,
+   deterministic checks and tests outrank agreement between models — agreement is not evidence.
+7. **Maximal delegation:** the orchestrator delegates every delegable task to the worker, and works
+   directly only when no worker is available or the task is its own (dispatch, review, the trust
+   boundary). The reviewer is never the same vendor as the author, and nothing reviews its own work.
 
-## Session-start ritual (Gate 3)
+## Safety invariants (never violate)
 
-Run **`./scripts/dispatch reconcile`** first thing. It reads `.orchestrator/state/*.json`, inspects
-real unit state (`systemctl --user`), and flips any attempt whose state is `running` but whose unit
-is gone (orchestrator/box restart) to `interrupted` — resumable ONLY as a fresh attempt (never
-hand-finish a partial worktree; see quota/degradation policy). Then resume from the recorded next
-action. Never ask the operator to reconstruct context these files already hold.
+- Only the owner changes `main`. `integration` changes only through a pull request with `ci` green.
+- Workers run as a separate identity that cannot reach the owner's home, and their tests have no
+  network. No isolation means no launch: nothing is created, nothing runs. `ORCH_ALLOW_UNISOLATED=1`
+  is full exposure, needs the owner's explicit instruction, and its use is recorded — though the
+  record cannot prove who set it.
+- A test that did not run did not pass. Required tests are restored from the orchestrator's own copy
+  before grading; a skipped, missing, or empty result fails. A worker's prose is never a grade.
+- Every high-risk dispatch needs an approval file from the owner, which the orchestrator never
+  writes. An approval is tied to the exact wording of that spec and to this machine: edit the spec
+  and it is void, copy it from elsewhere and it authorizes nothing. Unclassified or ambiguous work
+  is high-risk, and nothing may reward calling it anything lighter.
+- A change to the safety machinery is never checked, approved, reviewed, or merged by the new
+  version of itself: the installed version runs every gate, and the new one goes live only after
+  separate approval and installation.
+- The reviewer sees only the spec, the diff, and the evidence — no tools — and its verdict binds. A
+  verdict holds only for the exact code it was shown: if the code has moved on, the review is run
+  again, never stretched to cover code nobody reviewed.
+- Only the orchestrator holds the owner's credentials; workers get a cleaned environment. Known
+  holes in that story are listed in SECURITY.md and queued in the backlog. Never claim more
+  protection than the tests prove.
+- Stop a job with `dispatch cancel` (it stops the job's own unit), never by killing a process number
+  we wrote down earlier — that once killed the wrong thing. Every launch leaves a durable record,
+  even one that dies on startup. Nothing goes live on failing, partial, or skipped tests, and
+  interrupted work restarts as a fresh attempt; it is never finished by hand.
+- Autonomy is off unless an untracked `AUTONOMY.local.json` grants it, only gated
+  `./scripts/dispatch merge` may use it, and it never reaches `main`. It is granted in this working
+  repo; the template ships with it disabled.
 
-## Health monitoring (Gate 3 — soft-alert, confirm-then-cancel)
+## Session start
 
-`./scripts/dispatch health <attempt-id>` (threshold `--minutes`, default 10). A stale JSONL event
-stream raises an **alert, not a kill**. Silence ≠ death: a long compile/test is silent but busy.
-Cancel ONLY a **confirmed hang** — unit alive but no CPU progress, no new events, and no journal
-activity across **two consecutive** checks. A busy-but-silent worker (CPU advancing) always
-survives.
-
-## Definition of done (a spec is `done` only when ALL hold)
-
-Acceptance criteria demonstrably met; the change was inspected, not inferred from a worker's claim;
-integrity preconditions held; deterministic checks ran and passed; the reviewer returned a bound
-PASS; remediation stayed within limits; no scope drift; the summary states real results with
-evidence paths. **"Should work" is never evidence.**
-
-## Remediation + integration (Gate 4)
-
-- **Remediation limits by risk_class: low 5 / default 3 / high 1.** Attempt 1 is never a
-  remediation; interrupted/stale_base/spec_blocked launches don't consume budget — only merit
-  failures (test/review/scope/integrity) do. Each remediation is a NEW attempt whose prompt embeds
-  the SPECIFIC findings of the last failure. Two consecutive identical findings = stop-early. Limit
-  exhausted or stop-early → spec `failed_remediation_exhausted` + a tracked escalation record in
-  `.orchestrator/escalations/` — never an infinite loop, never silent success.
-- **High-risk specs need the operator's per-dispatch approval artifact** (`approvals/<digest>.attempt-<n>.json`)
-  before EVERY dispatch, at every autonomy level.
-- **`./scripts/integrate <attempt-id>…`** is the deterministic integration step: merges in
-  `depends_on` order via the base-checked `dispatch merge`, re-runs the suite after every merge,
-  cleans up worktree/branch, auto-commits provenance (spec + approvals + attempt evidence +
-  escalations). Merge conflict or suite failure = stop/escalate — never AI-resolved.
-
-## Quota / degradation policy (policy-note item 1 — permanent, not deferred)
-
-- A worker hitting a rate/usage limit mid-attempt is classified **`interrupted`**, not failed:
-  preserve all evidence, stop the unit. **Resume ONLY as a fresh attempt in a fresh worktree**
-  after capacity returns. Never resume or hand-finish a partially modified worktree — mixed
-  authorship poisons provenance.
-- **The orchestrator NEVER takes over implementation. Self-review is never permitted, under any
-  degradation. Fail closed:** a stalled pipeline with clean state is correct behaviour.
-- Only acceptable continuity variant (post-MVP, if ever): a separate Claude *worker* authors; merge
-  blocks until an independent Codex reviewer verdict when quota returns.
-- Codex quota is ONE shared constrained resource (implementation + any future spec reviews).
-
-## Dual-validated planning (control-plane / decision layer)
-
-Governs the DECISION layer, not worker implementation; does NOT add a plan-conformance gate to the
-worker pipeline (the Planning policy below stays fully intact). Ratified by the operator + validated with SOL,
-2026-07-13 (`.orchestrator/decisions/PLAN-dual-validation/`).
-
-**Rule:** before a non-trivial control-plane action or a durable recommendation, Claude prepares a
-decision-complete plan and obtains explicit validation from BOTH Claude and Codex SOL on the SAME
-plan revision. Read-only discovery, disposable experiments, and drafting may happen first.
-
-**Non-trivial if ANY holds** (uncertain → treat as non-trivial; complexity / duration / file-count
-alone never count):
-1. creates/changes a durable policy, invariant, architectural precedent, shared contract/schema, or
-   mechanism meant for reuse across jobs/specs;
-2. changes trust/security boundaries, credentials, isolation, approval/autonomy, gate behavior,
-   evidence integrity, protected branch/release behavior, or recovery semantics;
-3. a destructive / irreversible / production-facing / novel external side effect not already
-   authorized by an established workflow;
-4. affects behavior beyond one approved spec's allowed paths + acceptance/test scope;
-5. a research/review deliverable that recommends or authorizes any of the above.
-
-**Worked examples (the operator, 2026-07-13):** a new **business idea / research** deliverable → the
-*recommendation* is non-trivial (dual-validated); the read-only investigation feeding it is exempt.
-A **high-level spec / requirements set for a new feature, or a non-trivial bug fix** → non-trivial,
-dual-validated at the requirements/design level. The routine low-level specs that then implement
-already-decided intent → exempt (gated by approval + reviewer + CI).
-
-**Exempt (unless a trigger fires):** read-only diagnostics/status; clerical no-semantic changes;
-routine spec drafting that instantiates already-decided intent via established mechanisms; routine
-dispatch/monitor/retry/PR mechanics; worker/helper implementation bounded by an approved
-spec+scope+test+review+CI. Worker checklists are NEVER cross-reviewed.
-
-**Two tiers:** *Standard* (non-trivial, not Critical) → ONE adversarial SOL pass returning explicit
-**PASS/BLOCK** that addresses the strongest counterargument, questionable assumptions, failure
-modes, and validation gaps; Claude records a disposition per material finding; a BLOCK — or a
-material change to approach/scope/risk/validation/rollback after PASS — requires resubmission.
-*Critical* (governing policy/invariants, trust/security boundaries, approval/autonomy, gates/evidence
-integrity, protected branch/release, multi-job shared contracts, or irreversible/production
-consequences) → Claude+SOL iterate on the SAME revision until both explicitly report no unresolved
-blocker; unresolved disagreement goes to the operator, never silently resolved.
-
-**Decision-complete plan** (what earns the round-trip): decision + non-goals; current-state evidence
-+ assumptions; alternatives + why this one; affected boundaries/consumers; failure modes + blast
-radius; ordered steps; validation criteria; rollback / irreversibility; open questions. "N/A,
-because…" is fine — "detailed" means decision-complete, not long. Review ONE coherent decision;
-don't split to evade review or bundle unrelated decisions to amortize it.
-
-**Quota/availability:** consults and workers share ONE Codex budget. One initial consult per
-decision; never interrupt a running worker to consult; run detached with no minute-scale timeout. If
-SOL or quota is unavailable the decision stays **PENDING** (exempt work continues) — skipping SOL is
-non-compliant, never a silent Claude-only fallback. Only the operator may authorize a scoped, recorded waiver
-(rationale/scope/expiry); emergency pre-validation action is limited to minimum reversible
-containment of active harm.
-
-**Record** each reviewed decision under `.orchestrator/decisions/<id>/`: trigger classification +
-tier, plan/revision digest, consult prompt + full SOL response (+ raw-stream sha256), Claude's
-disposition, explicit Claude + SOL verdicts, model/commit ids, any waiver/unresolved issue. Any
-binding requirement the plan creates MUST be encoded in governing policy or an approved spec before
-dispatch — workers are judged only by spec/scope/tests/diff/review/CI, never by conformance to a plan.
-
-## Planning policy (policy-note item 2)
-
-- **Workers** get the fixed preamble in `scripts/dispatch.py` (inspect-before-editing; a concise
-  revisable checklist for non-trivial tasks; the spec + evidence gates stay binding; if discovery
-  invalidates the spec/scope, stop and report **`SPEC_BLOCKED`** — never improvise). `SPEC_BLOCKED`
-  voids the approval and requires a spec revision + new approval digest.
-- **Orchestrator** (this agent): same scaled-checklist discipline for non-trivial scaffolding code.
-  No separate plan documents, no plan ceremony for routine actions.
-- **Reviewers**: NO planning phase. Mandatory structured rubric (per-criterion MET/UNMET with
-  evidence + scope + regression + security), enforced by `scripts/verdict.schema.json` (v2) and
-  fail-closed checks in the dispatcher. A PASS with empty `reasons`, or with any UNMET criterion,
-  is rejected.
-- The worker's plan/checklist is **NEVER** passed to the reviewer (confirmation-bias
-  contamination). The reviewer judges spec, diff, and evidence only. There is no plan-conformance
-  gate anywhere; the binding artifacts are the spec, approved scope, and `test_command`.
-
-## Hard invariants (never violate — see SETUP-BRIEF.md Appendix A)
-
-- `launch` returns immediately; `await` is bounded polling. No blocking on a worker's lifetime.
-- Review verdicts are binding and fail-closed, enforced in the dispatcher — never advisory.
-- Cancellation targets the systemd **unit/cgroup**, never a recorded PID.
-- Every launch, even one that crashes at startup, leaves a durable record.
-- Nothing activates with failing or partial tests. CI + branch protection are the hard merge gate.
-- Workers run with a scrubbed env, network off, sandboxed; only the orchestrator holds GitHub/SSH
-  credentials and pushes/opens PRs (D11).
-- **Worker isolation is D5, LANDED (not deferred).** The worker AND the gate `test_command` (both
-  run worker-produced code) execute as the dedicated `codex-worker` UID in hardened `systemd-run
-  --uid` system services: `the operator's home` is inaccessible (DAC + `InaccessiblePaths`), writes are
-  confined to the worktree (`ProtectSystem=strict`+`ReadWritePaths`), and the test phase has
-  `PrivateNetwork=yes`. This is what actually closes risk 13-B — on this host Codex's sandbox can't
-  restrict reads (Landlock), so DAC is the boundary. The reviewer runs with ALL tools denied (no
-  Read/Grep/Glob) — it judges only the spec+diff+evidence it is handed. Setup:
-  `scripts/setup-worker-user.sh`; proof: `tests/worker_isolation.sh`. Residual (deferred): the
-  worker's own copied Codex token is readable to its own model-commands, which keep network —
-  closing that needs per-attempt UIDs or a credential broker. **`needs_network:true` stays refused
-  until that step.** If `isolation_available()` is false (fresh box / CI), the dispatcher falls
-  back to same-user launch and records `isolation:false` so provenance never overstates the boundary.
-- **Parallelism (Gate 3 part 3): `MAX_PARALLEL=2`.** The slot claim is atomic (`claim_slot`, under
-  the STATE lock): at most 2 live attempts, at most one live attempt per spec. Each attempt has a
-  unique branch/worktree. **Stale base is refused, never hand-rebased:** if the base branch advanced
-  while an attempt ran (a sibling integrated), the dispatcher records `stale_base` at push and opens
-  no PR; the orchestrator re-launches a **fresh** attempt off the new base so ALL gates re-run
-  against what would actually land. A reviewed verdict is only valid for the base it was bound to.
+Run `./scripts/dispatch reconcile` first and resume from the recorded state — never ask the owner to
+reconstruct what the state files hold. Prefer a fresh session per workstream.
