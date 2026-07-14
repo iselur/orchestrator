@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # The review-round cap must live in code: a prose cap already lost once to a ten-round review loop
-# (~10,000 lines of revisions later replaced by a ~50-line hand fix). scripts/review allows two
-# rounds per topic, refuses the third, refuses Codex-authored artifacts (its reviewer is Codex),
-# and must hold the cap under concurrent invocations. Codex is always a local stub here.
+# (~10,000 lines of revisions later replaced by a ~50-line hand fix). scripts/review allows three
+# rounds per topic, refuses the fourth, counts ONLY round-N.md files as rounds (a sibling artifact
+# once consumed a phantom round), refuses Codex-authored artifacts (its reviewer is Codex), and
+# must hold the cap under concurrent invocations. Codex is always a local stub here.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
@@ -37,29 +38,63 @@ rc=$?
 [ "$rc" = 4 ] && ok "Codex-authored artifact refused (exit 4)" || bad "Codex-on-Codex not refused (exit $rc)"
 [ -e .orchestrator/reviews/demo-topic ] && bad "refused author still created state" || ok "author refusal writes nothing"
 
-# 3. Round 1 and round 2 run and are recorded.
+# 3. Rounds 1-3 run and are recorded; sibling artifacts in the topic dir do NOT consume rounds.
 scripts/review --topic demo-topic --author claude "round one prompt" >/dev/null 2>&1 \
   && ok "round 1 runs" || bad "round 1 failed"
+printf 'author notes, not a review round\n' > .orchestrator/reviews/demo-topic/round-1-dispositions.md
 scripts/review --topic demo-topic --author claude "round two prompt" >/dev/null 2>&1 \
-  && ok "round 2 runs" || bad "round 2 failed"
-n=$(find .orchestrator/reviews/demo-topic -name 'round-*.md' | wc -l)
-[ "$n" = 2 ] && ok "two rounds recorded" || bad "expected 2 recorded rounds, found $n"
+  && ok "round 2 runs despite a round-1-*.md sibling artifact" || bad "sibling artifact consumed a phantom round"
+scripts/review --topic demo-topic --author claude "round three prompt" >/dev/null 2>&1 \
+  && ok "round 3 runs" || bad "round 3 failed"
+n=$(find .orchestrator/reviews/demo-topic -name 'round-[0-9].md' | wc -l)
+[ "$n" = 3 ] && ok "three rounds recorded" || bad "expected 3 recorded rounds, found $n"
 
-# 4. Round 3 is refused with a distinct exit code and writes nothing.
-scripts/review --topic demo-topic --author claude "round three prompt" >/dev/null 2>&1
+# 4. Round 4 is refused with a distinct exit code and writes nothing.
+scripts/review --topic demo-topic --author claude "round four prompt" >/dev/null 2>&1
 rc=$?
-[ "$rc" = 3 ] && ok "round 3 refused (exit 3)" || bad "round 3 not refused (exit $rc)"
-n=$(find .orchestrator/reviews/demo-topic -name 'round-*.md' | wc -l)
-[ "$n" = 2 ] && ok "refusal wrote nothing" || bad "refusal still wrote a round file"
+[ "$rc" = 3 ] && ok "round 4 refused (exit 3)" || bad "round 4 not refused (exit $rc)"
+n=$(find .orchestrator/reviews/demo-topic -name 'round-[0-9].md' | wc -l)
+[ "$n" = 3 ] && ok "refusal wrote nothing" || bad "refusal still wrote a round file"
 
-# 5. The cap holds under concurrency: three simultaneous invocations on a fresh topic must yield
-#    exactly two recorded rounds (unlocked counting would let all three claim a round).
-CODEX_STUB_SLEEP=1 scripts/review --topic race-topic --author claude "concurrent a" >/dev/null 2>&1 &
-CODEX_STUB_SLEEP=1 scripts/review --topic race-topic --author claude "concurrent b" >/dev/null 2>&1 &
-CODEX_STUB_SLEEP=1 scripts/review --topic race-topic --author claude "concurrent c" >/dev/null 2>&1 &
-wait
-n=$(find .orchestrator/reviews/race-topic -name 'round-*.md' | wc -l)
-[ "$n" = 2 ] && ok "concurrent invocations still cap at 2 rounds" || bad "race produced $n rounds (expected exactly 2)"
+# 5. The cap holds under concurrency: of four simultaneous invocations on a fresh topic, exactly
+#    three must SUCCEED and one must be REFUSED with exit 3 — filenames alone would not prove the
+#    fourth process actually lost (bare `wait` discards statuses; the multiset is the evidence).
+pids=()
+CODEX_STUB_SLEEP=1 scripts/review --topic race-topic --author claude "concurrent a" >/dev/null 2>&1 & pids+=($!)
+CODEX_STUB_SLEEP=1 scripts/review --topic race-topic --author claude "concurrent b" >/dev/null 2>&1 & pids+=($!)
+CODEX_STUB_SLEEP=1 scripts/review --topic race-topic --author claude "concurrent c" >/dev/null 2>&1 & pids+=($!)
+CODEX_STUB_SLEEP=1 scripts/review --topic race-topic --author claude "concurrent d" >/dev/null 2>&1 & pids+=($!)
+rcs=""
+for p in "${pids[@]}"; do wait "$p"; rcs="$rcs $?"; done
+rcs=$(echo "$rcs" | tr ' ' '\n' | sed '/^$/d' | sort -n | tr '\n' ' ' | sed 's/ $//')
+[ "$rcs" = "0 0 0 3" ] && ok "race statuses are exactly three successes and one refusal" || bad "race statuses were '$rcs' (expected '0 0 0 3')"
+n=$(find .orchestrator/reviews/race-topic -name 'round-[0-9].md' | wc -l)
+[ "$n" = 3 ] && ok "concurrent invocations still cap at 3 rounds" || bad "race produced $n rounds (expected exactly 3)"
+
+# 7. Corrupt round states refuse rather than count: a gap lets the counter re-claim an existing
+#    round and overwrite it forever (unlimited rounds); symlinks and directories are not rounds.
+mkdir -p .orchestrator/reviews/gap-topic
+printf 'stray round two\n' > .orchestrator/reviews/gap-topic/round-2.md
+scripts/review --topic gap-topic --author claude "prompt" >/dev/null 2>&1
+rc=$?
+[ "$rc" = 5 ] && ok "gap state refused (exit 5)" || bad "gap state not refused (exit $rc)"
+grep -q 'stray round two' .orchestrator/reviews/gap-topic/round-2.md \
+  && ok "gap refusal overwrote nothing" || bad "gap refusal clobbered the existing round file"
+mkdir -p .orchestrator/reviews/link-topic
+printf 'real\n' > .orchestrator/reviews/link-topic/target.md
+ln -s target.md .orchestrator/reviews/link-topic/round-1.md
+scripts/review --topic link-topic --author claude "prompt" >/dev/null 2>&1
+rc=$?
+[ "$rc" = 5 ] && ok "symlink round refused (exit 5)" || bad "symlink round not refused (exit $rc)"
+mkdir -p .orchestrator/reviews/dir-topic/round-1.md
+scripts/review --topic dir-topic --author claude "prompt" >/dev/null 2>&1
+rc=$?
+[ "$rc" = 5 ] && ok "directory round refused (exit 5)" || bad "directory round not refused (exit $rc)"
+mkdir -p .orchestrator/reviews/multi-topic
+printf 'stray multi-digit round\n' > .orchestrator/reviews/multi-topic/round-10.md
+scripts/review --topic multi-topic --author claude "prompt" >/dev/null 2>&1
+rc=$?
+[ "$rc" = 5 ] && ok "multi-digit stray round refused (exit 5)" || bad "round-10.md read as a clean directory (exit $rc)"
 
 # 6. A different topic gets its own counter; empty prompts are refused.
 scripts/review --topic other-topic --author claude "prompt" >/dev/null 2>&1 \
