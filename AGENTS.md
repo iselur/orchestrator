@@ -57,4 +57,4 @@ untouched → in scope → tests actually ran → cross-vendor review), and open
   is reviewed by Claude — worker diffs by the bound reviewer in the dispatcher, plans in-session —
   under the same three-round cap.
 - Plans go through `scripts/codex-plan --brief` (cap 400; refuses a brief missing any required
-  section). Legacy `--small`/default tiers still run if explicitly invoked. Trigger: CLAUDE.md rule 5.
+  section); `--small` and the no-flag standard tier remain usable. Trigger: CLAUDE.md rule 5.

@@ -18,7 +18,9 @@ private request ledger every ten minutes and restarts or resumes the session whe
 pending. Automatically retrying after a five-hour usage-window reset is a future, owner-gated
 option, not enabled by default. Every change must pass tests and verification.
 
-Passing work becomes a pull request to `ready-for-main`. Only you can merge it to `main`.
+Passing work becomes a pull request to `ready-for-main`. Promotion to `main` is yours — or the
+orchestrator's, only under your recorded grant (green `ci` plus a binding cross-vendor PASS on
+the exact diff).
 
 The [visual explanation](how-it-works.html) shows the whole process on one page.
 

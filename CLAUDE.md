@@ -58,5 +58,6 @@ Prefer a fresh session per workstream.
 - Stop a job with `dispatch cancel`, never by killing a process number — that once killed the
   wrong thing. Interrupted work restarts as a fresh attempt; never finish it by hand.
 - Autonomy is off by default and needs an explicit grant file — untracked `AUTONOMY.local.json`,
-  or the tracked `AUTONOMY.json` that ships disabled; only gated `./scripts/dispatch merge` and
-  `dispatch integrate` may auto-merge — never a by-hand `gh pr merge`.
+  or the tracked `AUTONOMY.json` that ships disabled. Autonomy reaches only `ready-for-main`,
+  through the gated `./scripts/dispatch merge` or `dispatch integrate` — never a bare
+  `gh pr merge`, never `main`.

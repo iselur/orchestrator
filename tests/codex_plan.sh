@@ -222,7 +222,7 @@ assert_file "$run_dir/PLAN-011.stdout"
 assert_file "$run_dir/PLAN-011.stderr"
 
 # Each tier has its own cap (--small 40, default 250, --brief 400; CLAUDE.md rule 5 now names only
-# --brief, the lighter tiers stay as explicitly invoked options). A body over
+# --brief, while --small and the no-flag standard tier remain usable). A body over
 # its cap is refused, the raw output is retained, and no plan is minted. Exact boundaries, and the
 # fixtures have NO terminal newline (the stub prints with printf '%s') — the cap must count a final
 # unterminated line, which wc -l would miss. Both spellings of "N lines" must agree, so every
