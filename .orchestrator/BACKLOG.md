@@ -16,8 +16,8 @@ against this description: what matches, what doesn't, what is missing.
 
 ## Next up (operator-ordered)
 
-1. **Finish the lean cleanup** — merge the docs, plain-language the rules, reframe the README,
-   tier the brief policy. In flight.
+1. **Config-driven reviewer assignment** — move reviewer choice (vendor/model) from hard-wired
+   cross-vendor rules into config; floor: nothing reviews its own work and verdicts still bind.
 2. **Auto-resume after a usage window** — a long-lived session plus a small watchdog that restarts
    it and alerts when work is pending but nothing has run. Approved by the operator 2026-07-14;
    replaces the timers deleted on 2026-07-13 (they fired, but each one-shot session died the moment
