@@ -152,6 +152,67 @@ check("B9 no interpreter available leaves ORCH_TEST_PY unset (loud strict failur
 d.trusted_test_runtime, d.ROOT = real_rt, real_root
 del _os.environ["ORCH_TEST_PY"]
 
+# R69: reviewer-model failover. Fires ONLY on the CLI's structured model-not-found envelope
+# (is_error + api_error_status 404) AND only when the pinned primary (claude-fable-5) was asked
+# for; one retry on the fallback, both envelopes + an escalation kept. Every other failure stays
+# fail-closed with a single invocation — no error may buy the diff a second reviewer roll.
+check("R69 helper accepts only the 404 model-not-found envelope",
+      d.reviewer_model_unavailable(json.dumps({"is_error": True, "api_error_status": 404}))
+      and not d.reviewer_model_unavailable(json.dumps({"is_error": True, "api_error_status": 500}))
+      and not d.reviewer_model_unavailable("not json")
+      and not d.reviewer_model_unavailable(""))
+
+d.ESCALATIONS = tmp / "escalations"
+notfound = json.dumps({"is_error": True, "api_error_status": 404})
+lc69 = {"worktree": str(repo), "base_sha": "b" * 40, "spec_digest": "d" * 64,
+        "reviewer_model": "claude-fable-5", "reviewer_effort": "high"}
+
+calls = []
+def failover_run(cmd, **kw):
+    calls.append(cmd)
+    if len(calls) == 1:
+        return subprocess.CompletedProcess(cmd, 1, stdout=notfound, stderr="")
+    return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(
+        {"result": json.dumps({"verdict": "PASS"})}), stderr="")
+d.run = failover_run
+att69 = tmp / "attempts" / "SPEC-901" / "1"; (att69 / "raw").mkdir(parents=True)
+verdict, raw = d.review(att69, "SPEC-901", lc69, "c" * 40)
+check("R69 404 on the primary triggers exactly one fallback invocation", len(calls) == 2)
+check("R69 first invocation asked for the primary model",
+      calls[0][calls[0].index("--model") + 1] == "fable")
+check("R69 fallback invocation asked for the fallback model",
+      calls[1][calls[1].index("--model") + 1] == d.REVIEWER_FALLBACK_MODEL)
+check("R69 fallback envelope is the one adopted and recorded",
+      (att69 / "raw" / "review-envelope.json").read_text() != notfound
+      and (att69 / "raw" / "review-envelope-primary.json").read_text() == notfound)
+check("R69 failover record and escalation are durable",
+      (att69 / "raw" / "reviewer-failover.json").exists()
+      and any(d.ESCALATIONS.iterdir()))
+
+calls = []
+def error_run(cmd, **kw):
+    calls.append(cmd)
+    return subprocess.CompletedProcess(cmd, 1, stdout=json.dumps(
+        {"is_error": True, "api_error_status": 500}), stderr="")
+d.run = error_run
+att70 = tmp / "attempts" / "SPEC-902" / "1"; (att70 / "raw").mkdir(parents=True)
+verdict, raw = d.review(att70, "SPEC-902", lc69, "c" * 40)
+check("R69 non-404 reviewer error stays fail-closed with a single invocation",
+      verdict is None and len(calls) == 1
+      and not (att70 / "raw" / "reviewer-failover.json").exists())
+
+calls = []
+def notfound_run(cmd, **kw):
+    calls.append(cmd)
+    return subprocess.CompletedProcess(cmd, 1, stdout=notfound, stderr="")
+d.run = notfound_run
+lc71 = dict(lc69, reviewer_model=d.REVIEWER_FALLBACK_MODEL)
+att71 = tmp / "attempts" / "SPEC-903" / "1"; (att71 / "raw").mkdir(parents=True)
+verdict, raw = d.review(att71, "SPEC-903", lc71, "c" * 40)
+check("R69 404 on a non-primary model does not retry (no failover-of-the-failover)",
+      verdict is None and len(calls) == 1
+      and not (att71 / "raw" / "reviewer-failover.json").exists())
+
 sys.exit(1 if fails else 0)
 PY
 echo "PASS dispatch_fail_closed.sh"
