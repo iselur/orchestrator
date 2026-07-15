@@ -165,8 +165,18 @@ notfound = json.dumps({"type": "result", "is_error": True, "api_error_status": 4
                        "result": "There's an issue with the selected model "
                        "(claude-fable-5). It may not exist or you may not have access to it. "
                        "Run --model to pick a different model."})
+# Round-3-review, finding on test discrimination: to prove the JSON-body rejection is load-bearing
+# (not masked by the two-phrase requirement), the JSON fixtures must carry BOTH signature phrases.
+# `both_phrases` is a plain (non-JSON) string with both → it MUST trigger; wrapping the SAME text as
+# a JSON array or JSON string scalar decodes as valid JSON → it MUST be rejected. The only thing
+# that differs between the positive control and the two negatives is JSON-encodability, so a passing
+# `all(phrases)` alone cannot explain the rejection — only `json.loads(res)` can.
+both_phrases = ("issue with the selected model — it may not exist or you may not have access to it")
+def env404(result):
+    return json.dumps({"type": "result", "is_error": True, "api_error_status": 404, "result": result})
 check("failover trigger accepts only the full model-not-found discriminator",
       d.reviewer_model_unavailable(notfound)
+      and d.reviewer_model_unavailable(env404(both_phrases))                  # both phrases, non-JSON -> True (control)
       and not d.reviewer_model_unavailable(json.dumps(
           {"is_error": True, "api_error_status": 404}))                      # missing type=result
       and not d.reviewer_model_unavailable(json.dumps(
@@ -189,15 +199,13 @@ check("failover trigger accepts only the full model-not-found discriminator",
       and not d.reviewer_model_unavailable(json.dumps(
           {"type": "result", "is_error": True, "api_error_status": 404,
            "result": "The requested resource was not found"}))              # unrelated 404 string
-      and not d.reviewer_model_unavailable(json.dumps(
-          {"type": "result", "is_error": True, "api_error_status": 404,
-           "result": "There's an issue with the selected model"}))          # only ONE phrase (round-3)
-      and not d.reviewer_model_unavailable(json.dumps(
-          {"type": "result", "is_error": True, "api_error_status": 404,
-           "result": json.dumps(["issue with the selected model"])}))       # JSON-array body (round-3)
-      and not d.reviewer_model_unavailable(json.dumps(
-          {"type": "result", "is_error": True, "api_error_status": 404,
-           "result": "42"}))                                                 # JSON-scalar body
+      and not d.reviewer_model_unavailable(env404("There's an issue with the selected model"))
+                                                                             # only ONE phrase -> all() rejects
+      and not d.reviewer_model_unavailable(env404(json.dumps([both_phrases])))
+                                                                             # JSON array w/ BOTH phrases -> json.loads rejects
+      and not d.reviewer_model_unavailable(env404(json.dumps(both_phrases)))
+                                                                             # JSON string scalar w/ BOTH phrases -> json.loads rejects
+      and not d.reviewer_model_unavailable(env404("42"))                     # JSON number scalar
       and not d.reviewer_model_unavailable("not json")
       and not d.reviewer_model_unavailable(""))
 
