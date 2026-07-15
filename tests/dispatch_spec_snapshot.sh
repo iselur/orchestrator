@@ -55,27 +55,48 @@ approved_digest = d.spec_digest("SPEC-777")
 
 att = d.ATTEMPTS / "SPEC-777" / "1"; att.mkdir(parents=True)
 
-# --- (a) snapshot freezes approved bytes; F2: returned metadata parsed from THOSE bytes ---------
-snap_digest, snap_spec = d.write_spec_snapshot("SPEC-777", att, approved_digest)
-check("write_spec_snapshot returns the approved digest", snap_digest == approved_digest)
-check("snapshot file holds the exact approved bytes",
-      d.spec_snapshot_path(att).read_bytes() == ORIGINAL)
-check("F2: returned metadata is parsed from the snapshot bytes (not a separate read)",
-      snap_spec.get("risk_class") == "low" and snap_spec.get("needs_network") is False
-      and snap_spec == d.yaml.safe_load(d.spec_snapshot_path(att).read_bytes()))
-check("snapshot_spec_text returns the approved text when the digest matches",
-      d.snapshot_spec_text(att, approved_digest) == ORIGINAL.decode())
-
-# Mutate the LIVE spec after approval (flip risk_class low->high, needs_network true, weaken
-# criteria) — a real attacker slipping a high-risk/networked change under a low-risk grant.
 MUTATED = (
     "id: SPEC-777\ntitle: mutated\nrisk_class: high\nneeds_network: true\n"
     "objective: o\nin_scope: ['a/**']\nacceptance_criteria: ['do whatever']\n"
     "test_command: 'true'\n"
 ).encode()
+
+# --- (a) SINGLE-READ source of truth: read_approved_spec + write_spec_snapshot (F1 root cause) ---
+# The launch reads specs/<id>.yaml exactly ONCE via read_approved_spec; digest, parse and snapshot
+# all come from that one buffer — never a second open (the read-vs-hash-vs-parse-vs-snapshot TOCTOU).
+r_bytes, r_digest, r_parsed, r_errs = d.read_approved_spec("SPEC-777")
+check("read_approved_spec: digest is the hash of the EXACT bytes it returned",
+      r_digest == sha(r_bytes) == approved_digest)
+check("read_approved_spec: parsed mapping is the parse of those SAME bytes (one buffer)",
+      r_parsed == d.yaml.safe_load(r_bytes) and r_parsed.get("risk_class") == "low")
+check("read_approved_spec: a schema-valid spec yields no errors", r_errs == [])
+
+snap_digest = d.write_spec_snapshot(att, r_bytes, r_digest)
+check("write_spec_snapshot returns the approved digest", snap_digest == approved_digest)
+check("write_spec_snapshot writes the EXACT in-memory bytes it was handed (no re-read)",
+      d.spec_snapshot_path(att).read_bytes() == r_bytes == ORIGINAL)
+# Defensive invariant: mismatched (bytes, digest) can never be silently snapshotted.
+try:
+    d.write_spec_snapshot(att, MUTATED, approved_digest); wmis = None
+except SystemExit as e:
+    wmis = e.code
+check("write_spec_snapshot refuses bytes whose hash != the approved digest", wmis == 6)
+check("the defensive refusal did not overwrite the honest snapshot",
+      d.spec_snapshot_path(att).read_bytes() == ORIGINAL)
+check("snapshot_spec returns the verified parsed mapping (low risk)",
+      d.snapshot_spec(att, approved_digest).get("risk_class") == "low")
+check("snapshot_spec_text returns the approved text when the digest matches",
+      d.snapshot_spec_text(att, approved_digest) == ORIGINAL.decode())
+
+# F1: as the LIVE file changes, each read_approved_spec call still returns a self-consistent triple —
+# parse and hash always describe the same buffer, so version A's metadata can never be bound to
+# version B's snapshotted bytes. And the frozen snapshot from the first read is untouched.
 (d.SPECS / "SPEC-777.yaml").write_bytes(MUTATED)
-check("sanity: the live edit actually changed the digest", d.spec_digest("SPEC-777") != approved_digest)
-check("snapshot_spec_text is UNCHANGED by the live edit (reads the frozen snapshot)",
+m_bytes, m_digest, m_parsed, _ = d.read_approved_spec("SPEC-777")
+check("F1: read_approved_spec stays self-consistent after a live edit (one buffer, parse==hash)",
+      m_digest == sha(m_bytes) and m_parsed == d.yaml.safe_load(m_bytes)
+      and m_parsed.get("needs_network") is True and m_digest != approved_digest)
+check("snapshot from the first read is UNCHANGED by the later live edit",
       d.snapshot_spec_text(att, approved_digest) == ORIGINAL.decode())
 check("the live spec file itself DID change (proves a real edit, not a no-op)",
       d.spec_path("SPEC-777").read_bytes() == MUTATED)
@@ -119,17 +140,12 @@ check("F1 reviewer: the reviewer process was never invoked on a tampered snapsho
 d.spec_snapshot_path(att).write_bytes(ORIGINAL)
 check("restored snapshot verifies again", d.snapshot_spec_text(att, approved_digest) == ORIGINAL.decode())
 
-# --- F2 (race): a live swap between approval and the snapshot write fails closed -----------------
-# The live file is now MUTATED while we still hold the ORIGINAL approved digest — exactly the window
-# where validate_spec()/spec_digest() saw version A but the snapshot read would see version B.
-att2 = d.ATTEMPTS / "SPEC-777" / "2"; att2.mkdir(parents=True)
-try:
-    d.write_spec_snapshot("SPEC-777", att2, approved_digest); race_code = None
-except SystemExit as e:
-    race_code = e.code
-check("F2: write_spec_snapshot refuses when the live spec no longer matches the approved digest",
-      race_code == 6)
-check("a refused snapshot leaves no spec-snapshot.yaml behind", not d.spec_snapshot_path(att2).exists())
+# --- F3 (round-2): the PR title comes from the VERIFIED snapshot, not a fresh live read ----------
+# The live file is MUTATED (title: mutated); the snapshot is ORIGINAL (title: original). The exact
+# expression the PR-title line evaluates — snapshot_spec(att, digest)['title'] — must be the
+# snapshot's title, never the live file's.
+check("F3: PR title source (snapshot_spec) returns the snapshot title, not the live one",
+      d.snapshot_spec(att, approved_digest).get("title") == "original")
 
 # --- (b)/(c) cmd_merge: refuse on drift/tamper, allow on verified matching bytes -----------------
 def setup_merge(n, launch_extra, live_bytes, snapshot_bytes=None):
@@ -184,6 +200,16 @@ setup_merge(15, {"spec_digest": approved_digest, "spec_snapshot_digest": approve
                  "risk_class": "low", "needs_network": False}, ORIGINAL, snapshot_bytes=TAMPERED_SNAP)
 fake, code = run_merge(15)
 check("F1 merge: a tampered spec-snapshot.yaml is REFUSED even when the live spec matches",
+      code == 12 and not fake.merge_called)
+
+# F2 (round-2) at merge: a snapshot-FORMAT attempt (spec_snapshot_digest recorded) whose snapshot
+# file was DELETED must REFUSE — decided by the launch marker, NOT by the file existing, so it can
+# never silently fall back to the live file (which here is a byte-identical ORIGINAL, so a fall-back
+# would wrongly succeed). No snapshot_bytes => the snapshot file is absent.
+setup_merge(18, {"spec_digest": approved_digest, "spec_snapshot_digest": approved_digest,
+                 "risk_class": "low", "needs_network": False}, ORIGINAL)
+fake, code = run_merge(18)
+check("F2 merge: snapshot-format attempt with a MISSING snapshot refuses (no live fall-back)",
       code == 12 and not fake.merge_called)
 
 # (c) verified snapshot + matching live spec -> normal path merges.

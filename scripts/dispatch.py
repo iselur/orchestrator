@@ -353,33 +353,34 @@ def verify_spec_bytes(path: Path, expected_digest: str, label: str, code: int) -
     return data, parsed
 
 
-def write_spec_snapshot(spec_id: str, att: Path, approved_digest: str) -> tuple[str, dict]:
-    """Freeze the exact approved spec bytes into the attempt directory. Read the live file ONCE,
-    hash those bytes and verify they still equal the digest preflight approved (a swap in the window
-    between preflight and here fails closed), then snapshot and PARSE those very bytes so the
-    returned metadata (risk_class/needs_network) provably belongs to the snapshotted spec — never a
-    second read of the file (B2 finding 2). Returns (snapshot_digest, parsed_snapshot_spec)."""
-    data = spec_path(spec_id).read_bytes()
+def write_spec_snapshot(att: Path, data: bytes, approved_digest: str) -> str:
+    """Freeze the EXACT approved spec bytes (the single buffer preflight already read, hashed, and
+    parsed) into the attempt directory. Takes the bytes in memory and never re-opens the live file —
+    that is the whole point (B2 round-2 finding 1: no read-vs-hash-vs-snapshot TOCTOU). Asserts the
+    buffer still hashes to the approved digest as a defensive invariant, then writes it."""
     digest = hashlib.sha256(data).hexdigest()
-    if digest != approved_digest:
-        die(f"spec {spec_id} changed between approval and launch snapshot (approved "
-            f"{approved_digest}, now {digest}); refuse to launch — re-approve the current spec.", 6)
+    if digest != approved_digest:   # can only fire if a caller passed mismatched (bytes, digest)
+        die(f"internal: snapshot bytes hash {digest} != approved digest {approved_digest}; refuse.", 6)
     atomic_write(spec_snapshot_path(att), data)
-    try:
-        parsed = yaml.safe_load(data)
-    except yaml.YAMLError as e:
-        die(f"approved spec {spec_id} YAML parse error at snapshot time: {e}; refuse.", 6)
-    if not isinstance(parsed, dict):
-        die(f"approved spec {spec_id} is not a mapping; refuse.", 6)
-    return digest, parsed
+    return digest
+
+
+def snapshot_spec(att: Path, expected_digest: str) -> dict:
+    """The frozen, verified spec mapping every downstream consumer (worker prompt, reviewer prompt,
+    PR title, merge gate) must use — never a fresh read of the live file (B2). Re-hashes the
+    snapshot bytes on EVERY consumption and refuses if they drifted from the recorded digest (B2
+    finding 1: existence is not integrity — editing spec-snapshot.yaml after launch must not feed
+    unapproved bytes anywhere). Absence is fatal; there is no fall-back to the live spec."""
+    p = spec_snapshot_path(att)
+    if not p.exists():
+        die(f"no spec snapshot at {p}; refuse to consume the live spec file.", 6)
+    _data, parsed = verify_spec_bytes(p, expected_digest, f"spec snapshot {p}", 6)
+    return parsed
 
 
 def snapshot_spec_text(att: Path, expected_digest: str) -> str:
-    """The frozen spec text the worker and reviewer prompts must use — never the live file (B2).
-    Re-hashes the snapshot bytes on EVERY consumption and refuses if they no longer match the
-    recorded digest (B2 finding 1: existence is not integrity — someone editing spec-snapshot.yaml
-    after launch must not feed unapproved bytes to the worker/reviewer). Absence is also fatal;
-    there is no fall-back to the live (possibly-edited) spec."""
+    """The frozen spec TEXT for the worker/reviewer prompts — same verified read as snapshot_spec,
+    returning the exact bytes decoded (so the prompt shows byte-for-byte what was approved)."""
     p = spec_snapshot_path(att)
     if not p.exists():
         die(f"no spec snapshot at {p}; refuse to build a prompt from the live spec file.", 6)
@@ -400,9 +401,9 @@ def load_spec(spec_id: str) -> dict:
     return data
 
 
-def validate_spec(spec_id: str) -> tuple[dict, list[str]]:
-    """Return (spec, errors). Errors empty => schema-valid."""
-    spec = load_spec(spec_id)
+def validate_spec_dict(spec: dict, spec_id: str) -> list[str]:
+    """Schema + cross-field validation of an ALREADY-PARSED spec mapping. Takes the parse so the
+    caller controls how many times the file is read (preflight reads it exactly once — B2 round-2)."""
     schema = json.loads(SPEC_SCHEMA.read_text())
     errors = [f"{'/'.join(map(str, e.path)) or '<root>'}: {e.message}"
               for e in Draft202012Validator(schema).iter_errors(spec)]
@@ -411,7 +412,39 @@ def validate_spec(spec_id: str) -> tuple[dict, list[str]]:
     if spec.get("regression_command") and not spec.get("regression_test_paths"):
         errors.append("regression_command requires non-empty regression_test_paths (the test files to "
                       "overlay onto the base, so the base run fails for the right reason).")
-    return spec, errors
+    return errors
+
+
+def validate_spec(spec_id: str) -> tuple[dict, list[str]]:
+    """Return (spec, errors). Errors empty => schema-valid. Convenience wrapper around a fresh read;
+    the launch path uses read_approved_spec() instead so it reads the file exactly once."""
+    spec = load_spec(spec_id)
+    return spec, validate_spec_dict(spec, spec_id)
+
+
+def read_approved_spec(spec_id: str) -> tuple[bytes, str, dict, list[str]]:
+    """THE single source of truth for a launch: read specs/<id>.yaml exactly ONCE and derive the
+    digest (hash of these exact bytes), the parsed mapping, and validation errors all from that one
+    buffer. No launch code path may re-open the file afterward — a second read is the read-vs-hash-
+    vs-parse-vs-snapshot TOCTOU the audit's B2 round-2 finding 1 flagged (a swap between reads could
+    bind version A's needs_network/depends_on/risk/test_command/ceiling to version B's snapshotted
+    bytes). Returns (bytes, digest, parsed, errors); parsed is {} when the bytes don't parse to a
+    mapping (errors is then non-empty)."""
+    p = spec_path(spec_id)
+    if not p.exists():
+        die(f"spec not found: {p}", 4)
+    try:
+        data = p.read_bytes()
+    except OSError as e:
+        die(f"spec unreadable: {p}: {e}", 4)
+    digest = hashlib.sha256(data).hexdigest()
+    try:
+        parsed = yaml.safe_load(data)
+    except yaml.YAMLError as e:
+        return data, digest, {}, [f"YAML parse error: {e}"]
+    if not isinstance(parsed, dict):
+        return data, digest, {}, ["spec is not a mapping"]
+    return data, digest, parsed, validate_spec_dict(parsed, spec_id)
 
 
 INSTANCE = ORCH / "instance.json"   # gitignored: this operator instance's identity
@@ -467,7 +500,11 @@ def preflight(spec_id: str) -> dict:
     if HALT.exists():
         die(f"HALT present ({HALT}); all launches blocked. Remove it to resume.", 3)
 
-    spec, errors = validate_spec(spec_id)
+    # B2 round-2 finding 1: read the approved spec's bytes exactly ONCE. digest, parse, validation,
+    # and (in cmd_launch) the snapshot all come from THIS single buffer — never a second open of
+    # specs/<id>.yaml. Everything downstream (needs_network refusal, depends_on, remediation risk,
+    # test_command, regression gate, ceiling) reads `spec`, which is the parse of these exact bytes.
+    spec_bytes, digest, spec, errors = read_approved_spec(spec_id)
     if errors:
         die("spec schema-invalid:\n  - " + "\n  - ".join(errors), 4)
 
@@ -477,7 +514,6 @@ def preflight(spec_id: str) -> dict:
             "reads (risk 13-B), so a networked worker could exfiltrate credentials. Requires "
             "the dedicated worker user/container (D5 endgame) first.", 5)
 
-    digest = spec_digest(spec_id)
     approval = approval_for(digest)
     if approval is None:
         die(f"no approval artifact for digest {digest} (spec unapproved or edited since "
@@ -534,7 +570,9 @@ def preflight(spec_id: str) -> dict:
     # NOTE: the MAX_PARALLEL concurrency check is NOT here — it must be atomic with the state
     # write so two concurrent launches cannot both pass it. See claim_slot(), called from
     # cmd_launch under the STATE lock.
-    return {"spec": spec, "digest": digest, "approval": approval}
+    # spec_bytes is the exact buffer that produced `digest` and `spec`; cmd_launch snapshots THESE
+    # bytes (never a re-read), so the snapshot, its digest, and the recorded metadata are one spec.
+    return {"spec": spec, "digest": digest, "approval": approval, "spec_bytes": spec_bytes}
 
 
 def claim_slot(spec_id: str, launching_state: dict) -> None:
@@ -1399,6 +1437,7 @@ def cmd_launch(spec_id: str) -> None:
 
     ctx = preflight(spec_id)
     spec, digest, approval = ctx["spec"], ctx["digest"], ctx["approval"]
+    spec_bytes = ctx["spec_bytes"]   # the single buffer preflight read/hashed/parsed (B2 round-2)
 
     n = next_attempt(spec_id)
     # Gate 4: remediation budget + stop-early + high-risk per-dispatch approval. Dies (recording
@@ -1407,13 +1446,12 @@ def cmd_launch(spec_id: str) -> None:
     attempt_id = f"{spec_id}-{n}"
     att_dir = ATTEMPTS / spec_id / str(n)
     (att_dir / "raw").mkdir(parents=True, exist_ok=True)
-    # B2: freeze the exact approved spec bytes into the attempt now, before any further work. Every
-    # downstream consumer (worker prompt, reviewer prompt, merge gate) reads THIS snapshot, never
-    # the live spec file, so a post-approval edit to specs/<id>.yaml cannot change what gets built,
-    # judged, or merged. Dies (fail closed) if the live spec no longer matches the approved digest.
-    # The parsed snapshot comes from the SAME bytes that were hashed and written, so the recorded
-    # risk_class/needs_network provably belong to the snapshotted spec (B2 finding 2).
-    snapshot_digest, snapshot_spec = write_spec_snapshot(spec_id, att_dir, digest)
+    # B2: freeze the exact approved spec bytes into the attempt now, before any further work. These
+    # are the SAME bytes preflight already read, hashed, and parsed — write_spec_snapshot never
+    # re-opens the live file (B2 round-2 finding 1). Every downstream consumer (worker prompt,
+    # reviewer prompt, PR title, merge gate) reads THIS snapshot, never the live spec, so a
+    # post-approval edit to specs/<id>.yaml cannot change what gets built, judged, or merged.
+    snapshot_digest = write_spec_snapshot(att_dir, spec_bytes, digest)
     # Pin the prompt's output contract before starting the attempt. review() reads this snapshot,
     # so an in-flight attempt and its reviewer cannot straddle a repository schema upgrade.
     atomic_write(att_dir / "verdict.schema.json", VERDICT_SCHEMA.read_text())
@@ -1495,11 +1533,12 @@ def cmd_launch(spec_id: str) -> None:
     atomic_write(att_dir / "launch.json", json.dumps({
         "attempt_id": attempt_id, "spec_id": spec_id, "attempt": n,
         "spec_digest": digest, "spec_snapshot_digest": snapshot_digest,
-        # B2: risk_class/needs_network parsed from the EXACT snapshot bytes (not preflight's earlier
-        # read of the live file — B2 finding 2), so the recorded metadata provably matches the
-        # snapshotted, approved spec. The merge gate re-derives these from verified bytes anyway.
-        "risk_class": snapshot_spec.get("risk_class", "default"),
-        "needs_network": snapshot_spec.get("needs_network", False),
+        # B2: risk_class/needs_network come from `spec`, which is the parse of the SAME bytes that
+        # were hashed into `digest` and written as the snapshot (single-read preflight — B2 round-2
+        # finding 1). The recorded metadata therefore provably matches the snapshotted, approved
+        # spec; the merge gate re-derives these from the verified snapshot bytes anyway.
+        "risk_class": spec.get("risk_class", "default"),
+        "needs_network": spec.get("needs_network", False),
         "base_sha": base_sha, "branch": branch,
         "base_branch": approval.get("base_branch", AUTOMATION_BASE),
         "worktree": str(wt), "worker_model": approval.get("worker_model", "gpt-5.6-sol"),
@@ -1999,9 +2038,12 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
     git("push", "-u", "origin", lc["branch"], cwd=wt)
     # Target the SAME pinned base the attempt was built/tested/reviewed against (B3) — not a separate
     # literal that could drift from base_branch.
+    # B2 round-2 finding 3: the PR title comes from the VERIFIED snapshot mapping, not a fresh
+    # load_spec() read of the live (possibly post-approval-edited) file.
+    snap_title = snapshot_spec(att, lc.get("spec_snapshot_digest") or lc["spec_digest"]).get("title", "")
     pr = run(["gh", "pr", "create", "--draft", "--base",
               base_branch, "--head", lc["branch"],
-              "--title", f"{spec_id}: {load_spec(spec_id).get('title', '')}",
+              "--title", f"{spec_id}: {snap_title}",
               "--body", pr_body(spec_id, lc, worker_commit)], cwd=str(ROOT))
     pr_url = (pr.stdout or "").strip().splitlines()[-1] if pr.returncode == 0 else None
     if pr.returncode != 0:
@@ -2829,12 +2871,18 @@ def cmd_merge(attempt_id: str) -> None:
             f"— re-approve the current spec and relaunch a fresh attempt.", 12)
 
     # risk_class/needs_network: derived from VERIFIED bytes at the point of use — never from the
-    # unverified recorded launch.json fields (B2 finding 2/3). New-format attempts have a snapshot,
-    # re-hashed against the recorded digest here (refuses a tampered spec-snapshot.yaml — B2 finding
-    # 1). Pre-B2 attempts have no snapshot; the live bytes just verified above are byte-identical to
-    # the approved spec, so parsing THOSE SAME bytes (not a second read) is authoritative for them.
-    snap = spec_snapshot_path(att)
-    if snap.exists():
+    # unverified recorded launch.json fields (B2 finding 2/3). Whether this is a snapshot-format
+    # attempt is decided by the LAUNCH MARKER (spec_snapshot_digest present), NOT by the snapshot
+    # file merely existing: deleting a new-format attempt's snapshot must fail closed, never fall
+    # back to the live file (B2 round-2 finding 2). Only genuinely pre-fix attempts — those whose
+    # launch record has no snapshot marker at all — parse the live bytes verified just above (the
+    # SAME buffer, not a second read).
+    if "spec_snapshot_digest" in lc:
+        snap = spec_snapshot_path(att)
+        if not snap.exists():
+            die(f"attempt {attempt_id} is snapshot-format (spec_snapshot_digest recorded) but its "
+                f"spec snapshot {snap} is missing; refuse to merge (no fall-back to the live spec).",
+                12)
         _snap_bytes, gate_spec = verify_spec_bytes(
             snap, approved_digest, f"spec snapshot for {attempt_id}", 12)
     else:
