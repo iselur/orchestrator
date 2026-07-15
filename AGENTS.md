@@ -12,6 +12,9 @@ only file that maps a role to a vendor — swapping a model is an edit here, nev
 | worker | Codex CLI (`gpt-5.6-luna`) | research, drafts, implementation, tests (BUILD phase) |
 | reviewer | whichever vendor did NOT author the work | never self-review, never same-vendor review |
 
+Bound reviewer: `claude-fable-5` high while it resolves; on the API's model-not-found signature the
+dispatcher retries once as `claude-opus-4-8`, durably recorded (owner 2026-07-15: Fable while it lasts).
+
 ## What this repo is
 
 An orchestrator that dispatches worker jobs from schema-validated specs, checks the output (work

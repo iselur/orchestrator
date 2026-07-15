@@ -52,6 +52,10 @@ WORKTREES = ROOT / ".worktrees"
 HALT = ORCH / "HALT"
 SPEC_SCHEMA = SPECS / "spec.schema.json"
 VERDICT_SCHEMA = ROOT / "scripts" / "verdict.schema.json"
+# R69: where the bound reviewer lands when its pinned model is retired by the API (Fable 5
+# retirement, ~2026-07-19). Owner decision 2026-07-15: keep Fable while it resolves, fail over
+# to Opus 4.8 automatically — but only on the deterministic model-not-found signature.
+REVIEWER_FALLBACK_MODEL = "claude-opus-4-8"
 # Approval artifact shapes (B1). Approvals were trusted by digest+instance equality only, and the
 # per-attempt high-risk approval by mere file EXISTENCE — an empty or garbage file authorized a
 # high-risk dispatch. Both are now schema-validated AND bound to this spec/instance (and attempt).
@@ -2484,7 +2488,10 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
 
     # --- step 8: reviewer (bound, fail-closed) --------------------------------
     verdict, vraw = review(att, spec_id, lc, worker_commit, attestation)
-    atomic_write(att / "review.json", json.dumps(verdict, indent=2) if verdict else "{}")
+    # Round-2 finding 3 / round-3 finding 2: bind the EFFECTIVE reviewer model onto the canonical
+    # review record through ONE tested writer (write_review_record), so the attribution is covered
+    # by a direct assertion rather than only as an incidental side effect of this pipeline.
+    write_review_record(att, verdict, lc["reviewer_model"])
     binary_result = (evaluate_binary_review(
         verdict.get("verdict"), verdict.get("criteria", []),
         verdict.get("scope_finding"), verdict.get("regression_finding"),
@@ -2756,6 +2763,71 @@ def evaluate_binary_review(verdict: str, criteria: list[dict], scope_finding: st
     return verdict
 
 
+def write_review_record(att: Path, verdict: "dict | None", effective_reviewer_model: str) -> None:
+    """Persist the canonical review.json, binding the EFFECTIVE reviewer model (the one that actually
+    produced the verdict, after any Fable→Opus failover) onto the record. This is the SINGLE writer
+    of review.json's provenance (round-3 review, finding 2): keeping it here lets a test assert the
+    attribution directly, instead of it being an untested side effect of the dispatch pipeline. The
+    verdict object is copied, never mutated, so the reviewer's own fields are left untouched; the
+    added key is namespaced control-plane provenance that existing key-selecting readers ignore. A
+    missing verdict writes an empty record with no bogus attribution."""
+    record = dict(verdict) if verdict else None
+    if record:
+        record["effective_reviewer_model"] = effective_reviewer_model
+    atomic_write(att / "review.json", json.dumps(record, indent=2) if record else "{}")
+
+
+# Round-2 review, finding 1: a bare `type=result + is_error + api_error_status 404` is NOT
+# specific enough — a missing/null/arbitrary-string `result` alongside those generic fields (any
+# unrelated 404 the CLI ever surfaces that way) would buy the diff a second reviewer roll. The
+# failover must fire ONLY on the model-not-found condition, so we also require the CLI's rendered
+# model-unavailable message. Verified against the installed CLI (2.1.210): `claude -p --json-schema
+# ... --model <bogus>` exits nonzero with exactly this envelope, `result` reading e.g. "There's an
+# issue with the selected model (<name>). It may not exist or you may not have access to it. Run
+# --model to pick a different model." We anchor on the model-name-INDEPENDENT phrasing; if the API
+# ever rewords it, the match fails CLOSED (no spurious failover — the reviewer simply fails and the
+# attempt escalates), which is the safe direction for a trust gate.
+_MODEL_UNAVAILABLE_PHRASES = (
+    "issue with the selected model",
+    "it may not exist or you may not have access",
+)
+
+
+def reviewer_model_unavailable(stdout: str) -> bool:
+    """True ONLY for the CLI's structured model-not-found envelope — the one condition that may
+    trigger the reviewer-model failover. Anything else (auth, rate limit, timeout, garbage output,
+    an unrelated 404) returns False and stays fail-closed with no retry. Round-1 review: the full
+    discriminator is required (type=result + is_error + api_error_status 404), and a verdict-bearing
+    envelope — a `result` that parses as a JSON object — is never "model not found", whatever its
+    status fields claim: structured output proves a model ran. Round-2 review: `result` must be a
+    PRESENT non-empty string carrying the CLI's rendered model-unavailable message (a missing/null
+    `result`, or any unrelated 404 string, is refused)."""
+    try:
+        env = json.loads(stdout or "")
+    except Exception:
+        return False
+    if not (isinstance(env, dict) and env.get("type") == "result"
+            and env.get("is_error") is True and env.get("api_error_status") == 404):
+        return False
+    res = env.get("result")
+    if not isinstance(res, str) or not res.strip():
+        return False
+    # The genuine message is human prose that does NOT parse as JSON. Anything that decodes as
+    # valid JSON — an object, an array, or a scalar — is structured output or a malformed envelope,
+    # never the model-not-found text, and must never buy a retry (round-3 review: the object-only
+    # check let a JSON-array body like ["issue with the selected model"] slip through).
+    try:
+        json.loads(res)
+    except Exception:
+        pass          # not JSON — a plain string, as the real message is
+    else:
+        return False  # decoded as JSON → not the human message
+    low = res.lower()
+    # Require the COMPLETE captured signature — EVERY phrase, not just one fragment (round-3 review:
+    # `any()` let an unrelated 404 carrying only one phrase trigger the failover).
+    return all(phrase in low for phrase in _MODEL_UNAVAILABLE_PHRASES)
+
+
 def validate_review_verdict(verdict: dict, schema_obj: dict, lc: dict, wc: str) -> bool:
     """Fail-closed structural, binding, and binary-rubric consistency validation."""
     try:
@@ -2847,33 +2919,81 @@ def review(att: Path, spec_id: str, lc: dict, wc: str, test_attestation=None):
     # remaining time to the absolute deadline too (the outer unit's RuntimeMaxSec is the whole-attempt
     # backstop, this bounds the phase itself). None => no time left => fail closed (no verdict).
     dl = lc.get("deadline_ts")
-    prefix = deadline_timeout_prefix(dl) if dl is not None else []
-    if prefix is None:
-        return None, "attempt deadline exhausted before the review phase (B6); fail closed"
-    cmd = [
-        *prefix,
-        "claude", "-p", "--output-format", "json", "--json-schema", json.dumps(schema_obj),
-        "--model", lc["reviewer_model"].replace("claude-fable-5", "fable"),
-        "--effort", lc["reviewer_effort"],
-        # B16 round-2: cwd isolation alone does not strip user-level customizations. Verified
-        # against the installed CLI (flags parse; envelope shape unchanged): --safe-mode drops
-        # all customizations (skills/hooks/plugins), --tools "" leaves no tool surface,
-        # --strict-mcp-config with no --mcp-config yields zero MCP servers, and
-        # --no-session-persistence writes no transcript. The denylist stays as belt-and-braces.
-        "--safe-mode", "--tools", "", "--strict-mcp-config", "--no-session-persistence",
-        "--disallowedTools", "Read", "Grep", "Glob", "Bash", "Write", "Edit", "NotebookEdit",
-        "WebFetch", "WebSearch", "Task", "--permission-mode", "manual",
-    ]
-    # B16 + reviewer isolation: run from an empty directory OUTSIDE this repo so the reviewer
-    # process loads no project rulebook or memory (it must see only spec+diff+evidence, and that
-    # context is pure token waste for a tools-denied one-shot). TMPDIR may point inside the repo,
-    # so the location is asserted, not assumed (round-2). A nonzero exit is refused before any
-    # parse: an errored process's stdout — even schema-valid JSON — is not a verdict.
-    with tempfile.TemporaryDirectory(prefix="relay-review-") as neutral_cwd:
-        if Path(neutral_cwd).resolve().is_relative_to(ROOT.resolve()):
-            return None, (f"reviewer neutral cwd {neutral_cwd} resolves inside the repo "
-                          f"(TMPDIR misconfiguration); refusing to run the reviewer (B16)")
-        cp = run(cmd, input=req, cwd=neutral_cwd)
+
+    def invoke_reviewer(model_id):
+        # Round-1 review: the timeout prefix is recomputed per invocation, so a fallback run
+        # gets only the time genuinely remaining — a primary call that burned the budget before
+        # erroring cannot hand the fallback a stale, over-long allowance. Returns a refusal
+        # string instead of a CompletedProcess when the phase must not start.
+        prefix = deadline_timeout_prefix(dl) if dl is not None else []
+        if prefix is None:
+            return "attempt deadline exhausted before the review phase (B6); fail closed"
+        cmd = [
+            *prefix,
+            "claude", "-p", "--output-format", "json", "--json-schema", json.dumps(schema_obj),
+            "--model", model_id.replace("claude-fable-5", "fable"),
+            "--effort", lc["reviewer_effort"],
+            # B16 round-2: cwd isolation alone does not strip user-level customizations. Verified
+            # against the installed CLI (flags parse; envelope shape unchanged): --safe-mode drops
+            # all customizations (skills/hooks/plugins), --tools "" leaves no tool surface,
+            # --strict-mcp-config with no --mcp-config yields zero MCP servers, and
+            # --no-session-persistence writes no transcript. The denylist stays as belt-and-braces.
+            "--safe-mode", "--tools", "", "--strict-mcp-config", "--no-session-persistence",
+            "--disallowedTools", "Read", "Grep", "Glob", "Bash", "Write", "Edit", "NotebookEdit",
+            "WebFetch", "WebSearch", "Task", "--permission-mode", "manual",
+        ]
+        # B16 + reviewer isolation: run from an empty directory OUTSIDE this repo so the reviewer
+        # process loads no project rulebook or memory (it must see only spec+diff+evidence, and that
+        # context is pure token waste for a tools-denied one-shot). TMPDIR may point inside the repo,
+        # so the location is asserted, not assumed (round-2). A nonzero exit is refused before any
+        # parse: an errored process's stdout — even schema-valid JSON — is not a verdict.
+        with tempfile.TemporaryDirectory(prefix="relay-review-") as neutral_cwd:
+            if Path(neutral_cwd).resolve().is_relative_to(ROOT.resolve()):
+                return ("reviewer neutral cwd resolves inside the repo "
+                        "(TMPDIR misconfiguration); refusing to run the reviewer (B16)")
+            return run(cmd, input=req, cwd=neutral_cwd)
+
+    cp = invoke_reviewer(lc["reviewer_model"])
+    if isinstance(cp, str):
+        return None, cp
+    # Fable-retirement failover (owner decision 2026-07-15). The pinned reviewer stays
+    # claude-fable-5 while the model exists; when the API retires it, this ONE deterministic
+    # signature — nonzero exit plus the CLI's structured model-not-found envelope, from the pinned
+    # primary only — triggers a single rerun on the fallback model. Nothing else retries: an auth
+    # failure, rate limit, timeout, or malformed envelope must never buy the diff a second reviewer
+    # roll. The retry cannot weaken the gate — it fires only when the primary produced no verdict
+    # at all (nonzero exit, verdict-bearing envelopes rejected by the trigger). Both envelopes,
+    # both exit codes, and an escalation record are kept, and lc["reviewer_model"] is updated
+    # IN PLACE so review.json's sibling records, result.json, and the PR body all attribute the
+    # verdict to the model that actually produced it (round-1 review: misattribution was blocking).
+    if (cp.returncode != 0 and lc["reviewer_model"] == "claude-fable-5"
+            and reviewer_model_unavailable(cp.stdout)):
+        primary = cp
+        from_model = lc["reviewer_model"]
+        (att / "raw" / "review-envelope-primary.json").write_text(primary.stdout or "")
+        escalate(spec_id, "reviewer model retired; failed over to fallback for this attempt",
+                 {"attempt": str(att), "from_model": from_model,
+                  "to_model": REVIEWER_FALLBACK_MODEL})
+        lc["reviewer_model"] = REVIEWER_FALLBACK_MODEL
+        cp = invoke_reviewer(REVIEWER_FALLBACK_MODEL)
+        # Round-2 review, finding 2: the audit record is written AFTER the fallback runs so the
+        # fallback's own outcome is preserved too — not just the primary's. A fallback that refuses
+        # to start (deadline exhausted → a refusal string) or exits nonzero must leave a durable
+        # trace; the earlier version recorded only the primary and silently lost a failed fallback.
+        record = {
+            "from_model": from_model, "to_model": REVIEWER_FALLBACK_MODEL,
+            "trigger": "type=result is_error api_error_status=404 model-not-found",
+            "primary_returncode": primary.returncode,
+            "primary_stderr_tail": (primary.stderr or "")[-2000:], "created": now(),
+        }
+        if isinstance(cp, str):
+            record["fallback_refused"] = cp
+        else:
+            record["fallback_returncode"] = cp.returncode
+            record["fallback_stderr_tail"] = (cp.stderr or "")[-2000:]
+        (att / "raw" / "reviewer-failover.json").write_text(json.dumps(record, indent=2))
+        if isinstance(cp, str):
+            return None, cp
     (att / "raw" / "review-envelope.json").write_text(cp.stdout or "")
     if cp.returncode != 0:
         return None, cp.stdout
