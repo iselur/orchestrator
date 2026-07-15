@@ -315,7 +315,8 @@ finally:
 # when the working-tree copy is tampered (finding 3), (d) no dotfile is left under tests/ (2a).
 grader = ('#!/bin/sh\necho "RAN_FROM=$0"\n'
           'echo "SELF_ROOT=$(cd "$(dirname "$0")/.." && pwd)"\n'
-          'echo "DEP=$(cat "$(dirname "$0")/../data/dep.txt")"\nexit 0\n')
+          'echo "DEP=$(cat "$(dirname "$0")/../data/dep.txt")"\n'
+          'echo "NOREPLACE=$GIT_NO_REPLACE_OBJECTS"\nexit 0\n')
 dep_files = {**std_files, "tests/a.sh": grader, "data/dep.txt": "PINNED-DEP\n"}
 _saved = (d.ROOT, d.EXECUTION_POLICY, d.STATE)
 try:
@@ -348,6 +349,8 @@ try:
               == ["a.sh", "execution-policy.tsv"])
         check(f"{label}: grader_drift stays clean afterward (no nonce pollution, finding 2a)",
               d.grader_drift(grc, gr) == [])
+        check(f"{label}: GIT_NO_REPLACE_OBJECTS=1 exported into the grader subprocess env (round-3)",
+              "NOREPLACE=1" in logtext)
 finally:
     d.ROOT, d.EXECUTION_POLICY, d.STATE = _saved
 
@@ -374,6 +377,52 @@ check("scope_check ignores the replacement and still catches the out-of-scope ch
 integ, ok = d.integrity(sr, sbase, swc)
 check("integrity descends_from_base is computed with replace disabled",
       integ["descends_from_base"] is True)
+
+# --- Round-3 fix 1: scripts/requirements.txt is in the drift-checked grader set --------------
+# trusted_test_runtime() hashes ROOT/scripts/requirements.txt off the working tree to authorize a
+# dependency closure, so a dirty requirements.txt must trip grader_drift() and refuse grading.
+rq, rqc = make_repo(std_files)
+check("requirements.txt: clean tree passes drift", d.grader_drift(rqc, rq) == [])
+(rq / "scripts" / "requirements.txt").write_text("evil-dep==6.6.6\n")
+check("requirements.txt: dirty requirements.txt trips grader_drift",
+      any("scripts/requirements.txt" in p for p in d.grader_drift(rqc, rq)))
+sh("git", "checkout", "--", "scripts/requirements.txt", cwd=rq)
+(rq / "scripts" / "requirements.txt").unlink()
+check("requirements.txt: deleted requirements.txt trips grader_drift",
+      any("scripts/requirements.txt" in p for p in d.grader_drift(rqc, rq)))
+sh("git", "checkout", "--", "scripts/requirements.txt", cwd=rq)
+check("requirements.txt: clean again after restore", d.grader_drift(rqc, rq) == [])
+# a committed symlink requirements.txt is rejected too (bytes+type, like the manifest)
+sy, syc = make_repo({"tests/a.sh": "#!/bin/sh\nexit 0\n", "scripts/test": "#!/bin/sh\n",
+                     "tests/execution-policy.tsv": "tests/a.sh\tcandidate-read\tr\n",
+                     "real-req.txt": "pkg==1.0\n"},
+                    commit_symlinks={"scripts/requirements.txt": "../real-req.txt"})
+check("requirements.txt: committed symlink requirements.txt is refused",
+      any("scripts/requirements.txt" in p and ("regular" in p or "symlink" in p.lower())
+          for p in d.grader_drift(syc, sy)))
+
+# --- Round-3 fix 3: manifest_after is hashed from the PINNED commit, not the working tree ------
+# A working-tree manifest swap after the drift check (a race we can't reproduce, so we bypass the
+# drift gate) must not change manifest_sha256_after: it is read from the pinned commit.
+mr, mrc = make_repo({**std_files, "tests/a.sh": "#!/bin/sh\nexit 0\n"})
+_saved2 = (d.ROOT, d.EXECUTION_POLICY, d.STATE, d.grader_drift)
+try:
+    d.ROOT, d.EXECUTION_POLICY = mr, mr / "tests" / "execution-policy.tsv"
+    d.STATE = pathlib.Path(tempfile.mkdtemp())
+    mpol = d.execution_policy(mr, mrc)
+    committed_manifest_sha = mpol["manifest_sha256"]
+    d.grader_drift = lambda *a, **k: []          # bypass the up-front gate to simulate the race
+    (mr / "tests" / "execution-policy.tsv").write_text("tests/a.sh\tbox-precondition\tSWAPPED\n")
+    tampered_sha = hashlib.sha256((mr / "tests" / "execution-policy.tsv").read_bytes()).hexdigest()
+    matt = pathlib.Path(tempfile.mkdtemp()); (matt / "raw").mkdir(parents=True)
+    res = d.run_candidate_test_phases({"execution_policy": mpol, "test_runtime": None,
+                                       "test_unit": "u"}, mr, "d" * 40, matt, 60, [])
+    obs = res["tests"]["tests/a.sh"]["observations"][-1]
+    check("manifest_after is the PINNED manifest hash, not the swapped working-tree one",
+          obs["manifest_sha256_after"] == committed_manifest_sha
+          and obs["manifest_sha256_after"] != tampered_sha)
+finally:
+    d.ROOT, d.EXECUTION_POLICY, d.STATE, d.grader_drift = _saved2
 
 print(f"\n{'PASS' if not fails else 'FAIL'}: B4 test-provenance guards ({len(fails)} failed)")
 sys.exit(1 if fails else 0)

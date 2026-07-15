@@ -278,10 +278,15 @@ def _is_regular_blob(meta: tuple[str, str] | None) -> bool:
 
 def grader_drift(commit: str, root: Path = ROOT) -> list[str]:
     """One description per grader-relevant difference between the working tree and `commit` —
-    empty means every path the grader reads (scripts/test, tests/execution-policy.tsv, tests/*.sh)
-    is present on disk as a regular non-symlink file whose BYTES are identical to the committed
-    blob, with no extra tests/*.sh shadowing the committed suite. Callers MUST refuse to grade
-    (fail closed) on any non-empty result (B4).
+    empty means every path the grader reads (scripts/test, scripts/requirements.txt,
+    tests/execution-policy.tsv, tests/*.sh) is present on disk as a regular non-symlink file whose
+    BYTES are identical to the committed blob, with no extra tests/*.sh shadowing the committed
+    suite. Callers MUST refuse to grade (fail closed) on any non-empty result (B4).
+
+    scripts/requirements.txt is here (round-3): trusted_test_runtime() hashes ROOT/scripts/
+    requirements.txt off the working tree to decide which dependency closure is authorized, so a
+    dirty requirements.txt could otherwise vouch for a different set of installed deps without
+    tripping any gate.
 
     Finding 3: this does NOT use `git diff`/`git status` as a byte-identity oracle. Those consult
     git's index and stat cache, which `assume-unchanged`/`skip-worktree` deliberately suppress, and
@@ -303,6 +308,7 @@ def grader_drift(commit: str, root: Path = ROOT) -> list[str]:
         committed[rel] = git_show_bytes(commit, rel, cwd=root)
 
     _add_committed("scripts/test")
+    _add_committed("scripts/requirements.txt")
     _add_committed("tests/execution-policy.tsv")
     for mode, otype, path in git_ls_tree_sh(commit, "tests", cwd=root):
         if otype != "blob" or mode not in ("100644", "100755"):
@@ -1399,9 +1405,13 @@ def isolated_run(unit, argv, cwd, rw_paths, private_network, ceiling_s, stdout, 
         props.append("--property=PrivateNetwork=yes")
     if cwd:
         props.append(f"--property=WorkingDirectory={cwd}")
+    # GIT_NO_REPLACE_OBJECTS (round-3): detached grader worktrees share the object store AND its
+    # refs/replace, so a grader's OWN in-process `git` object reads would still resolve replacement
+    # objects unless the child's environment disables them. Export it into every hardened grader
+    # unit (candidate-isolated + regression phases + the spec test_command all route through here).
     envs = {"HOME": str(WORKER_HOME), "PATH": "/usr/bin:/bin",
             "CODEX_HOME": str(WORKER_HOME / ".codex"), "TERM": "dumb", "LANG": "C.UTF-8",
-            **(env_extra or {})}
+            "GIT_NO_REPLACE_OBJECTS": "1", **(env_extra or {})}
     setenvs = [f"--setenv={k}={v}" for k, v in envs.items()]
     cmd = ["sudo", "-n", "systemd-run", f"--uid={WORKER_USER}", f"--gid={WORKER_USER}",
            "--pipe", "--wait", "--quiet", "--collect", f"--unit={unit}", *props, *setenvs,
@@ -1458,7 +1468,15 @@ def run_regression_gate(lc, wt, worker_commit, att, iso, ceiling_s) -> dict:
     fix is absent) — and against the candidate — it MUST pass. Overlaying the test files is what makes
     the base failure meaningful: it fails because the assertion is unmet, not because the test file is
     missing. Runs worker-authored code → isolated exactly like the test phase (network off).
-    Returns a result dict; result=="PASS" iff base FAILS and candidate PASSES."""
+    Returns a result dict; result=="PASS" iff base FAILS and candidate PASSES.
+
+    DEFERRED (round-3, BACKLOG item 6 / SECURITY.md gap 3): unlike the box/candidate-read/integration
+    graders, this gate still executes the human-authored `regression_command` from the MUTABLE
+    candidate (`wt`) and base worktrees, and does not hash those bytes against the pinned commit.
+    Full materialization of the regression path (a pinned base checkout + pinned candidate blobs) is
+    a larger refactor scoped as follow-up; we do the cheap hardening here — export
+    GIT_NO_REPLACE_OBJECTS into the subprocess env so a planted refs/replace can't alter the
+    command's own git object reads either — but the same-class working-tree read remains open."""
     cmd = lc["regression_command"]
     paths = lc.get("regression_test_paths", [])
     base_sha = lc["base_sha"]
@@ -1475,7 +1493,8 @@ def run_regression_gate(lc, wt, worker_commit, att, iso, ceiling_s) -> dict:
                                   rw_paths=[str(cwd)], private_network=True, ceiling_s=ceiling_s,
                                   stdout=lg, stderr=subprocess.STDOUT)
             return cp.returncode
-        cp = run(["bash", "-c", cmd], cwd=str(cwd))
+        cp = run(["bash", "-c", cmd], cwd=str(cwd),
+                 env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"})
         Path(log_path).write_text((cp.stdout or "") + (cp.stderr or ""))
         return cp.returncode
 
@@ -1556,7 +1575,10 @@ def run_box_preconditions(att: Path, policy: dict) -> dict[str, list[dict]]:
             log = att / "raw" / f"box-precondition-{Path(rel).stem}.log"
             env = {"HOME": str(OPERATOR_HOME), "USER": OPERATOR_USER,
                    "LOGNAME": OPERATOR_USER, "PATH": "/usr/local/bin:/usr/bin:/bin",
-                   "LANG": "C.UTF-8", "ORCH_OPERATOR_USER": OPERATOR_USER}
+                   "LANG": "C.UTF-8", "ORCH_OPERATOR_USER": OPERATOR_USER,
+                   # round-3: the grader worktree shares refs/replace; disable it for the box
+                   # drill's own git object reads too (it reads scripts/dispatch.py etc.).
+                   "GIT_NO_REPLACE_OBJECTS": "1"}
             run_path = _grader_run_path(gtree, rel)
             before_test = sha256_file(run_path)
             with open(log, "w") as out:
@@ -1993,7 +2015,12 @@ def run_candidate_test_phases(lc: dict, wt: Path, worker_commit: str, att: Path,
                 test_after = sha256_file(run_path)   # the bytes actually executed
             identity = execution_identity()
             claim = "installed policy read exact candidate Git blobs as data; no candidate bytes executed"
-        manifest_after = sha256_file(EXECUTION_POLICY)
+        # Round-3: re-hash the manifest from the PINNED commit, not the working tree — the graders
+        # ran against the materialized (pinned) manifest, so a mid-run working-tree manifest swap
+        # must neither pass a stale grade nor fail a pinned one. Commit movement is caught separately
+        # by the installed_commit_after check below.
+        manifest_after = hashlib.sha256(git_show_bytes(
+            policy["installed_commit"], "tests/execution-policy.tsv", cwd=ROOT)).hexdigest()
         status = _status_for_exit(rc)
         if test_after != test_before or manifest_after != manifest_before:
             status = "FAIL"
@@ -2239,7 +2266,8 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
                 binds=[(test_runtime["root"], test_runtime["root"])])
         test_rc = tcp.returncode
     else:
-        tc = run(["bash", "-c", lc["test_command"]], cwd=str(wt), env={**os.environ, **test_env})
+        tc = run(["bash", "-c", lc["test_command"]], cwd=str(wt),
+                 env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1", **test_env})
         (att / "test.log").write_text((tc.stdout or "") + (tc.stderr or ""))
         test_rc = tc.returncode
     if test_rc != 0:
@@ -3386,7 +3414,11 @@ def cmd_integrate(attempt_ids: list[str]) -> None:
             print(json.dumps(report, indent=2))
             sys.exit(21)
         with materialized_grader_tree(merged_commit, ROOT) as gtree:
-            ts = run([str(gtree / "scripts" / "test")], cwd=str(gtree))
+            # round-3: export GIT_NO_REPLACE_OBJECTS into the suite's environment — the grader
+            # worktree shares the object store/refs-replace, so scripts/test and each tests/*.sh
+            # it globs must read objects with replacement disabled too.
+            ts = run([str(gtree / "scripts" / "test")], cwd=str(gtree),
+                     env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"})
         if ts.returncode != 0:
             path = escalate(sid, f"post-merge suite FAILED on ready-for-main after {aid} — "
                                  f"stop; human decision required",
