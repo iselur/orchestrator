@@ -3750,6 +3750,9 @@ def integrate_suite_env() -> dict:
     cannot run the dispatcher self-tests cannot certify the combined tree (fail closed).
     """
     env = {**os.environ, "GIT_NO_REPLACE_OBJECTS": "1", "ORCH_TEST_STRICT": "1"}
+    # Round-3: never pass through an inherited ORCH_TEST_PY — the selection below is the policy,
+    # and an inherited value (e.g. from an outer test run) may point at a stale interpreter.
+    env.pop("ORCH_TEST_PY", None)
     rt = trusted_test_runtime()
     venv_py = ROOT / ".venv" / "bin" / "python"
     if rt:
@@ -3757,6 +3760,14 @@ def integrate_suite_env() -> dict:
     elif venv_py.exists():
         env["ORCH_TEST_PY"] = str(venv_py.resolve())
     return env
+
+
+def run_integrate_suite(gtree: Path):
+    """Launch the post-merge suite in the materialized grader tree with integrate_suite_env().
+
+    Split out of cmd_integrate so the suite-launch contract (command, cwd, environment) is a
+    directly testable unit rather than a source-inspection tripwire (B9 round-3)."""
+    return run([str(gtree / "scripts" / "test")], cwd=str(gtree), env=integrate_suite_env())
 
 
 def cmd_integrate(attempt_ids: list[str]) -> None:
@@ -3810,8 +3821,7 @@ def cmd_integrate(attempt_ids: list[str]) -> None:
             # round-3: export GIT_NO_REPLACE_OBJECTS into the suite's environment — the grader
             # worktree shares the object store/refs-replace, so scripts/test and each tests/*.sh
             # it globs must read objects with replacement disabled too.
-            ts = run([str(gtree / "scripts" / "test")], cwd=str(gtree),
-                     env=integrate_suite_env())
+            ts = run_integrate_suite(gtree)
         if ts.returncode != 0:
             path = escalate(sid, f"post-merge suite FAILED on ready-for-main after {aid} — "
                                  f"stop; human decision required",

@@ -104,26 +104,42 @@ check("B16 reviewer invocation empties the tool surface",
       "--tools" in captured["cmd"] and
       captured["cmd"][captured["cmd"].index("--tools") + 1] == "")
 
-# B9: the post-merge suite env forces strict mode AND hands the suite a usable interpreter —
-# without ORCH_TEST_PY the grader tree (no gitignored .venv) would skip the venv-dependent
-# dispatcher self-tests, and strict mode turns that skip into a guaranteed integrate failure.
-env = d.integrate_suite_env()
-check("B9 integrate env forces ORCH_TEST_STRICT=1", env.get("ORCH_TEST_STRICT") == "1")
-check("B9 integrate env disables replace objects", env.get("GIT_NO_REPLACE_OBJECTS") == "1")
-check("B9 integrate env hands the suite an interpreter",
-      "ORCH_TEST_PY" in env and pathlib.Path(env["ORCH_TEST_PY"]).is_absolute()
-      and pathlib.Path(env["ORCH_TEST_PY"]).exists())
-check("B9 integrate suite is invoked with integrate_suite_env",
-      "integrate_suite_env()" in inspect.getsource(d.cmd_integrate))
+# B9: the post-merge suite launch (run_integrate_suite) forces strict mode AND hands the suite
+# a usable interpreter — without ORCH_TEST_PY the grader tree (no gitignored .venv) would skip
+# the venv-dependent dispatcher self-tests, and strict mode turns that skip into a guaranteed
+# integrate failure. Exercised through the REAL launch helper with run() captured, so the
+# command, cwd, and environment under test are exactly what cmd_integrate passes.
+suite = {}
+def fake_suite_run(cmd, **kw):
+    suite["cmd"] = cmd; suite["cwd"] = kw.get("cwd"); suite["env"] = kw.get("env")
+    return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+d.run = fake_suite_run
+gtree = tmp / "gtree"; (gtree / "scripts").mkdir(parents=True)
+d.run_integrate_suite(gtree)
+check("B9 suite launch runs the grader tree's own scripts/test in that tree",
+      suite["cmd"] == [str(gtree / "scripts" / "test")] and suite["cwd"] == str(gtree))
+check("B9 suite launch forces ORCH_TEST_STRICT=1", suite["env"].get("ORCH_TEST_STRICT") == "1")
+check("B9 suite launch disables replace objects",
+      suite["env"].get("GIT_NO_REPLACE_OBJECTS") == "1")
+check("B9 suite launch hands the suite an interpreter",
+      pathlib.Path(suite["env"].get("ORCH_TEST_PY", "")).is_absolute()
+      and pathlib.Path(suite["env"]["ORCH_TEST_PY"]).exists())
+# An inherited ORCH_TEST_PY must never leak through — the helper's own selection is the policy.
+import os as _os
+_os.environ["ORCH_TEST_PY"] = "/nonexistent/stale/python"
+d.run_integrate_suite(gtree)
+check("B9 inherited ORCH_TEST_PY does not leak into the suite",
+      suite["env"].get("ORCH_TEST_PY") != "/nonexistent/stale/python")
 # Fail-closed branch: no trusted runtime and no repo venv -> ORCH_TEST_PY stays unset, so the
 # strict suite fails loudly rather than certifying a tree it could not test.
 real_rt, real_root = d.trusted_test_runtime, d.ROOT
 d.trusted_test_runtime = lambda: None
 d.ROOT = tmp / "no-venv-root"
-env2 = d.integrate_suite_env()
+d.run_integrate_suite(gtree)
 check("B9 no interpreter available leaves ORCH_TEST_PY unset (loud strict failure)",
-      "ORCH_TEST_PY" not in env2 and env2.get("ORCH_TEST_STRICT") == "1")
+      "ORCH_TEST_PY" not in suite["env"] and suite["env"].get("ORCH_TEST_STRICT") == "1")
 d.trusted_test_runtime, d.ROOT = real_rt, real_root
+del _os.environ["ORCH_TEST_PY"]
 
 sys.exit(1 if fails else 0)
 PY
