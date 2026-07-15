@@ -53,7 +53,11 @@ proves them), **configured assumptions** (set up outside this repo, verified man
    test script, but an isolated test intentionally imports or executes candidate code. Malicious
    candidate code can terminate, hang, or manipulate that test process and may still forge a
    semantically misleading success. The gate prevents runner/test replacement and phase flattening;
-   it does not claim a human-unforgeable grade.
+   it does not claim a human-unforgeable grade. The required suite, its manifest, and every grader's
+   bytes are now derived from the pinned git tree and executed from a fresh checkout **outside** the
+   working tree (`dispatch.py: materialized_grader_tree`), so no grade opens a mutable working-tree
+   path; the residual is a same-uid owner racing that temp checkout itself — deferred to backlog
+   item 6 ("move the grade fully outside candidate/operator influence"), not closed here.
 4. **Evidence is an audit record, not immutable.** Attempt files and their hashes are ordinary
    files owned by the account that writes them. Treat them as good-faith provenance.
 5. **The dispatcher currently targets this repository.** Pointing workers at an arbitrary product

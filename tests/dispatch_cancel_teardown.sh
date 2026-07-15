@@ -203,6 +203,11 @@ for name in ("t1.sh", "t2.sh"):
     "tests/t1.sh\tcandidate-isolated\tsynthetic B6 fixture\n"
     "tests/t2.sh\tcandidate-isolated\tsynthetic B6 fixture\n"
     "tests/t3.sh\tcandidate-read\tsynthetic B6 read fixture\n")
+# B4's grader_drift() (now enforced at the top of run_candidate_test_phases) requires every grader
+# input — scripts/test + scripts/requirements.txt too — present and committed, or it fails closed.
+(ctmp / "scripts").mkdir()
+(ctmp / "scripts" / "test").write_text("#!/bin/sh\nexit 0\n"); (ctmp / "scripts" / "test").chmod(0o755)
+(ctmp / "scripts" / "requirements.txt").write_text("dummy\n")
 d.run(["git", "init", "-q", "-b", "main", str(ctmp)])
 d.run(["git", "-C", str(ctmp), "config", "user.email", "t@t"])
 d.run(["git", "-C", str(ctmp), "config", "user.name", "t"])
@@ -218,7 +223,7 @@ d.EXECUTION_POLICY = ctmp / "tests" / "execution-policy.tsv"
 d.test_runtime_matches = lambda record: True   # bypass the box-specific trusted-runtime probe
 d.trusted_test_runtime = lambda: None          # (it also probes ROOT/scripts/requirements.txt)
 
-policy = d.execution_policy(ctmp)
+policy = d.execution_policy(ctmp, installed_commit)   # B4 made commit a required arg
 policy["installed_commit"] = installed_commit
 catt = ctmp / "att"; (catt / "raw").mkdir(parents=True)
 lc = {"execution_policy": policy, "test_unit": f"codex-test-{aid}", "attempt_id": aid,
