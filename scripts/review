@@ -11,8 +11,9 @@
 # scripts/codex-plan already record on disk, which a CLI flag cannot forge:
 #   - a --context file under .orchestrator/attempts/<spec>/<n>/ is classified from THAT attempt's
 #     own launch.json worker_model, written by the dispatcher before this script could ever run;
-#   - a --context file under .orchestrator/plans/PLAN-NNN.{md,stdout,stderr} is codex-plan output —
-#     only that script writes there;
+#   - a --context file named PLAN-NNN.{md,stdout,stderr} is codex-plan output — that is codex-plan's
+#     reserved identifier namespace, recognized in ANY directory (codex-plan's --out can write it
+#     outside .orchestrator/plans; keying on the directory was a bypass);
 #   - a --context file inside a recorded worker worktree (launch.json "worktree", or either root
 #     dispatch.py ever hands to a worker) is likewise codex;
 #   - anything else is claude (this system has exactly two producers; nothing else writes to a
@@ -131,13 +132,25 @@ print(d.get('worker_model') or '')
     return 0
   fi
 
-  # 2. codex-plan's own output: only scripts/codex-plan writes PLAN-NNN.{md,stdout,stderr} here.
-  if [[ "$real" == "$plans_root"/* ]]; then
-    local base="${real##*/}"
-    if [[ "$base" =~ ^PLAN-[0-9]+\.(md|stdout|stderr)$ ]]; then
+  # 2. codex-plan's own output naming (PLAN-NNN.{md,stdout,stderr}). This is codex-plan's RESERVED
+  #    identifier namespace — allocated and written by that script alone — so it marks Codex
+  #    authorship no matter WHERE the file lands. Keying on the directory was a B18 hole: codex-plan
+  #    takes `--out DIR` (scripts/codex-plan) and writes genuine PLAN-NNN artifacts anywhere, so a
+  #    real Codex plan placed outside .orchestrator/plans would have derived 'claude' and been
+  #    laundered through a forged --author claude — the exact bypass, via an original producer
+  #    artifact (not content laundering). Match the basename, not the directory. This runs AFTER the
+  #    attempt check, so a PLAN-NNN file inside an attempt still derives from that attempt's
+  #    launch.json (also Codex). The trade-off is deliberate and fail-safe: any file that happens to
+  #    carry codex-plan's reserved PLAN-NNN name is treated as Codex, so at worst a mis-named
+  #    Claude artifact is refused for Codex review (safe) — never the reverse.
+  local base="${real##*/}"
+  if [[ "$base" =~ ^PLAN-[0-9]+\.(md|stdout|stderr)$ ]]; then
+    if [[ "$real" == "$plans_root"/* ]]; then
       printf 'codex\tcodex-plan output %s\n' "$base"
-      return 0
+    else
+      printf 'codex\tcodex-plan output naming %s (reserved Codex namespace via --out, dir %s)\n' "$base" "${real%/*}"
     fi
+    return 0
   fi
 
   # 3. Either root dispatch.py ever hands to a worker (isolated or not).

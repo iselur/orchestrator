@@ -54,6 +54,13 @@ printf 'codex worktree file, not tied to any attempt directory\n' > .worktrees/S
 mkdir -p .orchestrator/plans
 printf '# codex-drafted plan\n' > .orchestrator/plans/PLAN-001.md
 
+# A GENUINE codex-plan artifact written via `--out DIR` OUTSIDE .orchestrator/plans. scripts/codex-plan
+# takes --out and writes the same reserved PLAN-NNN naming anywhere; keying authorship on the
+# directory would let this real Codex artifact derive 'claude' and be laundered through --author.
+mkdir -p custom-out/nested
+printf '# codex-drafted plan written elsewhere via --out\n' > custom-out/nested/PLAN-042.md
+printf 'raw stdout\n' > custom-out/nested/PLAN-042.stdout
+
 # 1a. FORGED --author: a Codex-attempt-linked artifact (real provenance says codex) labeled
 #     --author claude must be REFUSED — never routed to the Codex reviewer as a "claude" artifact,
 #     and never silently accepted as codex either (the caller's assertion disagreed with the record).
@@ -70,11 +77,23 @@ rc=$?
 [ "$rc" = 6 ] && ok "forged --author claude on a worker-worktree artifact is refused (exit 6)" \
   || bad "forged --author claude on a worker-worktree artifact NOT refused (exit $rc)"
 
-# 1c. Same forgery via codex-plan output.
+# 1c. Same forgery via codex-plan output (default .orchestrator/plans location).
 scripts/review --topic forged-plan --author claude --context .orchestrator/plans/PLAN-001.md "please review" >/dev/null 2>&1
 rc=$?
 [ "$rc" = 6 ] && ok "forged --author claude on codex-plan output is refused (exit 6)" \
   || bad "forged --author claude on codex-plan output NOT refused (exit $rc)"
+
+# 1c-bis. THE FINDING-1 REGRESSION: a genuine codex-plan artifact written via --out to a NON-default
+#     directory must still derive 'codex' by its reserved PLAN-NNN naming, so a forged --author
+#     claude on it is refused. Directory-keyed classification would have let this through.
+scripts/review --topic forged-plan-out --author claude --context custom-out/nested/PLAN-042.md "please review" >/dev/null 2>&1
+rc=$?
+[ "$rc" = 6 ] && ok "forged --author claude on a --out plan outside .orchestrator/plans is refused (exit 6)" \
+  || bad "forged --author claude on a --out plan (PLAN-042.md in custom dir) NOT refused (exit $rc)"
+scripts/review --topic forged-plan-out-stdout --author claude --context custom-out/nested/PLAN-042.stdout "please review" >/dev/null 2>&1
+rc=$?
+[ "$rc" = 6 ] && ok "forged --author claude on a --out plan's .stdout is refused (exit 6)" \
+  || bad "forged --author claude on a --out plan .stdout NOT refused (exit $rc)"
 
 # 1d. The reverse forgery also refused: a plain claude-authored file mislabeled --author codex.
 scripts/review --topic forged-reverse --author codex --context claude-note.md "please review" >/dev/null 2>&1
