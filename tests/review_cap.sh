@@ -27,30 +27,41 @@ chmod +x "$tmp/bin/codex"
 cd "$tmp/repo"
 export PATH="$tmp/bin:$PATH"
 
+# Provenance fixtures (B18): scripts/review now DERIVES authorship from --context evidence instead
+# of trusting --author, so every claude-authored call below needs a --context file that is NOT
+# under a Codex-marked path (derives 'claude'), and the one codex-authored call needs a --context
+# file inside a fake dispatch attempt (derives 'codex' from that attempt's own launch.json).
+printf 'a plain claude-drafted note, not touching any Codex-marked path\n' > claude-note.md
+mkdir -p .orchestrator/attempts/SPEC-900/1
+printf '{"worker_model": "gpt-5.6-sol"}\n' > .orchestrator/attempts/SPEC-900/1/launch.json
+printf 'fake codex worker diff\n' > .orchestrator/attempts/SPEC-900/1/diff.patch
+
 # 1. Bad slugs and missing/unknown authors are refused.
-if scripts/review --topic 'Bad Slug!' --author claude x 2>/dev/null; then bad "accepted a non-slug topic"; else ok "refuses a non-slug topic"; fi
-if scripts/review --topic demo-topic x 2>/dev/null; then bad "accepted a review with no --author"; else ok "refuses a missing --author"; fi
-if scripts/review --topic demo-topic --author gemini x 2>/dev/null; then bad "accepted an unknown author"; else ok "refuses an unknown author"; fi
+if scripts/review --topic 'Bad Slug!' --author claude --context claude-note.md x 2>/dev/null; then bad "accepted a non-slug topic"; else ok "refuses a non-slug topic"; fi
+if scripts/review --topic demo-topic --context claude-note.md x 2>/dev/null; then bad "accepted a review with no --author"; else ok "refuses a missing --author"; fi
+if scripts/review --topic demo-topic --author gemini --context claude-note.md x 2>/dev/null; then bad "accepted an unknown author"; else ok "refuses an unknown author"; fi
 
 # 2. Codex-authored artifacts are refused — the reviewer IS Codex, and Codex never grades Codex.
-scripts/review --topic demo-topic --author codex "review this codex plan" >/dev/null 2>&1
+# (--author here MATCHES the derived provenance, so this exercises the vendor refusal, not B18's
+# mismatch refusal — see tests/review_authorship.sh for the mismatch/no-provenance cases.)
+scripts/review --topic demo-topic --author codex --context .orchestrator/attempts/SPEC-900/1/diff.patch "review this codex plan" >/dev/null 2>&1
 rc=$?
 [ "$rc" = 4 ] && ok "Codex-authored artifact refused (exit 4)" || bad "Codex-on-Codex not refused (exit $rc)"
 [ -e .orchestrator/reviews/demo-topic ] && bad "refused author still created state" || ok "author refusal writes nothing"
 
 # 3. Rounds 1-3 run and are recorded; sibling artifacts in the topic dir do NOT consume rounds.
-scripts/review --topic demo-topic --author claude "round one prompt" >/dev/null 2>&1 \
+scripts/review --topic demo-topic --author claude --context claude-note.md "round one prompt" >/dev/null 2>&1 \
   && ok "round 1 runs" || bad "round 1 failed"
 printf 'author notes, not a review round\n' > .orchestrator/reviews/demo-topic/round-1-dispositions.md
-scripts/review --topic demo-topic --author claude "round two prompt" >/dev/null 2>&1 \
+scripts/review --topic demo-topic --author claude --context claude-note.md "round two prompt" >/dev/null 2>&1 \
   && ok "round 2 runs despite a round-1-*.md sibling artifact" || bad "sibling artifact consumed a phantom round"
-scripts/review --topic demo-topic --author claude "round three prompt" >/dev/null 2>&1 \
+scripts/review --topic demo-topic --author claude --context claude-note.md "round three prompt" >/dev/null 2>&1 \
   && ok "round 3 runs" || bad "round 3 failed"
 n=$(find .orchestrator/reviews/demo-topic -name 'round-[0-9].md' | wc -l)
 [ "$n" = 3 ] && ok "three rounds recorded" || bad "expected 3 recorded rounds, found $n"
 
 # 4. Round 4 is refused with a distinct exit code and writes nothing.
-scripts/review --topic demo-topic --author claude "round four prompt" >/dev/null 2>&1
+scripts/review --topic demo-topic --author claude --context claude-note.md "round four prompt" >/dev/null 2>&1
 rc=$?
 [ "$rc" = 3 ] && ok "round 4 refused (exit 3)" || bad "round 4 not refused (exit $rc)"
 n=$(find .orchestrator/reviews/demo-topic -name 'round-[0-9].md' | wc -l)
@@ -60,10 +71,10 @@ n=$(find .orchestrator/reviews/demo-topic -name 'round-[0-9].md' | wc -l)
 #    three must SUCCEED and one must be REFUSED with exit 3 — filenames alone would not prove the
 #    fourth process actually lost (bare `wait` discards statuses; the multiset is the evidence).
 pids=()
-CODEX_STUB_SLEEP=1 scripts/review --topic race-topic --author claude "concurrent a" >/dev/null 2>&1 & pids+=($!)
-CODEX_STUB_SLEEP=1 scripts/review --topic race-topic --author claude "concurrent b" >/dev/null 2>&1 & pids+=($!)
-CODEX_STUB_SLEEP=1 scripts/review --topic race-topic --author claude "concurrent c" >/dev/null 2>&1 & pids+=($!)
-CODEX_STUB_SLEEP=1 scripts/review --topic race-topic --author claude "concurrent d" >/dev/null 2>&1 & pids+=($!)
+CODEX_STUB_SLEEP=1 scripts/review --topic race-topic --author claude --context claude-note.md "concurrent a" >/dev/null 2>&1 & pids+=($!)
+CODEX_STUB_SLEEP=1 scripts/review --topic race-topic --author claude --context claude-note.md "concurrent b" >/dev/null 2>&1 & pids+=($!)
+CODEX_STUB_SLEEP=1 scripts/review --topic race-topic --author claude --context claude-note.md "concurrent c" >/dev/null 2>&1 & pids+=($!)
+CODEX_STUB_SLEEP=1 scripts/review --topic race-topic --author claude --context claude-note.md "concurrent d" >/dev/null 2>&1 & pids+=($!)
 rcs=""
 for p in "${pids[@]}"; do wait "$p"; rcs="$rcs $?"; done
 rcs=$(echo "$rcs" | tr ' ' '\n' | sed '/^$/d' | sort -n | tr '\n' ' ' | sed 's/ $//')
@@ -75,7 +86,7 @@ n=$(find .orchestrator/reviews/race-topic -name 'round-[0-9].md' | wc -l)
 #    round and overwrite it forever (unlimited rounds); symlinks and directories are not rounds.
 mkdir -p .orchestrator/reviews/gap-topic
 printf 'stray round two\n' > .orchestrator/reviews/gap-topic/round-2.md
-scripts/review --topic gap-topic --author claude "prompt" >/dev/null 2>&1
+scripts/review --topic gap-topic --author claude --context claude-note.md "prompt" >/dev/null 2>&1
 rc=$?
 [ "$rc" = 5 ] && ok "gap state refused (exit 5)" || bad "gap state not refused (exit $rc)"
 grep -q 'stray round two' .orchestrator/reviews/gap-topic/round-2.md \
@@ -83,23 +94,23 @@ grep -q 'stray round two' .orchestrator/reviews/gap-topic/round-2.md \
 mkdir -p .orchestrator/reviews/link-topic
 printf 'real\n' > .orchestrator/reviews/link-topic/target.md
 ln -s target.md .orchestrator/reviews/link-topic/round-1.md
-scripts/review --topic link-topic --author claude "prompt" >/dev/null 2>&1
+scripts/review --topic link-topic --author claude --context claude-note.md "prompt" >/dev/null 2>&1
 rc=$?
 [ "$rc" = 5 ] && ok "symlink round refused (exit 5)" || bad "symlink round not refused (exit $rc)"
 mkdir -p .orchestrator/reviews/dir-topic/round-1.md
-scripts/review --topic dir-topic --author claude "prompt" >/dev/null 2>&1
+scripts/review --topic dir-topic --author claude --context claude-note.md "prompt" >/dev/null 2>&1
 rc=$?
 [ "$rc" = 5 ] && ok "directory round refused (exit 5)" || bad "directory round not refused (exit $rc)"
 mkdir -p .orchestrator/reviews/multi-topic
 printf 'stray multi-digit round\n' > .orchestrator/reviews/multi-topic/round-10.md
-scripts/review --topic multi-topic --author claude "prompt" >/dev/null 2>&1
+scripts/review --topic multi-topic --author claude --context claude-note.md "prompt" >/dev/null 2>&1
 rc=$?
 [ "$rc" = 5 ] && ok "multi-digit stray round refused (exit 5)" || bad "round-10.md read as a clean directory (exit $rc)"
 
 # 6. A different topic gets its own counter; empty prompts are refused.
-scripts/review --topic other-topic --author claude "prompt" >/dev/null 2>&1 \
+scripts/review --topic other-topic --author claude --context claude-note.md "prompt" >/dev/null 2>&1 \
   && ok "independent counter per topic" || bad "second topic blocked by first topic's counter"
-if printf '  \n' | scripts/review --topic empty-topic --author claude 2>/dev/null; then bad "accepted an empty prompt"; else ok "refuses an empty prompt"; fi
+if printf '  \n' | scripts/review --topic empty-topic --author claude --context claude-note.md 2>/dev/null; then bad "accepted an empty prompt"; else ok "refuses an empty prompt"; fi
 
 [ "$fails" -eq 0 ] && echo "PASS review_cap.sh" || echo "FAIL review_cap.sh"
 exit "$fails"
