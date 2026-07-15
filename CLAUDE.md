@@ -46,10 +46,7 @@ holds the commands; SECURITY.md says what the protections do and do not prove.
 
 ## Safety invariants (never violate)
 
-- `main` changes only by the owner, or by the orchestrator merging a PR from `ready-for-main` into
-  `main` after that PR's `ci` check is green and its exact diff has received a binding PASS under
-  the cross-vendor review rules (owner grant 2026-07-15). `ready-for-main` changes only through a
-  pull request with `ci` green.
+- `main` changes only by the owner, or by the orchestrator merging a `ready-for-main` PR into `main` whose own `ci` check is green and whose exact diff holds a binding cross-vendor PASS (owner grant 2026-07-15). `ready-for-main` changes only through a pull request with `ci` green.
 - Workers run as a separate identity that cannot reach the owner's home, and their tests have no
   network. No isolation means no launch: nothing is created, nothing runs. `ORCH_ALLOW_UNISOLATED=1`
   is full exposure, needs the owner's explicit instruction, and its use is recorded — though the
