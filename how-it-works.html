@@ -1,6 +1,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>How the orchestrator works</title>
+<title>How Relay works</title>
 <style>
   :root {
     --bg: #ffffff; --ink: #1a1f27; --muted: #5a6472; --line: #d7dce3;
@@ -52,7 +52,7 @@
   code { background: var(--check-bg); border-radius: 4px; padding: .1em .35em; font-size: .88em; }
 </style>
 <main>
-<h1>How the orchestrator works</h1>
+<h1>How Relay works</h1>
 <p class="lead">You drop an idea on it. One AI manages the work, another builds it, a third pair of
 eyes from the other vendor judges it — and nothing lands on <code>main</code> without you.</p>
 
@@ -122,7 +122,7 @@ eyes from the other vendor judges it — and nothing lands on <code>main</code> 
 
   <rect class="node" x="650" y="214" width="180" height="66" fill="var(--check-bg)" stroke="var(--check)"/>
   <text class="label" x="740" y="236" text-anchor="middle">7 · Pull request</text>
-  <text class="sub"   x="740" y="254" text-anchor="middle">lands on integration</text>
+  <text class="sub"   x="740" y="254" text-anchor="middle">lands on ready-for-main</text>
   <text class="sub"   x="740" y="270" text-anchor="middle">only with CI green</text>
 
   <path class="edge" d="M510,247 H642"/>
@@ -154,9 +154,10 @@ eyes from the other vendor judges it — and nothing lands on <code>main</code> 
   <li><b>Your machine is protected.</b> The worker runs as a separate user that cannot reach your
       home directory or credentials, and its test runs have no network. If that sandbox can't be
       set up, nothing launches at all.</li>
-  <li><b>Approvals can't be faked by software.</b> A risky job needs an approval file only you
-      write, tied to the exact wording of the spec and to this machine. Change the spec, and the
-      approval is void.</li>
+  <li><b>Approvals record intent, not proof of a human.</b> A risky job needs an approval file
+      tied to the exact wording of the spec and to this machine. It is an audit trail, not an
+      unforgeable signature — SECURITY.md tracks the gap. Change the spec, and the approval is
+      void.</li>
   <li><b>A test that didn't run didn't pass.</b> The tests are restored from the manager's own copy
       before grading; a skipped, missing, or empty result is a failure. The worker saying "it
       passed" counts for nothing.</li>
