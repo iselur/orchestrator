@@ -7,6 +7,7 @@ work and REPLACES a line, never stacks. Roles, not model names: **owner** (the h
 ## Session start
 
 Run `./scripts/dispatch reconcile`; resume from state files, never ask the owner to reconstruct.
+Prefer a fresh session per workstream.
 
 ## Working rules
 
@@ -48,13 +49,14 @@ Run `./scripts/dispatch reconcile`; resume from state files, never ask the owner
   writes. Editing the spec voids the approval. Unclassified or ambiguous work is high-risk;
   nothing may classify it as lighter.
 - A safety-machinery change is never checked, approved, reviewed, or merged by the new version of
-  itself: the installed version runs every gate.
+  itself: the installed version runs every gate, and the new one goes live only after separate
+  approval and installation.
 - The reviewer gets only spec, diff, and evidence — no tools; the verdict binds. A verdict covers
   only the exact code it was shown; moved code means a fresh review.
 - Only the orchestrator holds owner credentials; workers cannot reach the owner's home. Known gaps
   are in SECURITY.md. Never claim more protection than the tests prove.
 - Stop a job with `dispatch cancel`, never by killing a process number — that once killed the
   wrong thing. Interrupted work restarts as a fresh attempt; never finish it by hand.
-- Autonomy is off unless an untracked `AUTONOMY.local.json` grants it (the tracked default ships
-  disabled); only gated `./scripts/dispatch merge` and `dispatch integrate` may auto-merge — never
-  a by-hand `gh pr merge`.
+- Autonomy is off by default and needs an explicit grant file — untracked `AUTONOMY.local.json`,
+  or the tracked `AUTONOMY.json` that ships disabled; only gated `./scripts/dispatch merge` and
+  `dispatch integrate` may auto-merge — never a by-hand `gh pr merge`.

@@ -31,8 +31,8 @@ untouched → in scope → tests actually ran → cross-vendor review), and open
 
 - Specs: `specs/SPEC-NNN.yaml`, schema `specs/spec.schema.json`. Immutable once approved; never
   regex-parsed. Approval files in `.orchestrator/approvals/<digest>.json`.
-- Branches: worker branches `codex/SPEC-NNN-<attempt>`; PRs target `ready-for-main`; only the owner
-  promotes `ready-for-main` → `main`. Both protected by ruleset.
+- Branches: worker branches `codex/SPEC-NNN-<attempt>`; PRs target `ready-for-main`; promotion to
+  `main` is the owner's, or the orchestrator's under the CLAUDE.md grant. Both protected by ruleset.
 - Worker isolation: the worker and the gate tests run as the `codex-worker` user in hardened systemd
   services; worktrees under `/srv/codexwork/worktrees`. Setup: `scripts/setup-worker-user.sh`.
   Proof: `tests/worker_isolation.sh`, `tests/worker_userns.sh`.
