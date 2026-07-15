@@ -109,25 +109,49 @@ bump_generation() { local g; g=$(get "$WD/generation"); put "$WD/generation" "$(
 # ---- user-presence standby (owner decision 2026-07-15) --------------------------------------------
 # The watchdog must never work beside the owner: ANY claude process it does not supervise —
 # interactive or background job, attached or not — parks supervision for the tick. The only claude
-# that is OURS is one whose parent chain reaches the supervised pane's pid; everything else is a
-# user session. Failing toward standby is the safe direction (it can only launch LESS, never more),
-# so an unreadable pane pid or a process that vanishes mid-walk counts as foreign for this tick and
-# is simply re-resolved on the next.
+# that is OURS is one whose parent chain reaches our session's single pane, and that pane is
+# trusted only when the on-disk ownership records prove the session is the one this watchdog
+# launched. Everything else — a foreign same-named session, a multi-pane session, an unreadable
+# process table, a pid that cannot be attributed — counts as a user session: failing toward
+# standby can only ever launch LESS, never more. The whole ancestry resolves from ONE process-table
+# snapshot, so a pid exiting and being reused between lookups cannot stitch a false chain.
+own_pane_pid() {
+  # Prints the supervised pane's pid; prints nothing when no pane is PROVABLY ours. Ownership is
+  # the launcher's own records (a valid id whose prompt was delivered) plus the shape we create
+  # (exactly one pane): a same-named session someone else made fails one of these and stays
+  # untrusted rather than laundering its claude into "ours".
+  local sid pids
+  sid=$(get "$WD/session-id")
+  valid_uuid "${sid:-}" || return 0
+  [ "$(get "$WD/launched")" = "$sid" ] || return 0
+  session_exists || return 0
+  pids=$(tmux list-panes -t "$SESSION" -F '#{pane_pid}' 2>/dev/null) || return 0
+  [[ "$pids" =~ ^[0-9]+$ ]] || return 0
+  printf '%s\n' "$pids"
+}
 user_claude_present() {
-  local pids pane_pid pid p depth
-  pids=$(pgrep -x claude 2>/dev/null) || return 1
-  [ -n "$pids" ] || return 1
-  pane_pid=""
-  if session_exists; then
-    pane_pid=$(tmux display-message -p -t "$SESSION" '#{pane_pid}' 2>/dev/null) || pane_pid=""
-    [[ "$pane_pid" =~ ^[0-9]+$ ]] || pane_pid=""
+  local snapshot pane_pid pid ppid comm p depth
+  local -A parent=()
+  local claudes=()
+  if ! snapshot=$(ps -eo pid=,ppid=,comm= 2>/dev/null); then
+    # An unreadable process table cannot prove absence: stand down AND say so — a broken ps must
+    # never park supervision silently forever.
+    alert_raise standby-indeterminate "cannot read the process table (ps failed); treating it as user presence"
+    return 0
   fi
-  for pid in $pids; do
+  while read -r pid ppid comm; do
+    [ -n "${pid:-}" ] || continue
+    parent[$pid]=${ppid:-}
+    [ "${comm:-}" = "claude" ] && claudes+=("$pid")
+  done <<< "$snapshot"
+  [ "${#claudes[@]}" -gt 0 ] || return 1
+  pane_pid=$(own_pane_pid)
+  for pid in "${claudes[@]}"; do
     [ -n "$pane_pid" ] || return 0
     p=$pid depth=0
     while [ "$depth" -lt 64 ]; do
       [ "$p" = "$pane_pid" ] && continue 2
-      p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d '[:space:]') || p=""
+      p=${parent[$p]:-}
       case "$p" in ''|0|1) break ;; esac
       depth=$((depth + 1))
     done
@@ -143,6 +167,10 @@ launch_new() {
   # uuidgen ran an EXTERNAL command, so a HALT created meanwhile is a real, testable window —
   # re-check before the first mutation (round-2 review: this barrier must be deterministic).
   halted && return 0
+  # Entry detection is stale by now (the ledger and state reads ran in between): re-check user
+  # presence at the last gate before mutation. A deferred launch is not a failed one — the next
+  # tick's entry check owns it.
+  if user_claude_present; then note "a user claude appeared mid-tick; launch deferred to standby"; return 1; fi
   # The id is recorded BEFORE the session exists: if creation fails, the next tick simply mints a
   # fresh id; but a session may never exist without its recovery id already on disk.
   bump_generation
@@ -169,6 +197,9 @@ launch_new() {
 
 respawn() {
   halted && return 0
+  # Same mid-tick barrier as launch_new: never type into or tear down a session while a user
+  # claude that appeared after entry detection is running.
+  if user_claude_present; then note "a user claude appeared mid-tick; respawn deferred to standby"; return 0; fi
   # The launcher chose the conversation id itself and wrote it before the session existed, so a
   # session with no valid recorded id can only mean foreign session or wiped state. There is NO
   # legitimate "never recorded" case, therefore there is NO --continue in this program: guessing
@@ -319,6 +350,9 @@ handle_usage_wait() {
   # A new pane generation cannot inherit a previous generation's wait.
   if [ "$gen" != "$cur" ]; then rm -f "$WD/usage-wait"; return 0; fi
   [ "$(now)" -lt "$epoch" ] && return 0
+  # Mid-tick barrier BEFORE the wait is consumed: a deferred retry stays armed for the next tick
+  # instead of being spent while a user claude is running.
+  if user_claude_present; then note "a user claude appeared mid-tick; the post-reset retry stays armed"; return 0; fi
   rm -f "$WD/usage-wait"
   if [ "$USAGE_RETRY_MODE" = "active" ]; then
     halted && return 0
@@ -338,6 +372,9 @@ handle_usage_wait() {
 # ---- idle alert (behavior d) --------------------------------------------------------------------
 idle_check() { # $1 open row ids (may be empty), $2 live attempt id (may be empty)
   [ -n "${2:-}" ] && return 0     # a genuinely active attempt IS activity; never alert over it
+  # Mid-tick barrier: a user claude that appeared after entry detection IS activity too — an
+  # idle alert raised over their shoulder would be false the moment it fired.
+  user_claude_present && return 0
   local last act base t
   last=$(get "$WD/last-run"); act=$(get "$WD/activity")
   base=${last:-0}; [ "${act:-0}" -gt "$base" ] 2>/dev/null && base=$act
@@ -369,12 +406,20 @@ check() {
   halted && exit 0
 
   # Auto mutual exclusion: a user's claude anywhere on the box means launch, respawn, retry,
-  # rotation, and the idle alert all wait. The marker exists so the journal says each flip once,
-  # not once per tick; alert delivery still retries, because standby pauses supervision, never
-  # observability. last-run is untouched — a standby tick is not a run. Detection happens before
-  # anything in the tick spawns claude itself (check_cli_version runs only past this point), so
-  # the watchdog never stands down for its own version probe.
-  if user_claude_present; then
+  # rotation, and the idle alert all wait. Detection just ran external commands (ps, tmux), so
+  # HALT is re-checked before the marker is touched — HALT precedence survives the detection
+  # window. The marker exists so the journal says each flip once, not once per tick; alert
+  # delivery still retries, because standby pauses supervision, never observability. last-run is
+  # untouched — a standby tick is not a run. Detection happens before anything in the tick spawns
+  # claude itself (check_cli_version runs only past this point), so the watchdog never stands
+  # down for its own version probe. Because entry detection goes stale while the tick reads the
+  # ledger and state, every mutating action below re-checks presence right before it acts; the
+  # residual window is the tmux call itself, irreducible for a poller, and the NEXT tick's entry
+  # check parks whatever slipped through.
+  local present=0
+  user_claude_present && present=1
+  halted && exit 0
+  if [ "$present" = 1 ]; then
     if [ ! -e "$WD/standby" ]; then
       put "$WD/standby" "$(now)"
       note "standby: a user claude session is running; supervision paused until it exits"
@@ -419,6 +464,9 @@ check() {
       case "$(pane_probe)" in
         dead)
           halted && exit 0
+          # Mid-tick barrier: rotation tears a session down — defer it while a user claude that
+          # appeared after entry detection is running; the next tick re-decides from scratch.
+          if user_claude_present; then note "a user claude appeared mid-tick; idle rotation deferred"; alert_sweep; exit 0; fi
           local retired; retired=$(get "$WD/session-id")
           if ! valid_uuid "${retired:-}"; then
             # Corrupt ownership stays a visible refusal even when idle: erasing state the
