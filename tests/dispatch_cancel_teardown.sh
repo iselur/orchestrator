@@ -1,24 +1,30 @@
 #!/usr/bin/env bash
-# B6 (audit codex-audit-2026-07-15, report.md #6 / verification.md H6) — regression test for two
-# related bugs in the systemd-unit lifecycle:
+# B6 (audit codex-audit-2026-07-15, report.md #6 / verification.md H6) — regression test for the
+# systemd-unit lifecycle bugs and the round-1 review follow-ups:
 #
+#   Original B6:
 #   1. An attempt spawns FIVE unit families (worker, spec test, one per installed test, regression
 #      base, regression candidate) but `dispatch cancel` stopped only two hand-picked names, leaving
 #      the rest running as orphans after the operator believed the attempt was dead.
 #   2. Every phase got a FRESH FULL RuntimeMaxSec ceiling instead of sharing one absolute attempt
 #      deadline, so total wall-clock could run to several multiples of the configured hard ceiling.
 #
-# Fix under test: every attempt-owned SYSTEM unit (isolated_run) now joins one systemd slice
-# (attempt_slice()); cancel/health/reconcile stop the SLICE, not two unit names; and every phase asks
-# for only the time REMAINING to one deadline recorded at launch (remaining_ceiling_s()), never a
-# fresh ceiling.
+#   Round-1 review (Codex) blocking follow-ups, also covered here:
+#   1. remaining_ceiling_s() must REFUSE a phase (return 0) when under the minimum, never grant the
+#      floor and let a child outlive the deadline; refusal also applies to candidate-read + the
+#      unisolated fallback phases.
+#   2. Teardown must stop the PRODUCER (outer pipeline unit) BEFORE the slice, so nothing is launched
+#      into a torn-down slice.
+#   3. Verification must FAIL CLOSED: a failed list-units query is never read as "no units remain",
+#      and a surviving unit escalates rather than warn-and-continues.
+#   4. A timeout (outer RuntimeMaxSec firing) must tear down + verify the slice at stop time, not
+#      defer to a later reconcile.
 #
 # Real systemd side effects are unavailable in CI (and undesirable even on the box for a unit test),
-# so this is hermetic: `subprocess.run` (the seam BOTH d.run() and isolated_run() bottom out in) is
-# replaced with a fake that RECORDS every command issued and fakes only the systemd/systemctl/sudo
-# family, letting git/bash pass through for real. Elapsed time is simulated with an injectable clock
-# (d.time.time), never real sleeps. Same box-only skip contract and fake-run style as
-# tests/dispatch_gate4.sh.
+# so this is hermetic: the `subprocess` name inside dispatch.py's own namespace is replaced with a
+# fake that RECORDS every command and fakes only the systemd/systemctl/sudo family (letting git/bash
+# pass through for real), plus an injectable clock for elapsed time. Same box-only skip contract and
+# fake style as tests/dispatch_gate4.sh.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -29,7 +35,7 @@ if [ ! -x "$PY" ] || ! "$PY" -c 'import yaml, jsonschema' 2>/dev/null; then
 fi
 
 "$PY" - <<'PY'
-import importlib.util, json, pathlib, subprocess, tempfile, time as real_time, types
+import contextlib, importlib.util, inspect, io, json, pathlib, subprocess, tempfile, time as real_time, types
 
 spec = importlib.util.spec_from_file_location("d", "scripts/dispatch.py")
 d = importlib.util.module_from_spec(spec); spec.loader.exec_module(d)
@@ -40,15 +46,18 @@ def check(name, cond):
     if not cond: fails.append(name)
 
 # ------------------------------------------------------------------------------------------------
-# The seam: isolated_run() calls `subprocess.run` DIRECTLY (not the d.run() wrapper), so the single
-# point that reaches EVERY systemd invocation — d.run()'s helper calls (systemctl stop/list-units)
-# AND isolated_run()'s systemd-run — is the `subprocess` name inside dispatch.py's own namespace.
-# Rebinding d.subprocess (not the real, process-wide `subprocess` module) confines the fake to this
-# module: every "systemd-family" command (systemctl / systemd-run / sudo) is recorded and faked
-# (never touches a real systemd); everything else (git, bash) passes through to the real
-# subprocess.run so the git-repo scaffolding below is exercised for real.
+# The seam: isolated_run() calls `subprocess.run` DIRECTLY (not the d.run() wrapper), and d.run()
+# itself bottoms out in `subprocess.run` too, so the single name reaching EVERY systemd invocation
+# — systemctl stop / list-units AND systemd-run — is `subprocess` inside dispatch.py's own namespace.
+# Rebinding d.subprocess (not the process-wide module) confines the fake to this module: every
+# systemd-family command (systemctl / systemd-run / sudo) is recorded and faked (never real systemd),
+# and everything else (git, bash) passes through to the real subprocess.run so the git fixtures run.
 _real_subprocess_run = subprocess.run
 calls = []
+
+# Controllable list-units response so teardown VERIFICATION can be exercised: default is a clean
+# empty listing that returns 0; tests flip these to simulate surviving units or a failed query.
+fake_list = {"output": "", "rc": 0}
 
 class FakeClock:
     def __init__(self, start): self.now = start
@@ -56,7 +65,7 @@ class FakeClock:
     def advance(self, s): self.now += s
 
 clock = FakeClock(1_700_000_000.0)
-PHASE_DURATION_S = 30  # simulated wall-clock cost of one systemd-run phase
+PHASE_DURATION_S = 40  # simulated wall-clock cost of one systemd-run phase (> MIN_PHASE_CEILING_S)
 
 def _is_systemd_family(cmd):
     head = cmd[0] if cmd else ""
@@ -66,6 +75,8 @@ def fake_run(cmd, **kw):
     cmd = list(cmd)
     calls.append(cmd)
     if _is_systemd_family(cmd):
+        if "list-units" in cmd:
+            return types.SimpleNamespace(returncode=fake_list["rc"], stdout=fake_list["output"], stderr="")
         if "systemd-run" in cmd:
             clock.advance(PHASE_DURATION_S)  # a phase "ran" — the deadline ticks down for real
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -77,12 +88,18 @@ def fake_run(cmd, **kw):
 d.subprocess = types.SimpleNamespace(run=fake_run, PIPE=subprocess.PIPE,
                                      STDOUT=subprocess.STDOUT, DEVNULL=subprocess.DEVNULL)
 d.time = types.SimpleNamespace(time=clock.time, sleep=real_time.sleep)
+# Escalations (finding 3) land in a temp dir, isolated from the real .orchestrator.
+d.ESCALATIONS = pathlib.Path(tempfile.mkdtemp()) / "escalations"
+
+def prop(cmd, key):
+    for tok in cmd:
+        if tok.startswith(f"--property={key}="):
+            return tok.split("=", 2)[-1]
+    return None
 
 def runtime_max_sec(cmd):
-    for tok in cmd:
-        if tok.startswith("--property=RuntimeMaxSec="):
-            return int(tok.split("=", 2)[-1])
-    return None
+    v = prop(cmd, "RuntimeMaxSec")
+    return int(v) if v is not None else None
 
 def slice_of(cmd):
     for tok in cmd:
@@ -95,6 +112,12 @@ def unit_of(cmd):
         if tok.startswith("--unit="):
             return tok.split("=", 1)[1]
     return None
+
+def is_sudo_stop(cmd, target):
+    return cmd[:2] == ["sudo", "-n"] and "stop" in cmd and cmd[-1] == target
+
+def is_user_stop(cmd, target):
+    return cmd[:3] == ["systemctl", "--user", "stop"] and cmd[-1] == target
 
 # ==================================================================================================
 # Group A — isolated_run() threads --slice=<attempt slice> into EVERY unit family it is asked to run
@@ -120,37 +143,48 @@ for label, unit in families.items():
     check(f"isolated_run({label}): honors the given ceiling", runtime_max_sec(cmd) == 100)
 
 calls.clear()
-d.isolated_run(f"codex-rtprobe-SPEC-900", ["true"], cwd=None, rw_paths=[], private_network=True,
+d.isolated_run("codex-rtprobe-SPEC-900", ["true"], cwd=None, rw_paths=[], private_network=True,
                ceiling_s=120, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # no slice_name
 check("isolated_run(no slice_name given): no --slice= flag is emitted",
       slice_of(calls[-1]) is None)
 
 # ==================================================================================================
-# Group B — remaining_ceiling_s(): the pure deadline-arithmetic at the center of the fix. Uses the
-# injected clock, never a real sleep.
+# Group B — remaining_ceiling_s(): the pure deadline-arithmetic at the center of the fix, including
+# the round-1 over-grant fix. Uses the injected clock, never a real sleep.
+MIN = d.MIN_PHASE_CEILING_S
 d0 = clock.now + 1000
 check("remaining_ceiling_s: full window", d.remaining_ceiling_s(d0) == 1000)
 clock.advance(900)
 check("remaining_ceiling_s: decreases with elapsed time", d.remaining_ceiling_s(d0) == 100)
 clock.advance(200)  # now 100s past the deadline
 check("remaining_ceiling_s: 0 once the deadline has passed", d.remaining_ceiling_s(d0) == 0)
-near_deadline = clock.now + 3  # positive but under the floor
-check("remaining_ceiling_s: clamps a nearly-spent deadline to MIN_PHASE_CEILING_S",
-      d.remaining_ceiling_s(near_deadline) == d.MIN_PHASE_CEILING_S)
+base = clock.now
+check("remaining_ceiling_s: exactly MIN remaining is allowed (returns MIN)",
+      d.remaining_ceiling_s(base + MIN) == MIN)
+check("remaining_ceiling_s: one second over MIN is allowed", d.remaining_ceiling_s(base + MIN + 1) == MIN + 1)
+# THE over-grant fix: under the floor must REFUSE (return 0), never grant the floor.
+check("remaining_ceiling_s: 3s left REFUSES (returns 0), never grants the 30s floor",
+      d.remaining_ceiling_s(base + 3) == 0)
+check("remaining_ceiling_s: one second UNDER MIN refuses (returns 0)",
+      d.remaining_ceiling_s(base + MIN - 1) == 0)
 
 # ==================================================================================================
 # Group C — run_candidate_test_phases(): a REAL production call site (not a reimplementation),
-# driven against a synthetic 2-test policy so we control exactly how many isolated_run calls happen.
-# Proves (a) each installed-test unit joins the attempt slice, and (c) each gets only the time
-# REMAINING to the one deadline (strictly decreasing across the loop), not a fresh full ceiling.
+# driven against a synthetic policy so we control exactly how many isolated_run calls happen.
+# Proves (a) each installed-test unit joins the attempt slice, (c) each gets only the time REMAINING
+# to the one deadline (strictly decreasing across the loop) not a fresh ceiling, and the over-grant
+# refusal: a 3s-to-deadline phase is refused (no unit), never granted the floor.
 ctmp = pathlib.Path(tempfile.mkdtemp())
 (ctmp / "tests").mkdir()
 for name in ("t1.sh", "t2.sh"):
     p = ctmp / "tests" / name
     p.write_text("#!/bin/sh\nexit 0\n"); p.chmod(0o755)
+# t3 is candidate-READ (round-1: refusal must reach candidate-read too).
+(ctmp / "tests" / "t3.sh").write_text("#!/bin/sh\nexit 0\n"); (ctmp / "tests" / "t3.sh").chmod(0o755)
 (ctmp / "tests" / "execution-policy.tsv").write_text(
     "tests/t1.sh\tcandidate-isolated\tsynthetic B6 fixture\n"
-    "tests/t2.sh\tcandidate-isolated\tsynthetic B6 fixture\n")
+    "tests/t2.sh\tcandidate-isolated\tsynthetic B6 fixture\n"
+    "tests/t3.sh\tcandidate-read\tsynthetic B6 read fixture\n")
 d.run(["git", "init", "-q", "-b", "main", str(ctmp)])
 d.run(["git", "-C", str(ctmp), "config", "user.email", "t@t"])
 d.run(["git", "-C", str(ctmp), "config", "user.name", "t"])
@@ -173,10 +207,11 @@ lc = {"execution_policy": policy, "test_unit": f"codex-test-{aid}", "attempt_id"
       "test_runtime": {"root": "/tmp/fake-test-runtime", "python": "/tmp/fake-test-runtime/bin/python"}}
 
 calls.clear()
-deadline = clock.now + 200
+deadline = clock.now + 300
 d.run_candidate_test_phases(lc, ctmp, installed_commit, catt, deadline, [])
 test_calls = [c for c in calls if "systemd-run" in c]
-check("run_candidate_test_phases: one isolated_run per required test", len(test_calls) == 2)
+check("run_candidate_test_phases: one isolated_run per candidate-isolated test (read runs no unit)",
+      len(test_calls) == 2)
 check("run_candidate_test_phases: every installed-test unit joins the attempt slice",
       all(slice_of(c) == d.attempt_slice(aid) for c in test_calls))
 ceilings = [runtime_max_sec(c) for c in test_calls]
@@ -185,18 +220,29 @@ check("run_candidate_test_phases: RuntimeMaxSec strictly decreases across the lo
 check("run_candidate_test_phases: the SAME deadline is spent down, not reset "
       f"(delta == simulated phase cost) {ceilings}", ceilings[0] - ceilings[1] == PHASE_DURATION_S)
 
-# Refusal case: the deadline has already passed before this phase — must NOT start a unit.
+# Over-grant refusal (round-1 finding 1): 3s to the deadline must refuse every remaining phase,
+# launching NO unit — not grant the 30s floor.
+calls.clear()
+near = clock.now + 3
+res_near = d.run_candidate_test_phases(lc, ctmp, installed_commit, catt, near, [])
+check("run_candidate_test_phases: 3s to deadline REFUSES the phase (no unit launched), not a floor grant",
+      not any("systemd-run" in c for c in calls))
+near_statuses = [o["status"] for obs in res_near["tests"].values() for o in obs["observations"][-1:]]
+check("run_candidate_test_phases: a refused (near-deadline) phase is FAIL, never silently skipped",
+      near_statuses and all(s == "FAIL" for s in near_statuses))
+
+# Fully spent deadline: candidate-ISOLATED and candidate-READ both refuse, both logged.
 calls.clear()
 past_deadline = clock.now - 500
-result = d.run_candidate_test_phases(lc, ctmp, installed_commit, catt, past_deadline, [])
-check("run_candidate_test_phases: refuses to start a phase past a spent deadline (no isolated_run)",
+res_past = d.run_candidate_test_phases(lc, ctmp, installed_commit, catt, past_deadline, [])
+check("run_candidate_test_phases: refuses to start any phase past a spent deadline (no isolated_run)",
       not any("systemd-run" in c for c in calls))
-statuses = [o["status"] for obs in result["tests"].values() for o in obs["observations"][-1:]]
-check("run_candidate_test_phases: a refused phase is graded FAIL, never silently skipped",
-      statuses and all(s == "FAIL" for s in statuses))
-log1 = (catt / "raw" / "candidate-isolated-t1.log").read_text()
-check("run_candidate_test_phases: the log names the exhausted deadline as the reason",
-      "deadline exhausted" in log1)
+iso_log = (catt / "raw" / "candidate-isolated-t1.log").read_text()
+read_log = (catt / "raw" / "candidate-read-t3.log").read_text()
+check("run_candidate_test_phases: candidate-isolated refusal names the exhausted deadline",
+      "deadline exhausted" in iso_log)
+check("run_candidate_test_phases: candidate-READ refusal ALSO names the exhausted deadline (round-1)",
+      "deadline exhausted" in read_log)
 
 d.ROOT, d.EXECUTION_POLICY = _orig_ROOT, _orig_EXECUTION_POLICY
 d.test_runtime_matches = _orig_test_runtime_matches
@@ -205,9 +251,9 @@ d.trusted_test_runtime = _orig_trusted_test_runtime
 # ==================================================================================================
 # Group D — run_regression_gate(): the OTHER real production call site, driven against a real temp
 # git repo (same fixture shape as tests/dispatch_gate4.sh) with iso=True so it actually reaches
-# isolated_run for both the base and candidate runs. Proves both share the attempt slice and the
-# candidate run gets less remaining time than the base run (same deadline, real elapsed simulated
-# time in between) — plus the refusal case when the deadline is spent between the two runs.
+# isolated_run for both the base and candidate runs. Proves both share the attempt slice, the
+# candidate run gets less remaining time than the base run (same deadline), and the over-grant
+# refusal: with the base run consuming the window, the candidate is refused rather than floor-granted.
 rtmp = pathlib.Path(tempfile.mkdtemp())
 rrepo = rtmp / "r"
 d.run(["git", "init", "-qb", "main", str(rrepo)])
@@ -245,7 +291,7 @@ rlc = {"regression_command": "python3 test_reg.py", "regression_test_paths": ["t
        "base_sha": rbase, "attempt_id": raid}
 
 calls.clear()
-r_deadline = clock.now + 200
+r_deadline = clock.now + 300
 d.run_regression_gate(rlc, rcand_wt, rcand, ratt, iso=True, deadline_ts=r_deadline)
 reg_calls = [c for c in calls if "systemd-run" in c]
 check("run_regression_gate: exactly base + candidate isolated_run calls", len(reg_calls) == 2)
@@ -259,68 +305,169 @@ reg_ceilings = [runtime_max_sec(c) for c in reg_calls]
 check(f"run_regression_gate: candidate run gets LESS remaining time than base (same deadline) "
       f"{reg_ceilings}", reg_ceilings[1] < reg_ceilings[0])
 
-# Refusal case: deadline already spent before the candidate run starts.
+# Over-grant refusal: window large enough for base to run but not the candidate afterwards.
 calls.clear()
-r_deadline2 = clock.now + (PHASE_DURATION_S // 2)  # enough for base to appear to start, not candidate
+r_deadline2 = clock.now + (MIN + PHASE_DURATION_S // 2)  # base runs, then < MIN left → candidate refused
 reg2 = d.run_regression_gate(rlc, rcand_wt, rcand, ratt, iso=True, deadline_ts=r_deadline2)
-check("run_regression_gate: refuses the candidate run once the deadline is spent",
-      reg2["candidate_exit"] is None and "deadline exhausted" in reg2["reason"])
+check("run_regression_gate: base runs but candidate is REFUSED once < MIN remains (not floor-granted)",
+      len([c for c in calls if "systemd-run" in c]) == 1
+      and reg2["candidate_exit"] is None and "deadline exhausted" in reg2["reason"])
 
 d.worktree_root, d.git, d.grant_worker_acl, d.run = _orig_wtr, _orig_git, _orig_gwa, _orig_run
 
 # ==================================================================================================
-# Group E — cmd_cancel(): the REAL operator-facing command. Before B6 this stopped only two
-# hand-picked unit names; it must now stop the whole attempt SLICE (which is where the suffixed
-# installed-test and both regression units actually live) as well as the outer pipeline unit, and
-# report the post-teardown unit listing.
+# Group E — teardown_attempt(): the shared teardown every ending path uses. Proves producer-first
+# ordering (finding 2), the second slice-stop reap, and fail-closed verification (finding 3).
+taid = "SPEC-905-1"
+tunit = d.unit_name("SPEC-905", 1)
+tslice = d.attempt_slice(taid)
+
+calls.clear()
+td = d.teardown_attempt(taid, tunit)
+def first_idx(pred): return next(i for i, c in enumerate(calls) if pred(c))
+outer_i = first_idx(lambda c: is_user_stop(c, tunit))
+slice_i = first_idx(lambda c: is_sudo_stop(c, tslice))
+check("teardown_attempt: stops the PRODUCER (outer --user unit) BEFORE the slice (finding 2)",
+      outer_i < slice_i)
+check("teardown_attempt: no member (systemd-run) is launched during teardown",
+      not any("systemd-run" in c for c in calls))
+check("teardown_attempt: slice is stopped AGAIN after the producer (reap mid-teardown spawns)",
+      sum(1 for c in calls if is_sudo_stop(c, tslice)) >= 2)
+check("teardown_attempt: verified clean when query ok + nothing remains", td["verified"] is True)
+
+# Finding 3a — a FAILED list-units query must NOT be read as "no units remain".
+calls.clear()
+fake_list["rc"] = 1
+td_q = d.teardown_attempt("SPEC-906-1", d.unit_name("SPEC-906", 1))
+check("teardown_attempt: a failed list-units query FAILS CLOSED (not verified)",
+      td_q["verified"] is False and td_q["query_ok"] is False)
+fake_list["rc"] = 0
+
+# Finding 3b — a surviving unit is reported and not verified.
+calls.clear()
+fake_list["output"] = "codex-regcand-SPEC-907-1.service loaded active running reg\n"
+td_r = d.teardown_attempt("SPEC-907-1", d.unit_name("SPEC-907", 1))
+check("teardown_attempt: a surviving unit is reported and NOT verified (finding 3)",
+      "codex-regcand-SPEC-907-1.service" in td_r["remaining_units"] and td_r["verified"] is False)
+fake_list["output"] = ""
+
+# ==================================================================================================
+# Group F — cmd_cancel(): stops the whole slice + the outer unit, verifies, exits per verification.
 etmp = pathlib.Path(tempfile.mkdtemp())
 d.STATE = etmp / "state"; d.STATE.mkdir()
 eaid = "SPEC-902-1"
 espec, en = d.parse_attempt_id(eaid)
+eunit = d.unit_name(espec, en)
 d.write_state(espec, {"attempt_id": eaid, "spec_id": espec, "attempt": en, "status": "running",
-                      "unit": d.unit_name(espec, en)})
+                      "unit": eunit})
 
 calls.clear()
-import io, contextlib
 buf = io.StringIO()
-with contextlib.redirect_stdout(buf):
-    d.cmd_cancel(eaid)
+try:
+    with contextlib.redirect_stdout(buf):
+        d.cmd_cancel(eaid)
+    cancel_rc = 0
+except SystemExit as e:
+    cancel_rc = e.code
 out = json.loads(buf.getvalue())
-
-slice_stops = [c for c in calls if c[:3] == ["sudo", "-n", "systemctl"] and c[3:4] == ["stop"]]
 check("cmd_cancel: stops the attempt SLICE (not just worker+test unit names)",
-      any(c[-1] == d.attempt_slice(eaid) for c in slice_stops))
-outer_stops = [c for c in calls if c[:3] == ["systemctl", "--user", "stop"]]
+      any(is_sudo_stop(c, d.attempt_slice(eaid)) for c in calls))
 check("cmd_cancel: also stops the outer --user pipeline unit",
-      any(c[-1] == d.unit_name(espec, en) for c in outer_stops))
-check("cmd_cancel: reports the post-teardown unit listing", "remaining_units" in out)
-check("cmd_cancel: verification found nothing left running (fake systemctl reports empty)",
-      out["remaining_units"] == [])
-st = d.read_state(espec)
-check("cmd_cancel: state moves to interrupted/cancelled", st["status"] == "interrupted"
-      and st["error_class"] == "cancelled")
+      any(is_user_stop(c, eunit) for c in calls))
+check("cmd_cancel: producer stopped before the slice", cancel_rc == 0
+      and first_idx(lambda c: is_user_stop(c, eunit)) < first_idx(lambda c: is_sudo_stop(c, d.attempt_slice(eaid))))
+check("cmd_cancel: verified clean (fake systemctl reports empty) and exits 0",
+      out["verified"] is True and out["remaining_units"] == [] and cancel_rc == 0)
+est = d.read_state(espec)
+check("cmd_cancel: state moves to interrupted/cancelled",
+      est["status"] == "interrupted" and est["error_class"] == "cancelled")
+check("cmd_cancel: an operator cancel is NOT relabeled a timeout", "timeout" not in est.get("detail", ""))
+
+# cmd_cancel fail-closed: a failed verification query escalates + exits nonzero.
+d.write_state(espec, {"attempt_id": eaid, "spec_id": espec, "attempt": en, "status": "running",
+                      "unit": eunit})
+esc_before = len(list(d.ESCALATIONS.glob("*.json"))) if d.ESCALATIONS.exists() else 0
+calls.clear(); fake_list["rc"] = 1
+try:
+    with contextlib.redirect_stdout(io.StringIO()):
+        d.cmd_cancel(eaid)
+    cancel_rc2 = 0
+except SystemExit as e:
+    cancel_rc2 = e.code
+fake_list["rc"] = 0
+esc_after = len(list(d.ESCALATIONS.glob("*.json"))) if d.ESCALATIONS.exists() else 0
+check("cmd_cancel: unverifiable teardown exits nonzero (fail closed, finding 3)", cancel_rc2 == 1)
+check("cmd_cancel: unverifiable teardown escalates rather than warn-and-continue", esc_after > esc_before)
 
 # ==================================================================================================
-# Group F — cmd_reconcile(): when the outer unit is found dead while state was still LIVE (crash,
-# box restart, or the outer unit's own RuntimeMaxSec firing), the attempt's system units are
-# independent of it and can still be running — reconcile must tear down the slice too, not just
-# relabel state and walk away from an orphan.
+# Group G — cmd_timeout(): finding 4. The outer unit carries ExecStopPost=`timeout`, so a fired
+# RuntimeMaxSec tears down + verifies the slice at stop time. Proves: (a) wiring is present, (b) a
+# LIVE attempt is relabeled timeout + slice torn down + verified, (c) it does NOT try to stop the
+# outer unit (systemd is already stopping the producer), (d) it is a no-op on an already-terminal
+# state (does not clobber a normal finish or an operator cancel).
+launch_src = inspect.getsource(d.cmd_launch)
+check("cmd_launch wires ExecStopPost=`timeout` so RuntimeMaxSec fires teardown at stop time (finding 4)",
+      "ExecStopPost" in launch_src and "timeout" in launch_src)
+
+gtmp = pathlib.Path(tempfile.mkdtemp())
+d.STATE = gtmp / "state"; d.STATE.mkdir()
+gaid = "SPEC-903-1"
+gspec, gn = d.parse_attempt_id(gaid)
+gunit = d.unit_name(gspec, gn)
+d.write_state(gspec, {"attempt_id": gaid, "spec_id": gspec, "attempt": gn, "status": "running",
+                      "unit": gunit})
+calls.clear()
+gbuf = io.StringIO()
+try:
+    with contextlib.redirect_stdout(gbuf):
+        d.cmd_timeout(gaid)
+    timeout_rc = 0
+except SystemExit as e:
+    timeout_rc = e.code
+gout = json.loads(gbuf.getvalue())
+check("cmd_timeout: tears down the attempt slice", any(is_sudo_stop(c, d.attempt_slice(gaid)) for c in calls))
+check("cmd_timeout: does NOT stop the outer unit (systemd is already stopping the producer)",
+      not any(is_user_stop(c, gunit) for c in calls))
+check("cmd_timeout: verifies + exits 0 when clean", gout["verified"] is True and timeout_rc == 0)
+gst = d.read_state(gspec)
+check("cmd_timeout: a LIVE attempt is relabeled to timeout",
+      gst["status"] == "interrupted" and gst["error_class"] == d.ERR_TIMEOUT)
+
+# Already-terminal: cmd_timeout is teardown-only, never clobbers the recorded outcome.
+d.write_state(gspec, {"attempt_id": gaid, "spec_id": gspec, "attempt": gn,
+                      "status": "passed_pr_opened", "unit": gunit})
+calls.clear()
+try:
+    with contextlib.redirect_stdout(io.StringIO()):
+        d.cmd_timeout(gaid)
+except SystemExit:
+    pass
+check("cmd_timeout: does NOT clobber an already-terminal state (idempotent, state-safe)",
+      d.read_state(gspec)["status"] == "passed_pr_opened")
+check("cmd_timeout: still tears the slice down even when state is already terminal",
+      any(is_sudo_stop(c, d.attempt_slice(gaid)) for c in calls))
+
+# ==================================================================================================
+# Group H — cmd_reconcile(): an outer unit found dead while state was LIVE (crash, box restart, or
+# the outer unit's own RuntimeMaxSec) runs the SAME teardown, not just a relabel-and-walk-away.
 ftmp = pathlib.Path(tempfile.mkdtemp())
 d.STATE = ftmp / "state"; d.STATE.mkdir()
-faid = "SPEC-903-1"
+faid = "SPEC-904-1"
 fspec, fn = d.parse_attempt_id(faid)
+funit = d.unit_name(fspec, fn)
 d.write_state(fspec, {"attempt_id": faid, "spec_id": fspec, "attempt": fn, "status": "running",
-                      "unit": d.unit_name(fspec, fn)})
-
+                      "unit": funit})
 calls.clear()
-buf2 = io.StringIO()
-with contextlib.redirect_stdout(buf2):
-    d.cmd_reconcile()  # fake systemctl show returns nothing -> unit reads as inactive -> "gone"
-reconcile_slice_stops = [c for c in calls
-                         if c[:3] == ["sudo", "-n", "systemctl"] and c[3:4] == ["stop"]
-                         and c[-1] == d.attempt_slice(faid)]
-check("cmd_reconcile: an outer unit found dead while LIVE also stops the attempt slice",
-      len(reconcile_slice_stops) == 1)
+fbuf = io.StringIO()
+with contextlib.redirect_stdout(fbuf):
+    d.cmd_reconcile()  # fake systemctl show returns nothing -> unit reads inactive -> "gone"
+recon = json.loads(fbuf.getvalue())
+check("cmd_reconcile: an outer unit found dead while LIVE tears down the attempt slice",
+      any(is_sudo_stop(c, d.attempt_slice(faid)) for c in calls))
+check("cmd_reconcile: reports per-attempt teardown verification",
+      recon["reconciled"] and recon["reconciled"][0].get("teardown_verified") is True)
+check("cmd_reconcile: reports whether the live-units query itself succeeded (fail closed)",
+      recon.get("live_units_query_ok") is True)
 fst = d.read_state(fspec)
 check("cmd_reconcile: state moves to interrupted", fst["status"] == "interrupted")
 
