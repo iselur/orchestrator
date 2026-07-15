@@ -2124,6 +2124,7 @@ def run_candidate_test_phases(lc: dict, wt: Path, worker_commit: str, att: Path,
                                             stderr=subprocess.STDOUT)
                     rc = cp.returncode
                     test_after = sha256_file(run_path)   # the bytes actually executed
+                claim = "installed policy read exact candidate Git blobs as data; no candidate bytes executed"
         # B4 round-3: re-hash the manifest from the PINNED commit, not the working tree — the graders
         # ran against the materialized (pinned) manifest, so a mid-run working-tree manifest swap
         # must neither pass a stale grade nor fail a pinned one. Commit movement is caught separately

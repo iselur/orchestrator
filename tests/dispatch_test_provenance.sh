@@ -25,7 +25,7 @@ if [ ! -x "$PY" ] || ! "$PY" -c 'import yaml, jsonschema' 2>/dev/null; then
 fi
 
 "$PY" - <<'PY'
-import hashlib, importlib.util, os, pathlib, subprocess, tempfile, sys
+import hashlib, importlib.util, os, pathlib, subprocess, tempfile, sys, time
 
 spec = importlib.util.spec_from_file_location("d", "scripts/dispatch.py")
 d = importlib.util.module_from_spec(spec); spec.loader.exec_module(d)
@@ -166,7 +166,7 @@ try:
     (work / "tests" / "a.sh").write_text("#!/bin/sh\necho tampered again\nexit 0\n")
     att = tmp / "att"; (att / "raw").mkdir(parents=True)
     lc = {"execution_policy": baseline, "test_runtime": None, "test_unit": "unused"}
-    result = d.run_candidate_test_phases(lc, work, "deadbeef" * 5, att, 60, [])
+    result = d.run_candidate_test_phases(lc, work, "deadbeef" * 5, att, time.time() + 3600, [])
     claims = " ".join(o.get("claim", "") for obs in result["tests"].values()
                       for o in obs["observations"])
     check("run_candidate_test_phases refuses to attest under working-tree drift",
@@ -178,7 +178,7 @@ try:
     # runtime configured fails closed on its own before ever calling isolated_run) --------------
     att2 = tmp / "att2"; (att2 / "raw").mkdir(parents=True)
     lc2 = {"execution_policy": baseline, "test_runtime": None, "test_unit": "unused"}
-    result2 = d.run_candidate_test_phases(lc2, work, "deadbeef" * 5, att2, 60, [])
+    result2 = d.run_candidate_test_phases(lc2, work, "deadbeef" * 5, att2, time.time() + 3600, [])
     check("run_candidate_test_phases: clean tree reaches a candidate-read observation",
           any(o.get("phase") == "candidate-read"
               for o in result2["tests"]["tests/a.sh"]["observations"]))
@@ -324,7 +324,7 @@ try:
         ("candidate-read", "candidate-read", "candidate-read-a.log",
          lambda att, pol, root: d.run_candidate_test_phases(
              {"execution_policy": pol, "test_runtime": None, "test_unit": "u"},
-             root, "d" * 40, att, 60, [])),
+             root, "d" * 40, att, time.time() + 3600, [])),
         ("box-precondition", "box-precondition", "box-precondition-a.log",
          lambda att, pol, root: d.run_box_preconditions(att, pol)),
     ):
@@ -416,7 +416,7 @@ try:
     tampered_sha = hashlib.sha256((mr / "tests" / "execution-policy.tsv").read_bytes()).hexdigest()
     matt = pathlib.Path(tempfile.mkdtemp()); (matt / "raw").mkdir(parents=True)
     res = d.run_candidate_test_phases({"execution_policy": mpol, "test_runtime": None,
-                                       "test_unit": "u"}, mr, "d" * 40, matt, 60, [])
+                                       "test_unit": "u"}, mr, "d" * 40, matt, time.time() + 3600, [])
     obs = res["tests"]["tests/a.sh"]["observations"][-1]
     check("manifest_after is the PINNED manifest hash, not the swapped working-tree one",
           obs["manifest_sha256_after"] == committed_manifest_sha
