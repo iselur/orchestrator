@@ -4,15 +4,39 @@
 # script refuses it. The cap lives in code because a prose cap already lost once to a ten-round
 # loop. Only round-N.md files are rounds: sibling artifacts (dispositions, notes) never count.
 #
-# The reviewer this script invokes is Codex, so it may only review Claude-authored artifacts:
-# --author is required and 'codex' is refused (never Codex-grades-Codex). Codex-authored work is
-# reviewed by Claude (worker diffs: bound reviewer in the dispatcher; plans: Claude in-session).
+# The reviewer this script invokes is Codex, so it may only review Claude-authored artifacts.
+# B18: --author is NOT trusted as an assertion — a caller could mislabel a Codex-authored artifact
+# as --author claude and get it routed to a Codex reviewer, which is exactly self-review. So
+# authorship is DERIVED from provenance this repo's dispatcher (scripts/dispatch.py) and
+# scripts/codex-plan already record on disk, which a CLI flag cannot forge:
+#   - a --context file under .orchestrator/attempts/<spec>/<n>/ is classified from THAT attempt's
+#     own launch.json worker_model, written by the dispatcher before this script could ever run;
+#   - a --context file named PLAN-NNN.{md,stdout,stderr} is codex-plan output — that is codex-plan's
+#     reserved identifier namespace, recognized in ANY directory (codex-plan's --out can write it
+#     outside .orchestrator/plans; keying on the directory was a bypass);
+#   - a --context file inside a recorded worker worktree (launch.json "worktree", or either root
+#     dispatch.py ever hands to a worker) is likewise codex;
+#   - anything else is claude (this system has exactly two producers; nothing else writes to a
+#     Codex-marked path).
+# --author is kept only as a CROSS-CHECK: it must agree with the derived value or the call is
+# refused (exit 6). At least one --context file is REQUIRED so there is always something to derive
+# from; a call with no evidence at all is refused (fail closed) rather than trusted.
+# LIMITATION (documented, not solved here): a freshly drafted Claude file that has not yet touched
+# any Codex-marked path derives as 'claude' by absence of a Codex marker, not by positive proof of
+# a human/Claude hand — this repo has no signing or content-provenance system. What this closes is
+# the literal B18 report: an artifact that already carries dispatcher-recorded Codex provenance can
+# no longer be laundered through a mislabeled --author flag.
 #
-# Usage: scripts/review --topic <slug> --author <claude|codex> [--context FILE]... [--] [PROMPT...]
+# 'codex' as the derived/checked author is always refused (never Codex-grades-Codex). Codex-authored
+# work is reviewed by Claude (worker diffs: bound reviewer in the dispatcher; plans: Claude in-session).
+#
+# Usage: scripts/review --topic <slug> --author <claude|codex> --context FILE [--context FILE]...
+#        [--] [PROMPT...]
 #        PROMPT as arguments or on stdin. Output: .orchestrator/reviews/<slug>/round-N.md
 # Callers run this detached (it can take hours — see AGENTS.md); never wrap it in a short timeout.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+ROOT="$PWD"
 
 MODEL="gpt-5.6-sol"
 out_root=".orchestrator/reviews"
@@ -28,7 +52,7 @@ while (($#)); do
     --topic)   (($# >= 2)) || die "--topic requires a slug"; topic="$2"; shift 2 ;;
     --author)  (($# >= 2)) || die "--author requires claude or codex"; author="$2"; shift 2 ;;
     --context) (($# >= 2)) || die "--context requires a file"; contexts+=("$2"); shift 2 ;;
-    --help|-h) sed -n '2,13p' "$0"; exit 0 ;;
+    --help|-h) sed -n '2,30p' "$0"; exit 0 ;;
     --)        shift; prompt_parts+=("$@"); break ;;
     -*)        die "unknown option: $1" ;;
     *)         prompt_parts+=("$1"); shift ;;
@@ -37,13 +61,163 @@ done
 
 [[ "$topic" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "--topic must be a lowercase slug (a-z, 0-9, -)"
 case "$author" in
-  claude) ;;
-  codex)
-    echo "review: REFUSED — this script's reviewer is Codex, and the artifact's author is Codex." >&2
-    echo "        Never Codex-grades-Codex (CLAUDE.md). Have Claude review this artifact instead." >&2
-    exit 4 ;;
-  *) die "--author is required and must be 'claude' or 'codex' (who produced the artifact under review)" ;;
+  claude|codex) ;;
+  *) die "--author is required and must be 'claude' or 'codex' (checked below against recorded provenance)" ;;
 esac
+
+# ---------------------------------------------------------------- B18: derive authorship --------
+attempts_root="$ROOT/.orchestrator/attempts"
+plans_root="$ROOT/.orchestrator/plans"
+iso_worktrees="/srv/codexwork/worktrees"
+local_worktrees="$ROOT/.worktrees"
+
+# Classify a recorded model name (e.g. launch.json's worker_model) into a vendor. Refuses to guess:
+# an unrecognized model name is NOT silently trusted either way.
+classify_model() {
+  python3 -c "
+import sys
+m = sys.argv[1].lower()
+if 'claude' in m or 'fable' in m:
+    print('claude')
+elif 'gpt' in m or 'codex' in m or 'sol' in m:
+    print('codex')
+else:
+    print('unknown')
+" "$1"
+}
+
+# Prints 'VENDOR<TAB>evidence note' on stdout. Never calls die()/exit — it runs inside a command
+# substitution (its own subshell), where an exit would be swallowed by the subshell and silently
+# skip the fail-closed refusal in the caller. On any problem it prints 'error<TAB>reason' instead;
+# the caller (main shell) is the one that turns that into a refusal.
+derive_one() {
+  local f="$1" real
+  if ! real=$(realpath -e -- "$f" 2>/dev/null); then
+    printf 'error\tcannot resolve context path: %s\n' "$f"
+    return 0
+  fi
+
+  # 1. Inside a recorded dispatch attempt: derive from THAT attempt's own launch.json, written by
+  #    scripts/dispatch.py before this script could ever be invoked on it — never from the flag.
+  if [[ "$real" == "$attempts_root"/* ]]; then
+    local rel spec n lc wm vendor
+    rel="${real#"$attempts_root"/}"
+    spec="${rel%%/*}"
+    rel="${rel#*/}"
+    n="${rel%%/*}"
+    lc="$attempts_root/$spec/$n/launch.json"
+    if [[ ! -f "$lc" ]]; then
+      printf 'error\t%s is inside dispatch attempt %s/%s but its launch.json is missing (%s); provenance cannot be established\n' "$f" "$spec" "$n" "$lc"
+      return 0
+    fi
+    wm=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    print('')
+    sys.exit(0)
+print(d.get('worker_model') or '')
+" "$lc")
+    if [[ -z "$wm" ]]; then
+      printf 'error\t%s has no worker_model recorded; corrupt attempt provenance\n' "$lc"
+      return 0
+    fi
+    vendor=$(classify_model "$wm")
+    if [[ "$vendor" != "claude" && "$vendor" != "codex" ]]; then
+      printf 'error\t%s worker_model %s does not match a known vendor; refuse rather than guess\n' "$lc" "$wm"
+      return 0
+    fi
+    printf '%s\tattempt %s/%s launch.json worker_model=%s\n' "$vendor" "$spec" "$n" "$wm"
+    return 0
+  fi
+
+  # 2. codex-plan's own output naming (PLAN-NNN.{md,stdout,stderr}). This is codex-plan's RESERVED
+  #    identifier namespace — allocated and written by that script alone — so it marks Codex
+  #    authorship no matter WHERE the file lands. Keying on the directory was a B18 hole: codex-plan
+  #    takes `--out DIR` (scripts/codex-plan) and writes genuine PLAN-NNN artifacts anywhere, so a
+  #    real Codex plan placed outside .orchestrator/plans would have derived 'claude' and been
+  #    laundered through a forged --author claude — the exact bypass, via an original producer
+  #    artifact (not content laundering). Match the basename, not the directory. This runs AFTER the
+  #    attempt check, so a PLAN-NNN file inside an attempt still derives from that attempt's
+  #    launch.json (also Codex). The trade-off is deliberate and fail-safe: any file that happens to
+  #    carry codex-plan's reserved PLAN-NNN name is treated as Codex, so at worst a mis-named
+  #    Claude artifact is refused for Codex review (safe) — never the reverse.
+  local base="${real##*/}"
+  if [[ "$base" =~ ^PLAN-[0-9]+\.(md|stdout|stderr)$ ]]; then
+    if [[ "$real" == "$plans_root"/* ]]; then
+      printf 'codex\tcodex-plan output %s\n' "$base"
+    else
+      printf 'codex\tcodex-plan output naming %s (reserved Codex namespace via --out, dir %s)\n' "$base" "${real%/*}"
+    fi
+    return 0
+  fi
+
+  # 3. Either root dispatch.py ever hands to a worker (isolated or not).
+  if [[ "$real" == "$iso_worktrees"/* || "$real" == "$local_worktrees"/* ]]; then
+    printf 'codex\tworker worktree path %s\n' "$real"
+    return 0
+  fi
+
+  # 4. A worktree path recorded in some attempt's launch.json but outside the usual roots above
+  #    (e.g. an older attempt, or a relocated worktree).
+  if [[ -d "$attempts_root" ]]; then
+    local lc wt
+    while IFS= read -r lc; do
+      wt=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    print('')
+    sys.exit(0)
+print(d.get('worktree') or '')
+" "$lc")
+      [[ -n "$wt" ]] || continue
+      wt=$(realpath -m -- "$wt")
+      if [[ "$real" == "$wt" || "$real" == "$wt"/* ]]; then
+        printf 'codex\trecorded worktree in %s\n' "$lc"
+        return 0
+      fi
+    done < <(find "$attempts_root" -mindepth 3 -maxdepth 3 -name launch.json 2>/dev/null)
+  fi
+
+  # 5. Nothing ties this file to a Codex-marked path. This system has exactly two producers
+  #    (AGENTS.md role table) and every Codex-authored path is one of the above, so the absence of
+  #    a Codex marker is the signal for Claude/operator authorship (see LIMITATION note at top).
+  printf 'claude\tno Codex provenance marker found for %s\n' "$real"
+}
+
+((${#contexts[@]})) || die "REFUSED — no --context evidence supplied; authorship cannot be derived without it (fail closed, B18). Pass --context FILE pointing at the artifact under review."
+
+derived=""
+evidence_lines=()
+for context in "${contexts[@]}"; do
+  [[ -f "$context" && -r "$context" ]] || die "context is not a readable file: $context"
+  IFS=$'\t' read -r vendor note <<<"$(derive_one "$context")"
+  [[ "$vendor" == "error" ]] && die "REFUSED — $note (fail closed, B18)"
+  evidence_lines+=("$context: $vendor — $note")
+  if [[ -z "$derived" ]]; then
+    derived="$vendor"
+  elif [[ "$vendor" != "$derived" ]]; then
+    die "REFUSED — context files disagree on recorded authorship (mixed provenance): $(printf '%s | ' "${evidence_lines[@]}")"
+  fi
+done
+
+if [[ "$author" != "$derived" ]]; then
+  echo "review: REFUSED — recorded provenance says this artifact is '$derived'-authored, but --author asserted '$author'." >&2
+  for line in "${evidence_lines[@]}"; do echo "        evidence: $line" >&2; done
+  echo "        Authorship is derived from dispatch/codex-plan provenance recorded on disk, never a caller assertion (B18)." >&2
+  exit 6
+fi
+
+if [[ "$derived" == "codex" ]]; then
+  echo "review: REFUSED — this script's reviewer is Codex, and recorded provenance shows the artifact is Codex-authored." >&2
+  for line in "${evidence_lines[@]}"; do echo "        evidence: $line" >&2; done
+  echo "        Never Codex-grades-Codex (CLAUDE.md). Have Claude review this artifact instead." >&2
+  exit 4
+fi
+# --------------------------------------------------------------------------------------------------
 
 if ((${#prompt_parts[@]})); then
   prompt="${prompt_parts[*]}"
