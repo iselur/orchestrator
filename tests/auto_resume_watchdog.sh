@@ -46,11 +46,12 @@ while (($#)); do
 done
 case "$cmd" in
   has-session)    [ -e "$S/sessions/$name" ] ;;
-  new-session)    touch "$S/sessions/$name"; echo bash > "$S/sessions/$name.cmd" ;;
+  new-session)    touch "$S/sessions/$name"; echo bash > "$S/sessions/$name.cmd"
+                  printf '$0:100:500\n' > "$S/sessions/$name.pane" ;;
   send-keys)      printf '%s\n' "${args[*]}" >> "$S/sessions/$name.keys"
                   echo claude > "$S/sessions/$name.cmd" ;;
   display-message) cat "$S/sessions/$name.cmd" 2>/dev/null || echo bash ;;
-  list-panes)     cat "$S/sessions/$name.panepid" 2>/dev/null || exit 1 ;;
+  list-panes)     cat "$S/sessions/$name.pane" 2>/dev/null || exit 1 ;;
   pipe-pane)      : ;;
   kill-session)   rm -f "$S/sessions/$name" "$S/sessions/$name."* ;;
   *) exit 0 ;;
@@ -84,10 +85,7 @@ cat > "$F/uuidgen" <<'FAKE'
 #!/usr/bin/env bash
 # FAKE_UUID_MAKE_HALT: deterministic HALT-injection hook — uuidgen is the external command the
 # watchdog runs between its entry guard and its first mutation (round-2 review, critical 2).
-# FAKE_UUID_ADD_CLAUDE: the same hook for the standby race — a claude row appended to the process
-# table AFTER entry detection, exactly in the detection-to-launch window the barrier must close.
 [ -n "${FAKE_UUID_MAKE_HALT:-}" ] && touch "$FAKE_UUID_MAKE_HALT"
-[ -n "${FAKE_UUID_ADD_CLAUDE:-}" ] && [ -n "${FAKE_PS_TABLE:-}" ] && printf '%s\n' "$FAKE_UUID_ADD_CLAUDE" >> "$FAKE_PS_TABLE"
 n=$(cat "$FAKE_UUID_COUNT" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$FAKE_UUID_COUNT"
 printf '00000000-0000-4000-8000-%012d\n' "$n"
 FAKE
@@ -101,17 +99,21 @@ cat > "$F/ps" <<'FAKE'
 #!/usr/bin/env bash
 # Answers only `ps -eo pid=,ppid=,comm=`, printing the FAKE_PS_TABLE file ("pid ppid comm" per
 # line). Unset table = empty process table (the real one would show the claude running this very
-# drill). FAKE_PS_FAIL simulates an unreadable table; FAKE_PS_MAKE_HALT is the HALT-injection
-# hook for the detection window (ps runs between the entry HALT check and the standby marker).
-[ -n "${FAKE_PS_MAKE_HALT:-}" ] && touch "$FAKE_PS_MAKE_HALT"
+# drill). FAKE_PS_FAIL simulates an unreadable table. Every invocation is counted so a scenario
+# can target the SECOND detection of one tick — the per-action barrier — deterministically:
+#   FAKE_PS_ADD_ROW      extra row printed once the call count exceeds FAKE_PS_ADD_AFTER
+#   FAKE_PS_MAKE_HALT    HALT path touched from call FAKE_PS_MAKE_HALT_ON (default 1) onward
+n=$(cat "$FAKE_PS_COUNT" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$FAKE_PS_COUNT"
+[ -n "${FAKE_PS_MAKE_HALT:-}" ] && [ "${FAKE_PS_MAKE_HALT_ON:-1}" -le "$n" ] && touch "$FAKE_PS_MAKE_HALT"
 [ -n "${FAKE_PS_FAIL:-}" ] && exit 3
 [ "$*" = "-eo pid=,ppid=,comm=" ] || exit 1
 [ -n "${FAKE_PS_TABLE:-}" ] && cat "$FAKE_PS_TABLE" 2>/dev/null
+[ -n "${FAKE_PS_ADD_ROW:-}" ] && [ "$n" -gt "${FAKE_PS_ADD_AFTER:-0}" ] && printf '%s\n' "$FAKE_PS_ADD_ROW"
 exit 0
 FAKE
 chmod +x "$F"/*
 
-export FAKE_TMUX_STATE="$TS" FAKE_ACTIVE_UNITS="$tmp/active-units" FAKE_CURL_LOG="$tmp/curl.log" FAKE_UUID_COUNT="$tmp/uuid-count"
+export FAKE_TMUX_STATE="$TS" FAKE_ACTIVE_UNITS="$tmp/active-units" FAKE_CURL_LOG="$tmp/curl.log" FAKE_UUID_COUNT="$tmp/uuid-count" FAKE_PS_COUNT="$tmp/ps-count"
 
 WDIR="$R/.orchestrator/watchdog"
 run_wd() { # run one watchdog invocation in the sandbox
@@ -121,9 +123,10 @@ run_wd() { # run one watchdog invocation in the sandbox
 reset() { # fresh state between scenarios
   rm -rf "$WDIR" "$TS" "$R/.orchestrator/HALT" "$R/.orchestrator/state" "$R/scripts/lib/usage-framings"
   mkdir -p "$TS/sessions" "$R/.orchestrator/state" "$R/scripts/lib/usage-framings"
-  rm -f "$FAKE_CURL_LOG" "$FAKE_ACTIVE_UNITS" "$FAKE_UUID_COUNT" "$LEDGER.lock"
+  rm -f "$FAKE_CURL_LOG" "$FAKE_ACTIVE_UNITS" "$FAKE_UUID_COUNT" "$FAKE_PS_COUNT" "$LEDGER.lock"
   printf '%s\n' "$HEADER" > "$LEDGER"
-  unset FAKE_CURL_EXIT FAKE_TMUX_FAIL FAKE_CLAUDE_VERSION FAKE_PS_TABLE FAKE_PS_FAIL FAKE_PS_MAKE_HALT FAKE_UUID_ADD_CLAUDE 2>/dev/null || true
+  unset FAKE_CURL_EXIT FAKE_TMUX_FAIL FAKE_CLAUDE_VERSION FAKE_PS_TABLE FAKE_PS_FAIL \
+        FAKE_PS_MAKE_HALT FAKE_PS_MAKE_HALT_ON FAKE_PS_ADD_ROW FAKE_PS_ADD_AFTER 2>/dev/null || true
 }
 open_row() { (cd "$R" && scripts/intake -g "${1:-drill goal}" -d "done when the drill criterion holds" >/dev/null); }
 keys() { cat "$TS/sessions/orch-auto.keys" 2>/dev/null || true; }
@@ -552,8 +555,7 @@ run_wd
 
 echo "== W18b: own supervised claude (any ancestry depth) never standby; a foreign one beside it does"
 reset; open_row
-run_wd                                             # launch: session up, pane runs claude
-echo 500 > "$TS/sessions/orch-auto.panepid"        # the pane's shell pid, as tmux would report it
+run_wd                                             # launch: session up, pane binding '$0:100:500' recorded
 ps_table "500 402 bash" "510 500 claude"           # claude 510 is a child of the pane shell
 run_wd
 [ ! -e "$WDIR/standby" ] && ok "own supervised claude: no standby" || bad "watchdog stood down for its own claude"
@@ -576,20 +578,28 @@ unset FAKE_PS_TABLE
 run_wd
 grep -q -- '--resume' <(keys) && ok "respawn happened once the user claude exited" || bad "no respawn after standby cleared"
 
-echo "== W18c: a pane is trusted only when provably ours — else every claude is foreign"
+echo "== W18c: a pane is trusted only while provably ours NOW — every distrust form stands down"
 reset; open_row
-run_wd                                             # session up, but tmux never answers list-panes
+run_wd                                             # launch records binding '$0:100:500'
 ps_table "500 402 bash" "510 500 claude"
 run_wd
-[ -e "$WDIR/standby" ] && ok "unreadable pane pid: stood down" || bad "unknown pane pid did not stand down"
-unset FAKE_PS_TABLE; run_wd                        # clear
-printf '500\n501\n' > "$TS/sessions/orch-auto.panepid"
-ps_table "500 402 bash" "510 500 claude"
+[ ! -e "$WDIR/standby" ] && ok "matching binding: own claude trusted (baseline)" || bad "trusted baseline broken"
+rm -f "$TS/sessions/orch-auto.pane"
+run_wd
+[ -e "$WDIR/standby" ] && ok "unreadable pane identity: stood down" || bad "unreadable pane identity trusted"
+printf '$0:100:500\n' > "$TS/sessions/orch-auto.pane"; run_wd   # restore, clears
+printf '$5:200:500\n' > "$TS/sessions/orch-auto.pane"           # same name, same pane pid, DIFFERENT session
+run_wd
+[ -e "$WDIR/standby" ] && ok "recreated same-name session: stale-but-valid records never trusted" || bad "stale records laundered a foreign session"
+printf '$0:100:500\n' > "$TS/sessions/orch-auto.pane"; run_wd   # restore, clears
+printf '$0:100:500\n$0:100:501\n' > "$TS/sessions/orch-auto.pane"
 run_wd
 [ -e "$WDIR/standby" ] && ok "multi-pane session: untrusted, stood down" || bad "multi-pane session trusted"
-echo 500 > "$TS/sessions/orch-auto.panepid"
+printf '$0:100:500\n' > "$TS/sessions/orch-auto.pane"; run_wd   # restore, clears
+ps_table "500 1 claude" "510 500 claude"                        # pane pid alive but NOT a shell
 run_wd
-[ ! -e "$WDIR/standby" ] && ok "single provable pane: trusted again" || bad "provable pane still distrusted"
+[ -e "$WDIR/standby" ] && ok "pane pid not a shell in the snapshot: untrusted" || bad "non-shell pane pid vouched for a claude"
+ps_table "500 402 bash" "510 500 claude"; run_wd                # restore, clears
 rm -f "$WDIR/launched"
 run_wd
 [ -e "$WDIR/standby" ] && ok "ownership record broken: untrusted, stood down" || bad "pane trusted without the launched marker"
@@ -638,17 +648,19 @@ unset FAKE_PS_FAIL
 run_wd
 [ ! -e "$WDIR/standby" ] && [ "$(invoked new-session)" = "1" ] && ok "recovered ps: standby cleared, launch resumed" || bad "no recovery after ps healed"
 
-echo "== W18h: a claude appearing in the detection-to-launch window is caught by the barrier"
+echo "== W18h: a claude appearing in the detection-to-send window is caught at the LAUNCH gate"
 reset; open_row
-ps_table                                            # empty table: no claude at entry detection
-export FAKE_UUID_ADD_CLAUDE="7777 1 claude"         # uuidgen injects one mid-launch
+rm -f "$FAKE_PS_COUNT"
+export FAKE_PS_ADD_ROW="7777 1 claude" FAKE_PS_ADD_AFTER=1   # entry detection clean; every later one sees it
 run_wd
-unset FAKE_UUID_ADD_CLAUDE
-[ "$(invoked new-session)" = "0" ] && ok "mid-tick claude: launch barrier deferred the launch" || bad "launch ran through the race window"
-[ ! -e "$WDIR/session-id" ] && ok "deferred launch mutated no state" || bad "deferred launch wrote state"
+[ "$(invoked new-session)" = "1" ] && [ -z "$(keys)" ] && ok "launch gate: session created, prompt WITHHELD" || bad "prompt sent through the race window"
+[ ! -e "$WDIR/launched" ] && ok "withheld prompt never marked launched" || bad "launched marker written without a prompt"
 run_wd
-[ -e "$WDIR/standby" ] && ok "next tick's entry detection parked it" || bad "race window claude never parked"
-unset FAKE_PS_TABLE
+[ -e "$WDIR/standby" ] && ok "next tick's entry detection parked it" || bad "race-window claude never parked"
+unset FAKE_PS_ADD_ROW FAKE_PS_ADD_AFTER
+run_wd                                              # standby clears; incomplete launch torn down
+run_wd                                              # fresh relaunch
+grep -q -- '--session-id' <(keys) && ok "recovered with a fresh launch once the user left" || bad "no recovery after the deferred launch"
 
 echo "== W18i: an armed ACTIVE-mode retry is deferred, not consumed, during standby"
 reset; open_row
@@ -678,5 +690,70 @@ run_wd
 unset FAKE_PS_TABLE
 run_wd
 [ ! -e "$TS/sessions/orch-auto" ] && [ ! -e "$WDIR/session-id" ] && ok "rotation completed once the user left" || bad "rotation never resumed"
+
+echo "== W18k: a claude appearing between entry detection and a RESPAWN is caught at the send gate"
+reset; open_row
+run_wd                                              # launch (prompt delivered)
+dead_pane
+rm -f "$FAKE_PS_COUNT"
+export FAKE_PS_ADD_ROW="7777 1 claude" FAKE_PS_ADD_AFTER=1
+n_before=$(keys | wc -l)
+run_wd
+[ "$(keys | wc -l)" = "$n_before" ] && ok "respawn gate: no --resume typed through the race window" || bad "respawn ran through the race window"
+unset FAKE_PS_ADD_ROW FAKE_PS_ADD_AFTER
+run_wd
+grep -q -- '--resume' <(keys) && ok "respawn completed once the user left" || bad "deferred respawn lost"
+
+echo "== W18l: a claude appearing before an armed ACTIVE retry is caught BEFORE the wait is consumed"
+reset; open_row
+run_wd
+printf 'USAGE_RETRY_MODE=active\n' > "$WDIR/env"; chmod 600 "$WDIR/env"
+gen=$(cat "$WDIR/generation")
+echo "$(( $(date +%s) - 60 )) $gen drill.sed" > "$WDIR/usage-wait"
+rm -f "$FAKE_PS_COUNT"
+export FAKE_PS_ADD_ROW="7777 1 claude" FAKE_PS_ADD_AFTER=1
+n_before=$(keys | wc -l)
+run_wd
+[ "$(keys | wc -l)" = "$n_before" ] && [ -e "$WDIR/usage-wait" ] && ok "retry gate: nothing sent, wait STILL armed" || bad "retry raced through or the wait was consumed"
+unset FAKE_PS_ADD_ROW FAKE_PS_ADD_AFTER
+run_wd
+[ "$(keys | wc -l)" = "$((n_before + 1))" ] && ok "deferred retry fired once the user left" || bad "deferred retry lost"
+
+echo "== W18m: a claude appearing before an idle ROTATION is caught at the kill gate"
+reset                                               # no open row: IDLE
+mkdir -p "$TS/sessions"; touch "$TS/sessions/orch-auto"; dead_pane
+mkdir -p "$WDIR"
+printf '00000000-0000-4000-8000-000000000099\n' > "$WDIR/session-id"
+rm -f "$FAKE_PS_COUNT"
+export FAKE_PS_ADD_ROW="7777 1 claude" FAKE_PS_ADD_AFTER=1
+run_wd
+[ -e "$TS/sessions/orch-auto" ] && [ -e "$WDIR/session-id" ] && ok "rotation gate: teardown deferred through the race window" || bad "rotation raced through"
+unset FAKE_PS_ADD_ROW FAKE_PS_ADD_AFTER
+run_wd
+[ ! -e "$TS/sessions/orch-auto" ] && ok "deferred rotation completed once the user left" || bad "rotation never resumed"
+
+echo "== W18n: a claude appearing before an IDLE ALERT is caught — a user working IS activity"
+reset; open_row
+run_wd
+echo "$(( $(date +%s) - 30000 ))" > "$WDIR/last-run"
+rm -f "$FAKE_PS_COUNT"
+export FAKE_PS_ADD_ROW="7777 1 claude" FAKE_PS_ADD_AFTER=1
+run_wd
+[ ! -e "$WDIR/ALERT-idle" ] && ok "idle-alert gate: no alert over a user's head" || bad "idle alert raced through"
+unset FAKE_PS_ADD_ROW FAKE_PS_ADD_AFTER
+run_wd
+[ -e "$WDIR/ALERT-idle" ] && ok "idle alert fired once the user left" || bad "idle alert lost"
+
+echo "== W18o: HALT landing DURING a mid-tick barrier detection still wins — no input sent"
+reset; open_row
+run_wd
+dead_pane
+rm -f "$FAKE_PS_COUNT"
+export FAKE_PS_MAKE_HALT="$R/.orchestrator/HALT" FAKE_PS_MAKE_HALT_ON=2
+n_before=$(keys | wc -l)
+run_wd
+unset FAKE_PS_MAKE_HALT FAKE_PS_MAKE_HALT_ON
+[ "$(keys | wc -l)" = "$n_before" ] && ok "HALT during the respawn barrier: no --resume sent" || bad "input sent despite mid-barrier HALT"
+rm -f "$R/.orchestrator/HALT"
 
 if [ "$fails" -eq 0 ]; then echo "PASS auto_resume_watchdog.sh"; else echo "FAIL auto_resume_watchdog.sh"; exit 1; fi

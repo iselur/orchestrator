@@ -115,24 +115,33 @@ bump_generation() { local g; g=$(get "$WD/generation"); put "$WD/generation" "$(
 # process table, a pid that cannot be attributed — counts as a user session: failing toward
 # standby can only ever launch LESS, never more. The whole ancestry resolves from ONE process-table
 # snapshot, so a pid exiting and being reused between lookups cannot stitch a false chain.
-own_pane_pid() {
-  # Prints the supervised pane's pid; prints nothing when no pane is PROVABLY ours. Ownership is
-  # the launcher's own records (a valid id whose prompt was delivered) plus the shape we create
-  # (exactly one pane): a same-named session someone else made fails one of these and stays
-  # untrusted rather than laundering its claude into "ours".
-  local sid pids
+own_pane_binding() {
+  # Prints the supervised pane's pid ONLY while ownership is provable NOW: a valid recorded
+  # conversation id whose prompt was delivered, plus a live single-pane session whose identity
+  # triple (tmux session id : creation epoch : pane pid) equals the one the launcher recorded
+  # before it ever delivered a prompt. A same-named session the owner created later fails the
+  # triple even with stale-but-valid conversation records: tmux does not reuse session ids within
+  # a server's lifetime, and the creation epoch and pane pid must match besides.
+  local sid recorded current
   sid=$(get "$WD/session-id")
   valid_uuid "${sid:-}" || return 0
   [ "$(get "$WD/launched")" = "$sid" ] || return 0
+  recorded=$(get "$WD/pane")
+  [[ "$recorded" =~ ^\$[0-9]+:[0-9]+:[0-9]+$ ]] || return 0
   session_exists || return 0
-  pids=$(tmux list-panes -t "$SESSION" -F '#{pane_pid}' 2>/dev/null) || return 0
-  [[ "$pids" =~ ^[0-9]+$ ]] || return 0
-  printf '%s\n' "$pids"
+  current=$(tmux list-panes -t "$SESSION" -F '#{session_id}:#{session_created}:#{pane_pid}' 2>/dev/null) || return 0
+  [ "$current" = "$recorded" ] || return 0
+  printf '%s\n' "${current##*:}"
 }
 user_claude_present() {
-  local snapshot pane_pid pid ppid comm p depth
-  local -A parent=()
+  local pane_pid snapshot pid ppid comm p depth
+  local -A parent=() pcomm=()
   local claudes=()
+  # The pane identity is resolved BEFORE the snapshot so the snapshot can vouch for it below: the
+  # pane pid counts only if the same table shows it alive as a shell. A pid reused across that
+  # boundary would have to come back as a shell while the recorded triple still matches a live
+  # session — narrowed, not zero; what a 10-minute poller can promise is bounded and said so.
+  pane_pid=$(own_pane_binding)
   if ! snapshot=$(ps -eo pid=,ppid=,comm= 2>/dev/null); then
     # An unreadable process table cannot prove absence: stand down AND say so — a broken ps must
     # never park supervision silently forever.
@@ -142,10 +151,13 @@ user_claude_present() {
   while read -r pid ppid comm; do
     [ -n "${pid:-}" ] || continue
     parent[$pid]=${ppid:-}
+    pcomm[$pid]=${comm:-}
     [ "${comm:-}" = "claude" ] && claudes+=("$pid")
   done <<< "$snapshot"
   [ "${#claudes[@]}" -gt 0 ] || return 1
-  pane_pid=$(own_pane_pid)
+  if [ -n "$pane_pid" ]; then
+    case "${pcomm[$pane_pid]:-}" in bash|sh|dash|zsh) ;; *) pane_pid="" ;; esac
+  fi
   for pid in "${claudes[@]}"; do
     [ -n "$pane_pid" ] || return 0
     p=$pid depth=0
@@ -167,10 +179,6 @@ launch_new() {
   # uuidgen ran an EXTERNAL command, so a HALT created meanwhile is a real, testable window —
   # re-check before the first mutation (round-2 review: this barrier must be deterministic).
   halted && return 0
-  # Entry detection is stale by now (the ledger and state reads ran in between): re-check user
-  # presence at the last gate before mutation. A deferred launch is not a failed one — the next
-  # tick's entry check owns it.
-  if user_claude_present; then note "a user claude appeared mid-tick; launch deferred to standby"; return 1; fi
   # The id is recorded BEFORE the session exists: if creation fails, the next tick simply mints a
   # fresh id; but a session may never exist without its recovery id already on disk.
   bump_generation
@@ -182,6 +190,23 @@ launch_new() {
     || { note "new-session failed; will retry next tick"; return 1; }
   tmux pipe-pane -o -t "$SESSION" "cat >> '$WD/transcript.log'" \
     || note "pipe-pane failed; usage classifier is blind this generation"
+  halted && return 0
+  # Ownership binding: record WHICH session was just created (tmux session id, creation epoch,
+  # pane pid) before any prompt exists. An unreadable binding withholds the prompt — a session the
+  # standby detector could never attribute must not receive input; the incomplete-launch teardown
+  # reclaims it next tick.
+  local pane
+  pane=$(tmux list-panes -t "$SESSION" -F '#{session_id}:#{session_created}:#{pane_pid}' 2>/dev/null) || pane=""
+  if [[ "$pane" =~ ^\$[0-9]+:[0-9]+:[0-9]+$ ]]; then
+    put "$WD/pane" "$pane"
+  else
+    rm -f "$WD/pane"
+    note "could not record the pane identity; prompt withheld, empty session torn down next tick"
+    return 1
+  fi
+  # LAST GATE before input — user presence first, then HALT again (presence detection runs
+  # external commands, a window HALT can land in). Only the send itself remains after this.
+  if user_claude_present; then note "a user claude appeared mid-tick; prompt withheld — standby owns the next tick"; return 0; fi
   halted && return 0
   if tmux send-keys -t "$SESSION" \
        "claude --session-id $sid --dangerously-skip-permissions \"\$(cat $PROMPT_REL)\"" Enter; then
@@ -197,9 +222,6 @@ launch_new() {
 
 respawn() {
   halted && return 0
-  # Same mid-tick barrier as launch_new: never type into or tear down a session while a user
-  # claude that appeared after entry detection is running.
-  if user_claude_present; then note "a user claude appeared mid-tick; respawn deferred to standby"; return 0; fi
   # The launcher chose the conversation id itself and wrote it before the session existed, so a
   # session with no valid recorded id can only mean foreign session or wiped state. There is NO
   # legitimate "never recorded" case, therefore there is NO --continue in this program: guessing
@@ -213,12 +235,15 @@ respawn() {
   # or HALT landed after session creation): --resume of it can only error forever. Tear the empty
   # session down instead; the next tick launches fresh with a new id.
   if [ "$(get "$WD/launched")" != "$sid" ]; then
+    # LAST GATE before the teardown action: presence, then HALT (same order and reason as the
+    # send gates — presence detection is itself a window HALT can land in).
+    if user_claude_present; then note "a user claude appeared mid-tick; incomplete-launch teardown deferred to standby"; return 0; fi
     halted && return 0
     # The id is dropped only once the empty session is verifiably gone: dropping it while the
     # session survives a failed kill would read as corrupt-session-id next tick and permanently
     # refuse recovery. A failed teardown keeps the state and simply retries next tick.
     if tmux kill-session -t "$SESSION" 2>/dev/null || ! session_exists; then
-      rm -f "$WD/session-id"
+      rm -f "$WD/session-id" "$WD/pane"
       note "incomplete launch detected (id $sid never received its prompt); removed the empty session, will relaunch next tick"
     else
       note "incomplete launch detected but kill-session failed; keeping state, will retry teardown next tick"
@@ -234,6 +259,8 @@ respawn() {
     alert_raise respawn-loop "claude has been relaunched $n consecutive times without recorded activity"
   fi
   bump_generation
+  # LAST GATE before input — presence, then HALT (same order and reason as launch_new).
+  if user_claude_present; then note "a user claude appeared mid-tick; respawn deferred to standby"; return 0; fi
   halted && return 0
   if tmux send-keys -t "$SESSION" \
        "claude --resume $sid --dangerously-skip-permissions \"\$(cat $PROMPT_REL)\"" Enter; then
@@ -351,8 +378,10 @@ handle_usage_wait() {
   if [ "$gen" != "$cur" ]; then rm -f "$WD/usage-wait"; return 0; fi
   [ "$(now)" -lt "$epoch" ] && return 0
   # Mid-tick barrier BEFORE the wait is consumed: a deferred retry stays armed for the next tick
-  # instead of being spent while a user claude is running.
+  # instead of being spent while a user claude is running. HALT is re-checked after the presence
+  # window and likewise before the wait is consumed — a strict no-op mutates nothing.
   if user_claude_present; then note "a user claude appeared mid-tick; the post-reset retry stays armed"; return 0; fi
+  halted && return 0
   rm -f "$WD/usage-wait"
   if [ "$USAGE_RETRY_MODE" = "active" ]; then
     halted && return 0
@@ -466,7 +495,9 @@ check() {
           halted && exit 0
           # Mid-tick barrier: rotation tears a session down — defer it while a user claude that
           # appeared after entry detection is running; the next tick re-decides from scratch.
+          # HALT is re-checked after the presence window, before the kill.
           if user_claude_present; then note "a user claude appeared mid-tick; idle rotation deferred"; alert_sweep; exit 0; fi
+          halted && exit 0
           local retired; retired=$(get "$WD/session-id")
           if ! valid_uuid "${retired:-}"; then
             # Corrupt ownership stays a visible refusal even when idle: erasing state the
@@ -474,7 +505,7 @@ check() {
             # clean slate.
             alert_raise corrupt-session-id "idle session with an invalid recorded id; refusing to rotate or erase it"
           elif tmux kill-session -t "$SESSION" 2>/dev/null || ! session_exists; then
-            rm -f "$WD/session-id" "$WD/launched"
+            rm -f "$WD/session-id" "$WD/launched" "$WD/pane"
             note "idle rotation: conversation $retired retired; next pending wake starts fresh"
           else
             note "idle rotation: kill-session failed; keeping state, will retry next tick"
