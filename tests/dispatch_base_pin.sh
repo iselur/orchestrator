@@ -24,7 +24,7 @@ def check(name, cond):
 
 # Stub the gates BEFORE the base-pin so we can drive preflight to exactly that point.
 d.HALT = pathlib.Path("/nonexistent-halt-marker")
-d.validate_spec = lambda sid: ({"needs_network": False, "depends_on": [],
+d.validate_spec = lambda sid: ({"needs_network": False, "depends_on": [], "risk_class": "low",
                                 "in_scope": ["scripts/**"]}, [])
 d.spec_digest = lambda sid: "d" * 64
 d.ensure_instance = lambda: {"instance_id": "0" * 32}

@@ -25,7 +25,7 @@ def check(name, cond):
 
 DIG = "a" * 64
 d.HALT = pathlib.Path("/nonexistent-halt-marker")
-d.validate_spec = lambda sid: ({"needs_network": False, "depends_on": [],
+d.validate_spec = lambda sid: ({"needs_network": False, "depends_on": [], "risk_class": "low",
                                 "in_scope": ["scripts/**", "tests/**"]}, [])
 d.spec_digest = lambda sid: DIG
 d.ensure_instance = lambda: {"instance_id": "0" * 32}
@@ -69,6 +69,13 @@ check("approval missing risk_class -> refused", run(valid_approval(risk_class=No
 check("approval with invalid risk_class -> refused",
       run(valid_approval(risk_class="critical")) == "exit6")
 check("approval missing timestamp -> refused", run(valid_approval(timestamp=None)) == "exit6")
+# B1 round-2: risk mismatch vs spec, invalid timestamp syntax, unknown field
+check("approval risk_class mismatched vs spec (high vs low) -> refused",
+      run(valid_approval(risk_class="high")) == "exit6")
+check("approval with non-ISO timestamp -> refused",
+      run(valid_approval(timestamp="not-a-time")) == "exit6")
+check("approval with an unknown field -> refused",
+      run({**valid_approval(), "evil": "smuggled"}) == "exit6")
 
 print(f"\n{'PASS' if not fails else 'FAIL'}: B1 approval validation ({len(fails)} failed)")
 import sys; sys.exit(1 if fails else 0)

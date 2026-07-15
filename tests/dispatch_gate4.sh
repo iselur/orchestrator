@@ -96,7 +96,8 @@ d.ensure_instance = lambda: {"instance_id": "0" * 32}   # deterministic instance
 PA = d.APPROVALS / ("d" * 64 + ".attempt-1.json")
 def valid_pa(**over):
     base = {"spec_id": "SPEC-T08", "spec_digest": "d" * 64, "instance_id": "0" * 32,
-            "attempt": 1, "approver": "val", "timestamp": "2026-07-15T00:00:00Z"}
+            "attempt": 1, "approver": "val", "risk_class": "high",
+            "timestamp": "2026-07-15T00:00:00Z"}
     base.update(over); return json.dumps(base)
 
 check("high risk attempt 1 without per-dispatch approval -> refused exit 17",
@@ -123,6 +124,12 @@ check("per-dispatch approval for a different spec_id -> refused",
       preflight("SPEC-T08", "high", 1)[0] == "exit17")
 PA.write_text(valid_pa(timestamp=None))
 check("per-dispatch approval missing timestamp -> refused",
+      preflight("SPEC-T08", "high", 1)[0] == "exit17")
+PA.write_text(valid_pa(risk_class="low"))
+check("per-dispatch approval risk_class mismatched vs spec -> refused",
+      preflight("SPEC-T08", "high", 1)[0] == "exit17")
+PA.write_text(valid_pa(note="x", extra="smuggled"))
+check("per-dispatch approval with an unknown field -> refused",
       preflight("SPEC-T08", "high", 1)[0] == "exit17")
 PA.write_text(valid_pa())
 check("high risk attempt 1 WITH a valid, bound per-dispatch approval -> allowed",

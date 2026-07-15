@@ -53,31 +53,44 @@ VERDICT_SCHEMA = ROOT / "scripts" / "verdict.schema.json"
 # Approval artifact shapes (B1). Approvals were trusted by digest+instance equality only, and the
 # per-attempt high-risk approval by mere file EXISTENCE — an empty or garbage file authorized a
 # high-risk dispatch. Both are now schema-validated AND bound to this spec/instance (and attempt).
+# ISO-8601 instant with an explicit timezone (Z or ±HH:MM), e.g. 2026-07-13T11:20:00Z. A bare
+# nonempty string is not a timestamp (B1 round-2): syntax is enforced, not just presence.
+_TS_PATTERN = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})$"
 APPROVAL_SCHEMA = {
     "type": "object",
+    "additionalProperties": False,     # unknown fields cannot smuggle anything past validation
     "required": ["spec_id", "spec_digest", "instance_id", "approver", "approved_scope",
                  "risk_class", "timestamp"],
     "properties": {
         "spec_id": {"type": "string", "minLength": 1},
         "spec_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "spec_digest_method": {"type": "string"},
         "instance_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
         "approver": {"type": "string", "minLength": 1},
         "approved_scope": {"type": "array", "items": {"type": "string", "minLength": 1},
                            "minItems": 1},
         "risk_class": {"enum": ["low", "default", "high"]},
-        "timestamp": {"type": "string", "minLength": 1},
+        "timestamp": {"type": "string", "pattern": _TS_PATTERN},
+        "base_branch": {"type": "string"},
+        "worker_model": {"type": "string"}, "worker_reasoning_effort": {"type": "string"},
+        "reviewer_model": {"type": "string"}, "reviewer_effort": {"type": "string"},
+        "note": {"type": "string"},
     },
 }
 ATTEMPT_APPROVAL_SCHEMA = {
     "type": "object",
-    "required": ["spec_id", "spec_digest", "instance_id", "attempt", "approver", "timestamp"],
+    "additionalProperties": False,
+    "required": ["spec_id", "spec_digest", "instance_id", "attempt", "approver", "risk_class",
+                 "timestamp"],
     "properties": {
         "spec_id": {"type": "string", "minLength": 1},
         "spec_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "instance_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
         "attempt": {"type": "integer", "minimum": 1},
         "approver": {"type": "string", "minLength": 1},
-        "timestamp": {"type": "string", "minLength": 1},
+        "risk_class": {"enum": ["low", "default", "high"]},
+        "timestamp": {"type": "string", "pattern": _TS_PATTERN},
+        "note": {"type": "string"},
     },
 }
 VENV_PY = ROOT / ".venv" / "bin" / "python"
@@ -406,6 +419,11 @@ def preflight(spec_id: str) -> dict:
     # artifact must not authorize a different spec.
     if approval.get("spec_id") != spec_id:
         die(f"approval spec_id={approval.get('spec_id')!r} != launching spec {spec_id!r}; refuse.", 6)
+    # Bind risk to the spec (B1 round-2): the approval's risk_class must match the spec's, so an
+    # approval cannot silently under-declare risk relative to what the spec now says.
+    if approval.get("risk_class") != spec.get("risk_class"):
+        die(f"approval risk_class={approval.get('risk_class')!r} != spec risk_class "
+            f"{spec.get('risk_class')!r}; refuse.", 6)
     # Approved scope may not be BROADER than what the spec itself declares in_scope (B1). Glob-subset
     # across arbitrary patterns is unsafe to infer, so require the conservative, provable relation:
     # every approved glob must appear verbatim in the spec's in_scope. Anything else is refused.
@@ -589,6 +607,9 @@ def remediation_preflight(spec_id: str, spec: dict, digest: str, n: int) -> dict
         if pa_obj.get("spec_id") != spec_id:
             die(f"per-dispatch approval {pa.name} spec_id={pa_obj.get('spec_id')!r} != launching "
                 f"spec {spec_id!r}; refuse.", 17)
+        if pa_obj.get("risk_class") != risk:
+            die(f"per-dispatch approval {pa.name} risk_class={pa_obj.get('risk_class')!r} != spec "
+                f"risk_class {risk!r}; refuse.", 17)
 
     if k == 0:
         return None  # initial attempt (or only infrastructure re-launches so far)
