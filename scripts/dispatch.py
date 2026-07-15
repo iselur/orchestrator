@@ -1190,6 +1190,17 @@ def deadline_timeout_prefix(deadline_ts: float) -> "list[str] | None":
     return ["timeout", "-k", "10", str(remaining)]
 
 
+# Deferred (B6 residual, follow-ups to BACKLOG item 6 / the audit residual list; review cap spent):
+#  - GRACE WINDOW: `timeout -k 10` and systemd RuntimeMaxSec/TimeoutStopSec send SIGTERM first and
+#    SIGKILL only after a grace interval, so a phase can run a few seconds PAST deadline_ts before it
+#    is force-killed. Tightening to a hard immediate kill (e.g. `timeout -s KILL`, TimeoutStopSec=0)
+#    is deferred — the grace exists on purpose to let a phase flush evidence/logs before dying.
+#  - PRE-DEADLINE OPS: deadline_ts is established in cmd_launch AFTER the box-precondition drills and
+#    the pre-outer worktree/base setup, so a hang in THOSE steps is outside the absolute ceiling.
+#    Moving deadline establishment earlier (before preconditions) is deferred; those steps run as the
+#    operator, are not worker-controlled, and have their own narrower guards.
+
+
 def isolated_run(unit, argv, cwd, rw_paths, private_network, ceiling_s, stdout, stderr,
                  binds=None, env_extra=None, slice_name=None):
     """Run argv as codex-worker in a hardened transient SYSTEM service; block for completion.
@@ -2630,7 +2641,16 @@ def teardown_attempt(attempt_id: str, outer_unit: str | None, *, stop_outer: boo
 
     VERIFY (round-1 review, finding 3 — fail closed): teardown is 'verified' ONLY when the post-stop
     query SUCCEEDED on both managers AND no unit for the attempt remains. A failed/errored query
-    yields verified=False, never a false 'all clear'."""
+    yields verified=False, never a false 'all clear'.
+
+    VERIFY (round-3 review, finding 1 — the outer-stop rc gates verification): attempt_units_remaining
+    EXCLUDES the outer unit, which is correct ONLY because the outer unit is either deactivating (the
+    ExecStopPost/timeout path) or we JUST stopped it (cancel/health/reconcile). But if that
+    `systemctl --user stop` of the outer unit FAILED, the outer unit may still be ALIVE and able to
+    spawn slice members, yet we excluded it — so we would falsely verify. Therefore, whenever we
+    stopped the outer unit ourselves (stop_outer=True), verification ALSO requires outer_stop_rc == 0.
+    On the timeout path (stop_outer=False) systemd owns the outer unit's teardown, so the exclusion
+    stands and the rc does not gate."""
     slice_name = attempt_slice(attempt_id)
     outer_stop_rc = None
     if stop_outer and outer_unit:
@@ -2642,9 +2662,12 @@ def teardown_attempt(attempt_id: str, outer_unit: str | None, *, stop_outer: boo
     # Exclude the outer unit from the remaining set: on the timeout path it is deactivating (us), and
     # on cancel/health we have just stopped it — either way it is not a leaked slice member (finding 1).
     remaining, query_ok = attempt_units_remaining(attempt_id, outer_unit)
+    verified = query_ok and not remaining
+    if stop_outer and outer_unit:
+        # round-3 finding 1: a failed outer stop invalidates the exclusion above — fail closed.
+        verified = verified and outer_stop_rc == 0
     return {"slice": slice_name, "outer_stop_rc": outer_stop_rc, "slice_stop_rc": slice_stop_rc,
-            "remaining_units": remaining, "query_ok": query_ok,
-            "verified": query_ok and not remaining}
+            "remaining_units": remaining, "query_ok": query_ok, "verified": verified}
 
 
 def _teardown_detail(td: dict) -> str:
@@ -2653,6 +2676,11 @@ def _teardown_detail(td: dict) -> str:
         return f"; ESCALATED: units still present after teardown: {td['remaining_units']}"
     if not td["query_ok"]:
         return "; ESCALATED: could not verify teardown (systemctl list-units query failed) — fail closed"
+    if td.get("outer_stop_rc") not in (None, 0):
+        # round-3 finding 1: the outer unit's stop failed, so it may still be alive (and able to spawn
+        # slice members) even though it was excluded from the remaining set — fail closed.
+        return (f"; ESCALATED: outer unit stop failed (rc={td['outer_stop_rc']}); it may still be "
+                "running and able to spawn members — teardown NOT verified")
     return ""
 
 
@@ -2866,8 +2894,14 @@ def cmd_reconcile() -> None:
     live_units, query_ok = _list_codex_units()
     print(json.dumps({"reconciled": reconciled, "live_units": live_units,
                       "live_units_query_ok": query_ok}, indent=2))
-    # finding 2: a teardown that could not be verified clean OR a failed final live-units query exits
-    # nonzero (fail closed) — reconcile must not return 0 while an orphan may still be running.
+    # round-2 finding 2: a teardown that could not be verified clean OR a failed final live-units
+    # query exits nonzero (fail closed) — reconcile must not return 0 while an orphan may still run.
+    if not query_ok:
+        # round-3 finding 4: a failed final query gets a durable escalation too, matching every other
+        # fail-closed path (per-attempt teardown failures already escalate inside the loop above).
+        escalate("reconcile", "reconcile final live-units query failed — cannot confirm no orphaned "
+                              "attempt units remain (B6, fail closed)",
+                 {"live_units": live_units, "live_units_query_ok": False})
     if any_unverified or not query_ok:
         sys.exit(1)
 

@@ -58,6 +58,9 @@ calls = []
 # Controllable list-units response so teardown VERIFICATION can be exercised: default is a clean
 # empty listing that returns 0; tests flip these to simulate surviving units or a failed query.
 fake_list = {"output": "", "rc": 0}
+# Controllable return code for `systemctl --user stop <outer>` so the round-3 finding-1 case (a
+# FAILED outer-unit stop must NOT verify clean despite the exclusion) can be exercised.
+fake_outer_stop = {"rc": 0}
 
 class FakeClock:
     def __init__(self, start): self.now = start
@@ -77,6 +80,8 @@ def fake_run(cmd, **kw):
     if _is_systemd_family(cmd):
         if "list-units" in cmd:
             return types.SimpleNamespace(returncode=fake_list["rc"], stdout=fake_list["output"], stderr="")
+        if cmd[:3] == ["systemctl", "--user", "stop"]:
+            return types.SimpleNamespace(returncode=fake_outer_stop["rc"], stdout="", stderr="")
         if "systemd-run" in cmd:
             clock.advance(PHASE_DURATION_S)  # a phase "ran" — the deadline ticks down for real
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -387,6 +392,23 @@ check("teardown_attempt: a real slice member alongside the deactivating outer un
       f"codex-worker-{eu_aid}.service" in td_eu2["remaining_units"] and td_eu2["verified"] is False)
 fake_list["output"] = ""
 
+# ROUND-3 finding 1 — the outer-unit exclusion is safe ONLY when the outer stop succeeded. If
+# `systemctl --user stop <outer>` FAILS (stop_outer=True path), the outer unit may still be alive and
+# able to spawn members, yet it is excluded from the remaining set — so verified MUST require
+# outer_stop_rc == 0, or cancel/health would falsely read verified=True.
+os_aid = "SPEC-910-1"
+os_outer = d.unit_name("SPEC-910", 1)
+calls.clear(); fake_outer_stop["rc"] = 1        # outer stop fails; listing is otherwise clean/empty
+td_os = d.teardown_attempt(os_aid, os_outer)    # stop_outer=True (default)
+check("teardown_attempt: a FAILED outer-unit stop is NOT verified despite the exclusion (round-3 finding 1)",
+      td_os["outer_stop_rc"] == 1 and td_os["remaining_units"] == [] and td_os["query_ok"] is True
+      and td_os["verified"] is False)
+# The timeout path (stop_outer=False) does not stop the outer unit, so its rc never gates there.
+td_os_to = d.teardown_attempt(os_aid, os_outer, stop_outer=False)
+check("teardown_attempt: the timeout path (stop_outer=False) is unaffected by outer-stop rc",
+      td_os_to["verified"] is True)
+fake_outer_stop["rc"] = 0
+
 # ==================================================================================================
 # Group F — cmd_cancel(): stops the whole slice + the outer unit, verifies, exits per verification.
 etmp = pathlib.Path(tempfile.mkdtemp())
@@ -434,6 +456,28 @@ fake_list["rc"] = 0
 esc_after = len(list(d.ESCALATIONS.glob("*.json"))) if d.ESCALATIONS.exists() else 0
 check("cmd_cancel: unverifiable teardown exits nonzero (fail closed, finding 3)", cancel_rc2 == 1)
 check("cmd_cancel: unverifiable teardown escalates rather than warn-and-continue", esc_after > esc_before)
+
+# ROUND-3 finding 1 — a FAILED outer-unit stop during cancel (listing otherwise clean) must exit
+# nonzero + escalate, not falsely verify on the strength of the outer-unit exclusion alone. Uses a
+# DISTINCT spec so its escalation file cannot collide with the query-fail case above (escalate names
+# files spec_id + a second-resolution timestamp).
+os2_aid = "SPEC-911-1"
+os2_spec, os2_n = d.parse_attempt_id(os2_aid)
+os2_unit = d.unit_name(os2_spec, os2_n)
+d.write_state(os2_spec, {"attempt_id": os2_aid, "spec_id": os2_spec, "attempt": os2_n,
+                         "status": "running", "unit": os2_unit})
+esc_before_os = {p.name for p in d.ESCALATIONS.glob("*.json")} if d.ESCALATIONS.exists() else set()
+calls.clear(); fake_outer_stop["rc"] = 1
+try:
+    with contextlib.redirect_stdout(io.StringIO()):
+        d.cmd_cancel(os2_aid)
+    cancel_rc3 = 0
+except SystemExit as e:
+    cancel_rc3 = e.code
+fake_outer_stop["rc"] = 0
+esc_new_os = ({p.name for p in d.ESCALATIONS.glob("*.json")} - esc_before_os) if d.ESCALATIONS.exists() else set()
+check("cmd_cancel: a FAILED outer-unit stop exits nonzero + escalates (round-3 finding 1)",
+      cancel_rc3 == 1 and any(n.startswith(os2_spec) for n in esc_new_os))
 
 # ==================================================================================================
 # Group G — cmd_timeout(): finding 4. The outer unit carries ExecStopPost=`timeout`, so a fired
@@ -561,6 +605,23 @@ fake_list["output"] = ""
 r_esc_after = len(list(d.ESCALATIONS.glob("*.json"))) if d.ESCALATIONS.exists() else 0
 check("cmd_reconcile: an unverifiable teardown exits nonzero + escalates (finding 2)",
       recon_rc2 == 1 and r_esc_after > r_esc_before)
+
+# ROUND-3 finding 4 — a failed FINAL live-units query (no LIVE attempts to iterate) must ALSO write a
+# durable escalation, matching every other fail-closed path, not just exit nonzero silently.
+rtmp2 = pathlib.Path(tempfile.mkdtemp())
+d.STATE = rtmp2 / "state"; d.STATE.mkdir()          # no LIVE attempts → loop is a no-op
+before_recon_esc = {p.name for p in d.ESCALATIONS.glob("*.json")} if d.ESCALATIONS.exists() else set()
+fake_list["rc"] = 1
+try:
+    with contextlib.redirect_stdout(io.StringIO()):
+        d.cmd_reconcile()
+    recon_rc3 = 0
+except SystemExit as e:
+    recon_rc3 = e.code
+fake_list["rc"] = 0
+new_recon_esc = ({p.name for p in d.ESCALATIONS.glob("*.json")} - before_recon_esc) if d.ESCALATIONS.exists() else set()
+check("cmd_reconcile: a failed final live-units query exits nonzero AND writes an escalation (round-3 finding 4)",
+      recon_rc3 == 1 and any(n.startswith("reconcile-") for n in new_recon_esc))
 
 # ==================================================================================================
 # Group I — cmd_health(): a confirmed-hang teardown that cannot be verified clean must exit nonzero
