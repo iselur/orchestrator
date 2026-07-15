@@ -534,14 +534,25 @@ def read_state(spec_id: str) -> dict | None:
 
 
 def all_states() -> list[dict]:
+    """Best-effort read of canonical attempt states for reporting/reconcile flows.
+
+    Skips advisory *.health.json sidecars and any non-object JSON value (owner-extension round-1:
+    a canonical file holding e.g. a bare string crashed cmd_reconcile at st.get() before its
+    malformed-state scan could report it). Silent-skip is safe HERE because the two consumers
+    fail loudly elsewhere: claim_slot dies on malformed canonical state before any launch, and
+    cmd_reconcile separately scans and REPORTS malformed canonical files."""
     if not STATE.exists():
         return []
     out = []
     for p in STATE.glob("*.json"):
+        if p.name.endswith(".health.json"):
+            continue
         try:
-            out.append(json.loads(p.read_text()))
+            parsed = json.loads(p.read_text())
         except Exception:
-            pass
+            continue
+        if isinstance(parsed, dict):
+            out.append(parsed)
     return out
 
 

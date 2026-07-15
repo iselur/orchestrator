@@ -54,21 +54,32 @@ claim_dies("B10 non-object canonical state blocks claim", True)
 claim_dies("B10 malformed health sidecar does not block claim", False)
 (d.STATE / "SPEC-003.health.json").unlink()
 
-# B10: reconcile REPORTS malformed canonical state (and skips health sidecars).
+# B10: reconcile REPORTS malformed canonical state (and skips health sidecars) — including
+# JSON-VALID non-object values, which previously crashed cmd_reconcile at st.get() before the
+# malformed-state scan ran (owner-extension round-1).
 (d.STATE / "SPEC-004.json").write_text('{"truncated": ')
 (d.STATE / "SPEC-005.health.json").write_text('{"truncated": ')
+(d.STATE / "SPEC-006.json").write_text('"just a string"')
+(d.STATE / "SPEC-007.health.json").write_text('"just a string"')
 d._list_codex_units = lambda: ([], True)
 buf = io.StringIO()
+crashed = False
 with contextlib.redirect_stdout(buf):
     try:
         d.cmd_reconcile()
     except SystemExit:
         pass
+    except Exception:
+        crashed = True
+check("B10 reconcile survives valid-but-non-object state values", not crashed)
 out = json.loads(buf.getvalue())
 mal = [m["file"] for m in out.get("malformed_state", [])]
 check("B10 reconcile reports the malformed canonical file", any("SPEC-004" in f for f in mal))
-check("B10 reconcile does not report the health sidecar", not any("SPEC-005" in f for f in mal))
-(d.STATE / "SPEC-004.json").unlink(); (d.STATE / "SPEC-005.health.json").unlink()
+check("B10 reconcile reports the non-object canonical file", any("SPEC-006" in f for f in mal))
+check("B10 reconcile does not report health sidecars",
+      not any("SPEC-005" in f or "SPEC-007" in f for f in mal))
+for n in ("SPEC-004.json", "SPEC-005.health.json", "SPEC-006.json", "SPEC-007.health.json"):
+    (d.STATE / n).unlink()
 
 # B14: a failing git diff yields a FAILing scope result, never an empty PASS.
 repo = tmp / "repo"; repo.mkdir()
