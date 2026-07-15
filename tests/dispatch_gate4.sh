@@ -257,10 +257,14 @@ check("the same v2 verdict is rejected by unpinned v3 validation", not schema_ac
 # Exercise prompt construction without launching a reviewer process.
 prompt_att = tmp / "prompt-v3"; (prompt_att / "raw").mkdir(parents=True)
 (prompt_att / "verdict.schema.json").write_text(json.dumps(v3_schema))
-# B2: review() now reads the frozen spec-snapshot.yaml in the attempt dir, never spec_path(sid).
-(prompt_att / "spec-snapshot.yaml").write_text("id: SPEC-PROMPT\n")
+# B2: review() reads the frozen spec-snapshot.yaml in the attempt dir (never spec_path(sid)) and
+# re-hashes it against the recorded snapshot digest, so the digest must match the snapshot bytes.
+import hashlib as _hl
+_snap_bytes = b"id: SPEC-PROMPT\n"
+(prompt_att / "spec-snapshot.yaml").write_bytes(_snap_bytes)
 prompt_lc = {**vlc, "worktree": str(tmp), "test_command": "./scripts/test",
-             "reviewer_model": "claude-fable-5", "reviewer_effort": "high"}
+             "reviewer_model": "claude-fable-5", "reviewer_effort": "high",
+             "spec_snapshot_digest": _hl.sha256(_snap_bytes).hexdigest()}
 captured = {}
 _prompt_git, _prompt_run = d.git, d.run
 d.git = lambda *a, **k: "diff --git a/scripts/dispatch.py b/scripts/dispatch.py"
