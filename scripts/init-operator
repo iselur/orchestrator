@@ -10,7 +10,7 @@ ORCH="$ROOT/.orchestrator"
 
 # 1. Guard: never wipe the canonical template repo's state.
 ORIGIN="$(git remote get-url origin 2>/dev/null || echo '')"
-if printf '%s' "$ORIGIN" | grep -qiE "iselur/orchestrator"; then
+if printf '%s' "$ORIGIN" | grep -qiE "iselur/(orchestrator|relay)"; then
   if [ "${1:-}" != "--force-dev" ]; then
     echo "refuse: origin looks like the canonical template ($ORIGIN)." >&2
     echo "Run init-operator on YOUR OWN repo (created via 'Use this template'), not the template." >&2
