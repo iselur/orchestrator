@@ -152,6 +152,185 @@ check("B9 no interpreter available leaves ORCH_TEST_PY unset (loud strict failur
 d.trusted_test_runtime, d.ROOT = real_rt, real_root
 del _os.environ["ORCH_TEST_PY"]
 
+# Reviewer-model failover (owner decision 2026-07-15). Fires ONLY on the CLI's full structured
+# model-not-found envelope (type=result + is_error + api_error_status 404, verdict-bearing bodies
+# rejected) AND only when the pinned primary (claude-fable-5) was asked for; one retry on the
+# fallback through the identical hardened invocation, both envelopes + exit codes + an escalation
+# kept, and lc reviewer_model updated to the model that actually produced the verdict. Every other
+# failure stays fail-closed with a single invocation — no error may buy a second reviewer roll.
+# The real envelope the installed CLI emits for `--model <bogus>` (captured from CLI 2.1.210):
+# nonzero exit + this exact `result` text (the model name is interpolated, so the trigger anchors
+# on the model-name-independent phrasing, never the whole string).
+notfound = json.dumps({"type": "result", "is_error": True, "api_error_status": 404,
+                       "result": "There's an issue with the selected model "
+                       "(claude-fable-5). It may not exist or you may not have access to it. "
+                       "Run --model to pick a different model."})
+# Round-3-review, finding on test discrimination: to prove the JSON-body rejection is load-bearing
+# (not masked by the two-phrase requirement), the JSON fixtures must carry BOTH signature phrases.
+# `both_phrases` is a plain (non-JSON) string with both → it MUST trigger; wrapping the SAME text as
+# a JSON array or JSON string scalar decodes as valid JSON → it MUST be rejected. The only thing
+# that differs between the positive control and the two negatives is JSON-encodability, so a passing
+# `all(phrases)` alone cannot explain the rejection — only `json.loads(res)` can.
+both_phrases = ("issue with the selected model — it may not exist or you may not have access to it")
+def env404(result):
+    return json.dumps({"type": "result", "is_error": True, "api_error_status": 404, "result": result})
+check("failover trigger accepts only the full model-not-found discriminator",
+      d.reviewer_model_unavailable(notfound)
+      and d.reviewer_model_unavailable(env404(both_phrases))                  # both phrases, non-JSON -> True (control)
+      and not d.reviewer_model_unavailable(json.dumps(
+          {"is_error": True, "api_error_status": 404}))                      # missing type=result
+      and not d.reviewer_model_unavailable(json.dumps(
+          {"type": "result", "is_error": True, "api_error_status": 500,
+           "result": "There's an issue with the selected model"}))          # wrong status
+      and not d.reviewer_model_unavailable(json.dumps(
+          {"type": "result", "is_error": True, "api_error_status": 404,
+           "result": json.dumps({"verdict": "PASS"})}))                      # verdict-bearing body
+      and not d.reviewer_model_unavailable(json.dumps(
+          {"type": "result", "is_error": True, "api_error_status": 404,
+           "result": ["x"]}))                                                # non-string result
+      and not d.reviewer_model_unavailable(json.dumps(
+          {"type": "result", "is_error": True, "api_error_status": 404}))    # MISSING result
+      and not d.reviewer_model_unavailable(json.dumps(
+          {"type": "result", "is_error": True, "api_error_status": 404,
+           "result": None}))                                                 # null result
+      and not d.reviewer_model_unavailable(json.dumps(
+          {"type": "result", "is_error": True, "api_error_status": 404,
+           "result": ""}))                                                   # empty result
+      and not d.reviewer_model_unavailable(json.dumps(
+          {"type": "result", "is_error": True, "api_error_status": 404,
+           "result": "The requested resource was not found"}))              # unrelated 404 string
+      and not d.reviewer_model_unavailable(env404("There's an issue with the selected model"))
+                                                                             # only ONE phrase -> all() rejects
+      and not d.reviewer_model_unavailable(env404(json.dumps([both_phrases])))
+                                                                             # JSON array w/ BOTH phrases -> json.loads rejects
+      and not d.reviewer_model_unavailable(env404(json.dumps(both_phrases)))
+                                                                             # JSON string scalar w/ BOTH phrases -> json.loads rejects
+      and not d.reviewer_model_unavailable(env404("42"))                     # JSON number scalar
+      and not d.reviewer_model_unavailable("not json")
+      and not d.reviewer_model_unavailable(""))
+
+d.ESCALATIONS = tmp / "escalations"
+vschema = {"type": "object", "properties": {"schema_version": {"const": "rv1"}}}
+d._verdict_schema_for_attempt = lambda att: vschema
+good_verdict = {"spec_digest": "d" * 64, "base_sha": "b" * 40, "worker_commit": "c" * 40,
+                "schema_version": "rv1", "verdict": "PASS",
+                "criteria": [{"id": "C1", "result": "MET"}], "scope_finding": "in scope",
+                "regression_finding": "n/a", "security_findings": "none"}
+lc69 = {"worktree": str(repo), "base_sha": "b" * 40, "spec_digest": "d" * 64,
+        "reviewer_model": "claude-fable-5", "reviewer_effort": "high"}
+
+calls = []; cwds = []
+def failover_run(cmd, **kw):
+    calls.append(cmd); cwds.append(kw.get("cwd"))
+    if len(calls) == 1:
+        return subprocess.CompletedProcess(cmd, 1, stdout=notfound, stderr="model gone")
+    return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(
+        {"result": json.dumps(good_verdict)}), stderr="")
+d.run = failover_run
+att69 = tmp / "attempts" / "SPEC-901" / "1"; (att69 / "raw").mkdir(parents=True)
+verdict, raw = d.review(att69, "SPEC-901", lc69, "c" * 40)
+check("failover: 404 on the primary triggers exactly one fallback invocation", len(calls) == 2)
+check("failover: end-to-end valid PASS verdict is ACCEPTED from the fallback",
+      verdict is not None and verdict.get("verdict") == "PASS")
+check("failover: primary then fallback model asked for, in that order",
+      calls[0][calls[0].index("--model") + 1] == "fable"
+      and calls[1][calls[1].index("--model") + 1] == d.REVIEWER_FALLBACK_MODEL)
+check("failover: lc reviewer_model now names the model that produced the verdict",
+      lc69["reviewer_model"] == d.REVIEWER_FALLBACK_MODEL)
+check("failover: fallback invocation carries identical flags except the model",
+      [a for a in calls[0] if a not in ("fable",)]
+      == [a for a in calls[1] if a not in (d.REVIEWER_FALLBACK_MODEL,)])
+check("failover: both invocations ran from a neutral cwd outside the repo",
+      all(c and not pathlib.Path(c).resolve().is_relative_to(d.ROOT.resolve()) for c in cwds))
+fo = json.loads((att69 / "raw" / "reviewer-failover.json").read_text())
+check("failover: audit record has both models and BOTH invocations' exit codes + stderr",
+      fo["from_model"] == "claude-fable-5" and fo["to_model"] == d.REVIEWER_FALLBACK_MODEL
+      and fo["primary_returncode"] == 1 and "model gone" in fo["primary_stderr_tail"]
+      and fo["fallback_returncode"] == 0 and fo["fallback_stderr_tail"] == "")
+check("failover: both envelopes and an escalation are durable",
+      (att69 / "raw" / "review-envelope-primary.json").read_text() == notfound
+      and (att69 / "raw" / "review-envelope.json").read_text() != notfound
+      and any(d.ESCALATIONS.iterdir()))
+
+# A FAILING fallback (primary 404 → fallback itself exits nonzero) must still be fail-closed AND
+# leave both invocations' outcomes in the audit record — the earlier version recorded only the
+# primary, silently losing the fallback's return code and stderr.
+calls = []
+def failing_fallback_run(cmd, **kw):
+    calls.append(cmd)
+    if len(calls) == 1:
+        return subprocess.CompletedProcess(cmd, 1, stdout=notfound, stderr="model gone")
+    return subprocess.CompletedProcess(cmd, 7, stdout="", stderr="fallback exploded")
+d.run = failing_fallback_run
+lc73 = dict(lc69, reviewer_model="claude-fable-5")
+att73 = tmp / "attempts" / "SPEC-905" / "1"; (att73 / "raw").mkdir(parents=True)
+verdict, raw = d.review(att73, "SPEC-905", lc73, "c" * 40)
+fo73 = json.loads((att73 / "raw" / "reviewer-failover.json").read_text())
+check("failover: a failing fallback is fail-closed with both outcomes recorded",
+      verdict is None and len(calls) == 2 and lc73["reviewer_model"] == d.REVIEWER_FALLBACK_MODEL
+      and fo73["primary_returncode"] == 1 and "model gone" in fo73["primary_stderr_tail"]
+      and fo73["fallback_returncode"] == 7 and "fallback exploded" in fo73["fallback_stderr_tail"])
+
+calls = []
+def error_run(cmd, **kw):
+    calls.append(cmd)
+    return subprocess.CompletedProcess(cmd, 1, stdout=json.dumps(
+        {"type": "result", "is_error": True, "api_error_status": 500, "result": "x"}), stderr="")
+d.run = error_run
+lc70 = dict(lc69, reviewer_model="claude-fable-5")
+att70 = tmp / "attempts" / "SPEC-902" / "1"; (att70 / "raw").mkdir(parents=True)
+verdict, raw = d.review(att70, "SPEC-902", lc70, "c" * 40)
+check("failover: non-404 reviewer error stays fail-closed, single invocation, model untouched",
+      verdict is None and len(calls) == 1 and lc70["reviewer_model"] == "claude-fable-5"
+      and not (att70 / "raw" / "reviewer-failover.json").exists())
+
+calls = []
+def notfound_run(cmd, **kw):
+    calls.append(cmd)
+    return subprocess.CompletedProcess(cmd, 1, stdout=notfound, stderr="")
+d.run = notfound_run
+lc71 = dict(lc69, reviewer_model=d.REVIEWER_FALLBACK_MODEL)
+att71 = tmp / "attempts" / "SPEC-903" / "1"; (att71 / "raw").mkdir(parents=True)
+verdict, raw = d.review(att71, "SPEC-903", lc71, "c" * 40)
+check("failover: 404 on a non-primary model does not retry (no failover-of-the-failover)",
+      verdict is None and len(calls) == 1
+      and not (att71 / "raw" / "reviewer-failover.json").exists())
+
+# Deadline honesty: the timeout prefix is recomputed per invocation, so a fallback whose budget
+# was burned by the failing primary is REFUSED, not started with a stale allowance.
+calls = []
+d.run = notfound_run
+remaining = [100, 0]
+real_rcs = d.remaining_ceiling_s
+d.remaining_ceiling_s = lambda ts: remaining.pop(0)
+lc72 = dict(lc69, reviewer_model="claude-fable-5", deadline_ts=4102444800.0)
+att72 = tmp / "attempts" / "SPEC-904" / "1"; (att72 / "raw").mkdir(parents=True)
+verdict, raw = d.review(att72, "SPEC-904", lc72, "c" * 40)
+d.remaining_ceiling_s = real_rcs
+fo72 = json.loads((att72 / "raw" / "reviewer-failover.json").read_text())
+check("failover: exhausted deadline refuses the fallback invocation (fail closed)",
+      verdict is None and len(calls) == 1 and "deadline exhausted" in raw
+      and calls[0][:1] == ["timeout"]
+      # the refused fallback is still recorded — primary outcome kept, refusal captured, no bogus
+      # fallback_returncode implying an invocation that never ran.
+      and fo72["primary_returncode"] == 1 and "deadline exhausted" in fo72["fallback_refused"]
+      and "fallback_returncode" not in fo72)
+
+# review.json provenance (round-3 finding 2): the canonical record binds the EFFECTIVE reviewer
+# model (post-failover) through the single tested writer used by the dispatch pipeline. Passing the
+# fallback model proves the recorded attribution follows the model that produced the verdict.
+attp = tmp / "attempts" / "SPEC-906" / "1"; (attp / "raw").mkdir(parents=True)
+d.write_review_record(attp, dict(good_verdict), d.REVIEWER_FALLBACK_MODEL)
+rec = json.loads((attp / "review.json").read_text())
+check("review.json binds effective_reviewer_model = the model that produced the verdict",
+      rec["effective_reviewer_model"] == d.REVIEWER_FALLBACK_MODEL and rec["verdict"] == "PASS"
+      # the writer copies the verdict — the reviewer's own object is not mutated with our key.
+      and "effective_reviewer_model" not in good_verdict)
+attn = tmp / "attempts" / "SPEC-907" / "1"; (attn / "raw").mkdir(parents=True)
+d.write_review_record(attn, None, d.REVIEWER_FALLBACK_MODEL)
+check("review.json for a null verdict is an empty record, no bogus attribution",
+      (attn / "review.json").read_text().strip() == "{}")
+
 sys.exit(1 if fails else 0)
 PY
 echo "PASS dispatch_fail_closed.sh"

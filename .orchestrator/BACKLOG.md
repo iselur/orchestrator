@@ -37,6 +37,8 @@ against this description: what matches, what doesn't, what is missing.
 8. **Work the 2026-07-15 Codex audit findings** — 18 defects, 8 high, in the dispatcher's
    approval, grading, cancel, and merge gates. Report (on this box, untracked):
    `.orchestrator/reviews/codex-audit-2026-07-15/report.md`. Trust-critical; overlaps items 5–6.
+9. **Program B (rev 4, after A)** — rotation, task leases, watchdog, compaction lifecycle; falsifier first.
+10. **Program C (rev 4, after B)** — thin orchestrator, specialists, authoring flip, unpin `CLAUDE_CODE_SUBAGENT_MODEL`.
 
 ## Parked
 
