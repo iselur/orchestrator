@@ -534,14 +534,25 @@ def read_state(spec_id: str) -> dict | None:
 
 
 def all_states() -> list[dict]:
+    """Best-effort read of canonical attempt states for reporting/reconcile flows.
+
+    Skips advisory *.health.json sidecars and any non-object JSON value (owner-extension round-1:
+    a canonical file holding e.g. a bare string crashed cmd_reconcile at st.get() before its
+    malformed-state scan could report it). Silent-skip is safe HERE because the two consumers
+    fail loudly elsewhere: claim_slot dies on malformed canonical state before any launch, and
+    cmd_reconcile separately scans and REPORTS malformed canonical files."""
     if not STATE.exists():
         return []
     out = []
     for p in STATE.glob("*.json"):
+        if p.name.endswith(".health.json"):
+            continue
         try:
-            out.append(json.loads(p.read_text()))
+            parsed = json.loads(p.read_text())
         except Exception:
-            pass
+            continue
+        if isinstance(parsed, dict):
+            out.append(parsed)
     return out
 
 
@@ -826,10 +837,21 @@ def claim_slot(spec_id: str, launching_state: dict) -> None:
         try:
             states = []
             for p in STATE.glob("*.json"):
+                if p.name.endswith(".health.json"):
+                    continue  # advisory health snapshot, never attempt state (B10 round-2)
                 try:
-                    states.append(json.loads(p.read_text()))
-                except Exception:
-                    pass
+                    parsed = json.loads(p.read_text())
+                except Exception as e:
+                    # B10: a malformed canonical state file may BE a live attempt (truncated
+                    # write, mid-crash). Silently skipping it removes that attempt from the
+                    # same-spec and MAX_PARALLEL checks — fail the claim instead of guessing.
+                    die(f"state file {p} is unreadable ({e}); run `dispatch reconcile` — it "
+                        f"reports malformed state — and resolve it before launching (a "
+                        f"malformed live attempt must not vanish from concurrency checks).", 8)
+                if not isinstance(parsed, dict):
+                    die(f"state file {p} holds a non-object JSON value; run `dispatch "
+                        f"reconcile` and resolve it before launching (B10).", 8)
+                states.append(parsed)
             live = [s for s in states if s.get("status") in LIVE]
             same = [s.get("attempt_id") for s in live if s.get("spec_id") == spec_id]
             if same:
@@ -2609,6 +2631,12 @@ def scope_check(wt: Path, base: str, wc: str, globs: list[str]) -> dict:
     # Finding 4: the scope gate parses this diff to decide what changed — a planted refs/replace
     # could otherwise rewrite the diff and hide an out-of-scope change. Read with replace off.
     cp = git_cp(["diff", "--name-status", "-z", f"{base}..{wc}"], cwd=wt)
+    # B14: a failing diff (bad ref, I/O error) yields empty stdout, which parsed as an empty
+    # change set and PASSED scope. A diff that did not run cannot certify anything — fail closed.
+    if cp.returncode != 0:
+        return {"approved_scope": globs, "changed": [], "out_of_scope": [],
+                "result": "FAIL",
+                "error": f"git diff exited {cp.returncode}: {(cp.stderr or '').strip()[:500]}"}
     toks = cp.stdout.split("\x00")
     changed, oos = [], []
     i = 0
@@ -2827,11 +2855,28 @@ def review(att: Path, spec_id: str, lc: dict, wc: str, test_attestation=None):
         "claude", "-p", "--output-format", "json", "--json-schema", json.dumps(schema_obj),
         "--model", lc["reviewer_model"].replace("claude-fable-5", "fable"),
         "--effort", lc["reviewer_effort"],
+        # B16 round-2: cwd isolation alone does not strip user-level customizations. Verified
+        # against the installed CLI (flags parse; envelope shape unchanged): --safe-mode drops
+        # all customizations (skills/hooks/plugins), --tools "" leaves no tool surface,
+        # --strict-mcp-config with no --mcp-config yields zero MCP servers, and
+        # --no-session-persistence writes no transcript. The denylist stays as belt-and-braces.
+        "--safe-mode", "--tools", "", "--strict-mcp-config", "--no-session-persistence",
         "--disallowedTools", "Read", "Grep", "Glob", "Bash", "Write", "Edit", "NotebookEdit",
         "WebFetch", "WebSearch", "Task", "--permission-mode", "manual",
     ]
-    cp = run(cmd, input=req)
+    # B16 + reviewer isolation: run from an empty directory OUTSIDE this repo so the reviewer
+    # process loads no project rulebook or memory (it must see only spec+diff+evidence, and that
+    # context is pure token waste for a tools-denied one-shot). TMPDIR may point inside the repo,
+    # so the location is asserted, not assumed (round-2). A nonzero exit is refused before any
+    # parse: an errored process's stdout — even schema-valid JSON — is not a verdict.
+    with tempfile.TemporaryDirectory(prefix="relay-review-") as neutral_cwd:
+        if Path(neutral_cwd).resolve().is_relative_to(ROOT.resolve()):
+            return None, (f"reviewer neutral cwd {neutral_cwd} resolves inside the repo "
+                          f"(TMPDIR misconfiguration); refusing to run the reviewer (B16)")
+        cp = run(cmd, input=req, cwd=neutral_cwd)
     (att / "raw" / "review-envelope.json").write_text(cp.stdout or "")
+    if cp.returncode != 0:
+        return None, cp.stdout
     try:
         verdict = json.loads(json.loads(cp.stdout)["result"])
     except Exception:
@@ -3218,8 +3263,22 @@ def cmd_reconcile() -> None:
             reconciled.append({"attempt_id": aid, "status": st.get("status"),
                                "unit_active": True, "note": "still running"})
     live_units, query_ok = _list_codex_units()
+    # B10 round-2: claim_slot refuses to launch over malformed canonical state and points here —
+    # so reconcile must SURFACE those files (all_states silently skips them). Report-only: the
+    # operator decides whether a corrupt file was a live attempt before removing it.
+    malformed = []
+    if STATE.exists():
+        for p in STATE.glob("*.json"):
+            if p.name.endswith(".health.json"):
+                continue
+            try:
+                if not isinstance(json.loads(p.read_text()), dict):
+                    malformed.append({"file": str(p), "error": "non-object JSON value"})
+            except Exception as e:
+                malformed.append({"file": str(p), "error": str(e)})
     print(json.dumps({"reconciled": reconciled, "live_units": live_units,
-                      "live_units_query_ok": query_ok}, indent=2))
+                      "live_units_query_ok": query_ok, "malformed_state": malformed},
+                     indent=2))
     # round-2 finding 2: a teardown that could not be verified clean OR a failed final live-units
     # query exits nonzero (fail closed) — reconcile must not return 0 while an orphan may still run.
     if not query_ok:
@@ -3689,6 +3748,39 @@ def _commit_provenance(spec_ids: list[str]) -> str | None:
         git("pull", "--quiet", "--ff-only", "origin", "ready-for-main")
 
 
+def integrate_suite_env() -> dict:
+    """Environment for the post-merge suite in the materialized grader tree (B9 rounds 1-2).
+
+    Strict mode is forced — without it a box test returning 77 (skip) in the grader worktree
+    counts as a pass, so the combined tree was never actually verified. But the grader tree has
+    no gitignored .venv, so the venv-dependent dispatcher self-tests would then skip-and-fail:
+    the suite must be handed a usable interpreter. Preference order: the root-owned trusted test
+    runtime (same source as the gate tests' ORCH_TEST_PY), else this repo's own .venv (the same
+    interpreter `./scripts/test` uses when run from ROOT — the operator's, not a worker's). If
+    neither exists, ORCH_TEST_PY stays unset and the strict suite fails LOUDLY: a box that
+    cannot run the dispatcher self-tests cannot certify the combined tree (fail closed).
+    """
+    env = {**os.environ, "GIT_NO_REPLACE_OBJECTS": "1", "ORCH_TEST_STRICT": "1"}
+    # Round-3: never pass through an inherited ORCH_TEST_PY — the selection below is the policy,
+    # and an inherited value (e.g. from an outer test run) may point at a stale interpreter.
+    env.pop("ORCH_TEST_PY", None)
+    rt = trusted_test_runtime()
+    venv_py = ROOT / ".venv" / "bin" / "python"
+    if rt:
+        env["ORCH_TEST_PY"] = rt["python"]
+    elif venv_py.exists():
+        env["ORCH_TEST_PY"] = str(venv_py.resolve())
+    return env
+
+
+def run_integrate_suite(gtree: Path):
+    """Launch the post-merge suite in the materialized grader tree with integrate_suite_env().
+
+    Split out of cmd_integrate so the suite-launch contract (command, cwd, environment) is a
+    directly testable unit rather than a source-inspection tripwire (B9 round-3)."""
+    return run([str(gtree / "scripts" / "test")], cwd=str(gtree), env=integrate_suite_env())
+
+
 def cmd_integrate(attempt_ids: list[str]) -> None:
     """Gate 4 §3: deterministic integration. Merge passed attempts in depends_on order (each via
     the fail-closed `merge`, so the base-check applies per merge — the FIRST stale sibling stops
@@ -3740,8 +3832,7 @@ def cmd_integrate(attempt_ids: list[str]) -> None:
             # round-3: export GIT_NO_REPLACE_OBJECTS into the suite's environment — the grader
             # worktree shares the object store/refs-replace, so scripts/test and each tests/*.sh
             # it globs must read objects with replacement disabled too.
-            ts = run([str(gtree / "scripts" / "test")], cwd=str(gtree),
-                     env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"})
+            ts = run_integrate_suite(gtree)
         if ts.returncode != 0:
             path = escalate(sid, f"post-merge suite FAILED on ready-for-main after {aid} — "
                                  f"stop; human decision required",
