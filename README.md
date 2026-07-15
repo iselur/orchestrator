@@ -13,9 +13,10 @@ Give Claude (Orchestrator) a task and it turns the request into a checked spec, 
 build to Workers (Codex). Claude and Codex inspect and challenge the results for up to three review
 rounds.
 
-Once started, the system can continue autonomously while you are away. Its watchdog restarts work
-when the five-hour usage window ends or when backlog tasks are waiting. Every change must pass
-tests and verification.
+Once started, the system can continue autonomously while you are away. A watchdog checks the
+private request ledger every ten minutes and restarts or resumes the session whenever work is
+pending. Automatically retrying after a five-hour usage-window reset is a future, owner-gated
+option, not enabled by default. Every change must pass tests and verification.
 
 Passing work becomes a pull request to `ready-for-main`. Only you can merge it to `main`.
 

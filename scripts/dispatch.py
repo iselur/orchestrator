@@ -2148,7 +2148,7 @@ def pr_body(spec_id: str, lc: dict, wc: str) -> str:
         f"| spec_digest | `{lc['spec_digest']}` |\n"
         f"| base_sha | `{lc['base_sha']}` |\n"
         f"| worker_commit | `{wc}` |\n"
-        f"| worker | `{lc['worker_model']}` (reasoning={lc['worker_effort']}), sandbox=workspace-write, network=off |\n"
+        f"| worker | `{lc['worker_model']}` (reasoning={lc['worker_effort']}), sandbox=workspace-write, network=off for tests (build phase is networked, see SECURITY.md) |\n"
         f"| reviewer | `{lc['reviewer_model']}` → PASS (bound) |\n\n"
         f"Integrity/scope/test/review all PASS. Provenance under "
         f"`.orchestrator/attempts/{spec_id}/{lc['attempt']}/`. Draft: CI + branch protection are "
