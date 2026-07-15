@@ -2,7 +2,6 @@
 # Turn a task and optional context files into a durable Codex-drafted plan.
 set -euo pipefail
 
-MODEL="gpt-5.6-sol"
 out_dir=".orchestrator/plans"
 tier="standard"
 contexts=()
@@ -30,6 +29,13 @@ die() {
   printf 'codex-plan: %s\n' "$*" >&2
   exit 2
 }
+
+# R71: the spec/plan-author model comes from the machine config (scripts/models.json). Fail
+# closed — a missing, unreadable, or incomplete config refuses to draft; no hard-coded fallback.
+MODELS_CFG="$(dirname "$(realpath "$0")")/models.json"
+[ -f "$MODELS_CFG" ] || die "models config missing: $MODELS_CFG (fail closed)"
+MODEL=$(jq -re '.roles.spec_author.model // empty' "$MODELS_CFG") \
+  || die "models config unreadable or roles.spec_author.model missing: $MODELS_CFG"
 
 while (($#)); do
   case "$1" in

@@ -38,7 +38,6 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 
-MODEL="gpt-5.6-sol"
 out_root=".orchestrator/reviews"
 topic=""
 author=""
@@ -46,6 +45,13 @@ contexts=()
 prompt_parts=()
 
 die() { printf 'review: %s\n' "$*" >&2; exit 2; }
+
+# R71: the reviewer-of-orchestrator-artifacts model comes from the machine config. Fail closed —
+# a missing, unreadable, or incomplete config refuses the review; there is no hard-coded fallback.
+MODELS_CFG="$ROOT/scripts/models.json"
+[ -f "$MODELS_CFG" ] || die "models config missing: $MODELS_CFG (fail closed)"
+MODEL=$(jq -re '.roles.orchestrator_artifact_reviewer.model // empty' "$MODELS_CFG") \
+  || die "models config unreadable or roles.orchestrator_artifact_reviewer.model missing: $MODELS_CFG"
 
 while (($#)); do
   case "$1" in
@@ -71,19 +77,19 @@ plans_root="$ROOT/.orchestrator/plans"
 iso_worktrees="/srv/codexwork/worktrees"
 local_worktrees="$ROOT/.worktrees"
 
-# Classify a recorded model name (e.g. launch.json's worker_model) into a vendor. Refuses to guess:
-# an unrecognized model name is NOT silently trusted either way.
+# Classify a recorded model name (e.g. launch.json's worker_model) into a vendor via the explicit
+# vendor_map in scripts/models.json (R71) — no substring guessing. A model absent from the map, or
+# any config read error, is 'unknown' and the caller refuses it: a new model must be declared in
+# the map before anything it authored can be vendor-classified.
 classify_model() {
   python3 -c "
-import sys
-m = sys.argv[1].lower()
-if 'claude' in m or 'fable' in m:
-    print('claude')
-elif 'gpt' in m or 'codex' in m or 'sol' in m:
-    print('codex')
-else:
-    print('unknown')
-" "$1"
+import json, sys
+try:
+    vendor = json.load(open(sys.argv[1])).get('vendor_map', {}).get(sys.argv[2], 'unknown')
+except Exception:
+    vendor = 'unknown'
+print(vendor if vendor in ('claude', 'codex') else 'unknown')
+" "$MODELS_CFG" "$1"
 }
 
 # Prints 'VENDOR<TAB>evidence note' on stdout. Never calls die()/exit — it runs inside a command
