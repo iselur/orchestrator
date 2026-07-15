@@ -2761,16 +2761,29 @@ def evaluate_binary_review(verdict: str, criteria: list[dict], scope_finding: st
 
 
 def reviewer_model_unavailable(stdout: str) -> bool:
-    """R69: True ONLY for the CLI's structured model-not-found envelope (is_error true +
-    api_error_status 404) — the one condition that may trigger the reviewer-model failover.
-    Anything else (auth, rate limit, timeout, garbage output) returns False and stays
-    fail-closed with no retry."""
+    """True ONLY for the CLI's structured model-not-found envelope — the one condition that may
+    trigger the reviewer-model failover. Anything else (auth, rate limit, timeout, garbage output)
+    returns False and stays fail-closed with no retry. Round-1 review: the full discriminator is
+    required (type=result + is_error + api_error_status 404), and a verdict-bearing envelope —
+    a `result` that parses as a JSON object — is never "model not found", whatever its status
+    fields claim: structured output proves a model ran."""
     try:
         env = json.loads(stdout or "")
     except Exception:
         return False
-    return isinstance(env, dict) and env.get("is_error") is True \
-        and env.get("api_error_status") == 404
+    if not (isinstance(env, dict) and env.get("type") == "result"
+            and env.get("is_error") is True and env.get("api_error_status") == 404):
+        return False
+    res = env.get("result")
+    if res is not None and not isinstance(res, str):
+        return False
+    if isinstance(res, str):
+        try:
+            if isinstance(json.loads(res), dict):
+                return False
+        except Exception:
+            pass
+    return True
 
 
 def validate_review_verdict(verdict: dict, schema_obj: dict, lc: dict, wc: str) -> bool:
@@ -2864,11 +2877,15 @@ def review(att: Path, spec_id: str, lc: dict, wc: str, test_attestation=None):
     # remaining time to the absolute deadline too (the outer unit's RuntimeMaxSec is the whole-attempt
     # backstop, this bounds the phase itself). None => no time left => fail closed (no verdict).
     dl = lc.get("deadline_ts")
-    prefix = deadline_timeout_prefix(dl) if dl is not None else []
-    if prefix is None:
-        return None, "attempt deadline exhausted before the review phase (B6); fail closed"
 
     def invoke_reviewer(model_id):
+        # Round-1 review: the timeout prefix is recomputed per invocation, so a fallback run
+        # gets only the time genuinely remaining — a primary call that burned the budget before
+        # erroring cannot hand the fallback a stale, over-long allowance. Returns a refusal
+        # string instead of a CompletedProcess when the phase must not start.
+        prefix = deadline_timeout_prefix(dl) if dl is not None else []
+        if prefix is None:
+            return "attempt deadline exhausted before the review phase (B6); fail closed"
         cmd = [
             *prefix,
             "claude", "-p", "--output-format", "json", "--json-schema", json.dumps(schema_obj),
@@ -2890,32 +2907,38 @@ def review(att: Path, spec_id: str, lc: dict, wc: str, test_attestation=None):
         # parse: an errored process's stdout — even schema-valid JSON — is not a verdict.
         with tempfile.TemporaryDirectory(prefix="relay-review-") as neutral_cwd:
             if Path(neutral_cwd).resolve().is_relative_to(ROOT.resolve()):
-                return None
+                return ("reviewer neutral cwd resolves inside the repo "
+                        "(TMPDIR misconfiguration); refusing to run the reviewer (B16)")
             return run(cmd, input=req, cwd=neutral_cwd)
 
     cp = invoke_reviewer(lc["reviewer_model"])
-    if cp is None:
-        return None, ("reviewer neutral cwd resolves inside the repo "
-                      "(TMPDIR misconfiguration); refusing to run the reviewer (B16)")
-    # R69: Fable-retirement failover. The pinned reviewer stays claude-fable-5 while the model
-    # exists; when the API retires it, this ONE deterministic signature — nonzero exit plus the
-    # CLI's structured model-not-found envelope — triggers a single rerun on the fallback model.
-    # Nothing else retries: an auth failure, rate limit, timeout, or malformed envelope must never
-    # buy the diff a second reviewer roll. Both envelopes and an escalation record are kept, so a
-    # failover is always operator-visible after the fact.
+    if isinstance(cp, str):
+        return None, cp
+    # Fable-retirement failover (owner decision 2026-07-15). The pinned reviewer stays
+    # claude-fable-5 while the model exists; when the API retires it, this ONE deterministic
+    # signature — nonzero exit plus the CLI's structured model-not-found envelope, from the pinned
+    # primary only — triggers a single rerun on the fallback model. Nothing else retries: an auth
+    # failure, rate limit, timeout, or malformed envelope must never buy the diff a second reviewer
+    # roll. The retry cannot weaken the gate — it fires only when the primary produced no verdict
+    # at all (nonzero exit, verdict-bearing envelopes rejected by the trigger). Both envelopes,
+    # both exit codes, and an escalation record are kept, and lc["reviewer_model"] is updated
+    # IN PLACE so review.json's sibling records, result.json, and the PR body all attribute the
+    # verdict to the model that actually produced it (round-1 review: misattribution was blocking).
     if (cp.returncode != 0 and lc["reviewer_model"] == "claude-fable-5"
             and reviewer_model_unavailable(cp.stdout)):
         (att / "raw" / "review-envelope-primary.json").write_text(cp.stdout or "")
         (att / "raw" / "reviewer-failover.json").write_text(json.dumps(
             {"from_model": lc["reviewer_model"], "to_model": REVIEWER_FALLBACK_MODEL,
-             "trigger": "api_error_status 404 model-not-found", "created": now()}, indent=2))
+             "trigger": "type=result is_error api_error_status=404 model-not-found",
+             "primary_returncode": cp.returncode,
+             "primary_stderr_tail": (cp.stderr or "")[-2000:], "created": now()}, indent=2))
         escalate(spec_id, "reviewer model retired; failed over to fallback for this attempt",
                  {"attempt": str(att), "from_model": lc["reviewer_model"],
                   "to_model": REVIEWER_FALLBACK_MODEL})
+        lc["reviewer_model"] = REVIEWER_FALLBACK_MODEL
         cp = invoke_reviewer(REVIEWER_FALLBACK_MODEL)
-        if cp is None:
-            return None, ("reviewer neutral cwd resolves inside the repo "
-                          "(TMPDIR misconfiguration); refusing to run the reviewer (B16)")
+        if isinstance(cp, str):
+            return None, cp
     (att / "raw" / "review-envelope.json").write_text(cp.stdout or "")
     if cp.returncode != 0:
         return None, cp.stdout
