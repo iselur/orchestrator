@@ -131,8 +131,9 @@ check("models_check CLI refuses non-UTF-8 config (exit 2, no value printed)",
 cli = subprocess.run([sys.executable, "scripts/models_check.py", str(scratch)],
                      capture_output=True, text=True)
 check("models_check CLI validate-only mode also refuses non-UTF-8 (exit 2, silent stdout, "
-      "stderr names the config)",
-      cli.returncode == 2 and cli.stdout == "" and "unreadable" in cli.stderr)
+      "stderr names the config PATH)",
+      cli.returncode == 2 and cli.stdout == ""
+      and "unreadable" in cli.stderr and str(scratch) in cli.stderr)
 
 scratch.write_text(json.dumps(good))
 check("valid config loads cleanly", load_result() == "ok")
@@ -185,6 +186,29 @@ check("pinning an unmapped reviewer model refuses launch (exit 2)",
 check("armed failover keeps a cross-vendor fallback in the accepted pairing",
       d.resolve_launch_models({"worker_model": "gpt-5.6-sol"}, cfg)
       ["reviewer_fallback_model"] == cfg["reviewer_failover"]["fallback_model"])
+
+# Owner decision 2026-07-15: a same-vendor pairing IS permitted when the config defines it —
+# allow_same_vendor_review: true. The knob is explicit and boolean; declaration in vendor_map
+# stays mandatory either way (an unmapped model is never launchable).
+sv = copy.deepcopy(good)
+sv["allow_same_vendor_review"] = True
+sv["roles"]["worker"]["model"] = "claude-sonnet-4-6"   # same vendor as the bound reviewer
+scratch.write_text(json.dumps(sv))
+check("knob true: same-vendor config validates", load_result() == "ok")
+sv_cfg = d.load_model_config()
+check("knob true: same-vendor pin resolves instead of refusing",
+      d.resolve_launch_models({"worker_model": "claude-sonnet-4-6"}, sv_cfg)
+      ["worker_model"] == "claude-sonnet-4-6")
+def resolve_with(cfg_used, approval):
+    try:
+        d.resolve_launch_models(approval, cfg_used); return "ok"
+    except SystemExit as e:
+        return f"exit{e.code}"
+check("knob true: an UNMAPPED pin still refuses (declaration is not optional)",
+      resolve_with(sv_cfg, {"worker_model": "mystery-model-9"}) == "exit2")
+bad = copy.deepcopy(good); bad["allow_same_vendor_review"] = "yes"
+scratch.write_text(json.dumps(bad))
+check("non-boolean allow_same_vendor_review refuses launch (exit 2)", load_result() == "exit2")
 
 # Alias map semantics: exact translation for listed ids, pass-through for everything else.
 aliases = cfg["cli_aliases"]

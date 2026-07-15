@@ -319,6 +319,19 @@ check("legacy launch record keeps the shipped alias and Fable→Opus failover",
       and lc74["reviewer_model"] == "claude-opus-4-8"
       and (att74 / "raw" / "reviewer-failover.json").exists())
 
+# Owner-extension round 1: a PARTIAL set of frozen fields is a corrupt record, not a legacy one —
+# review() refuses before invoking any reviewer, mixing nothing with the legacy defaults.
+calls = []
+d.run = failover_run
+lc75 = {"worktree": str(repo), "base_sha": "b" * 40, "spec_digest": "d" * 64,
+        "reviewer_model": "claude-fable-5", "reviewer_effort": "high",
+        "cli_aliases": {"claude-fable-5": "fable"}}   # aliases present, trigger/fallback missing
+att75 = tmp / "attempts" / "SPEC-909" / "1"; (att75 / "raw").mkdir(parents=True)
+verdict, raw = d.review(att75, "SPEC-909", lc75, "c" * 40)
+check("partial frozen fields are a corrupt record: no verdict, zero reviewer invocations",
+      verdict is None and len(calls) == 0 and "partial" in raw
+      and not (att75 / "raw" / "reviewer-failover.json").exists())
+
 # Deadline honesty: the timeout prefix is recomputed per invocation, so a fallback whose budget
 # was burned by the failing primary is REFUSED, not started with a stale allowance.
 calls = []

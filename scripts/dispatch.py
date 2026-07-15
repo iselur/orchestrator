@@ -70,10 +70,17 @@ LEGACY_LAUNCH_DEFAULTS = {
 }
 
 
-def lc_model_field(lc: dict, key: str):
-    """A frozen model field from the launch record, or — ONLY when the record predates the
-    config fields entirely — the shipped pre-config default for that key."""
-    return lc[key] if key in lc else LEGACY_LAUNCH_DEFAULTS[key]
+def lc_frozen_model_fields(lc: dict) -> "dict | None":
+    """The three frozen model fields from a launch record: the record's own when ALL are present,
+    the shipped pre-config defaults when NONE are (a genuine pre-R71 record), and None — refuse,
+    fail closed — for a PARTIAL set (owner-extension round 1: per-key fallback would silently mix
+    a damaged new record with legacy values instead of surfacing the corruption)."""
+    present = [k for k in LEGACY_LAUNCH_DEFAULTS if k in lc]
+    if len(present) == len(LEGACY_LAUNCH_DEFAULTS):
+        return {k: lc[k] for k in LEGACY_LAUNCH_DEFAULTS}
+    if not present:
+        return dict(LEGACY_LAUNCH_DEFAULTS)
+    return None
 # Approval artifact shapes (B1). Approvals were trusted by digest+instance equality only, and the
 # per-attempt high-risk approval by mere file EXISTENCE — an empty or garbage file authorized a
 # high-risk dispatch. Both are now schema-validated AND bound to this spec/instance (and attempt).
@@ -156,8 +163,11 @@ def resolve_launch_models(approval: dict, cfg: dict) -> dict:
     Round-3 review, finding 2: the RESOLVED pairing is revalidated here, because an approval pin
     bypasses the config-level pairing checks in models_check. Never-same-vendor holds for what
     can actually run: the worker vs the primary reviewer always, and vs the fallback whenever the
-    failover is armed (primary == trigger). Every model in a runnable pairing must be DECLARED in
-    vendor_map — an unmapped pin is refused, not guessed, exactly like the review side."""
+    failover is armed (primary == trigger) — unless the config itself says
+    allow_same_vendor_review: true (owner decision 2026-07-15: a same-vendor pairing is permitted
+    when defined in config; accidental ones still refuse). Every model in a runnable pairing must
+    be DECLARED in vendor_map regardless — an unmapped pin is refused, not guessed, exactly like
+    the review side."""
     resolved = {
         "worker_model": approval.get("worker_model") or cfg["roles"]["worker"]["model"],
         "worker_effort": (approval.get("worker_reasoning_effort")
@@ -183,10 +193,11 @@ def resolve_launch_models(approval: dict, cfg: dict) -> dict:
         if reviewer_vendor is None:
             die(f"launch refused: {key} {model!r} is not declared in vendor_map "
                 f"({MODEL_CONFIG}) — an undeclared model cannot be vendor-checked")
-        if reviewer_vendor == worker_vendor:
+        if reviewer_vendor == worker_vendor and cfg.get("allow_same_vendor_review") is not True:
             die(f"launch refused: same-vendor pairing — worker_model "
                 f"{resolved['worker_model']!r} and {key} {model!r} are both {worker_vendor} "
-                f"(never-same-vendor review, CLAUDE.md)")
+                f"(never-same-vendor review; set allow_same_vendor_review: true in "
+                f"{MODEL_CONFIG} to permit deliberately)")
     return resolved
 
 
@@ -1895,7 +1906,11 @@ def cmd_launch(spec_id: str) -> None:
     spec, digest, approval = ctx["spec"], ctx["digest"], ctx["approval"]
     # R71: role→model defaults come from scripts/models.json, read once here and frozen into lc
     # below. An approval that explicitly pins a model still wins (owner decision 2026-07-15).
+    # Resolution (incl. the cross-vendor revalidation of pins) happens HERE, before the attempt
+    # claim, branch, or worktree exist — an invalid pin refuses cleanly with no side effects
+    # (owner-extension round 1: a late die() stranded a claimed 'launching' state).
     cfg = load_model_config()
+    launch_models = resolve_launch_models(approval, cfg)
     spec_bytes = ctx["spec_bytes"]   # the single buffer preflight read/hashed/parsed (B2 round-2)
 
     n = next_attempt(spec_id)
@@ -2005,10 +2020,11 @@ def cmd_launch(spec_id: str) -> None:
         "needs_network": spec.get("needs_network", False),
         "base_sha": base_sha, "branch": branch,
         "base_branch": approval.get("base_branch", AUTOMATION_BASE),
-        # R71: model fields from the ONE tested resolver — config defaults, approval pin wins,
-        # failover pair + alias map frozen here; review() reads only lc, never the live config.
+        # R71: model fields from the ONE tested resolver (run pre-side-effects above) — config
+        # defaults, approval pin wins, failover pair + alias map frozen here; review() reads
+        # only lc, never the live config.
         "worktree": str(wt),
-        **resolve_launch_models(approval, cfg),
+        **launch_models,
         "test_command": spec["test_command"], "approved_scope": approval["approved_scope"],
         "regression_command": spec.get("regression_command"),
         "regression_test_paths": spec.get("regression_test_paths", []),
@@ -2944,6 +2960,13 @@ def review(att: Path, spec_id: str, lc: dict, wc: str, test_attestation=None):
     # policy-note item 2: mandatory structured rubric. The worker's plan/checklist is NEVER
     # included here (confirmation-bias contamination) — only spec, diff, and orchestrator evidence.
     wt = Path(lc["worktree"])
+    # The frozen model fields are resolved ONCE, up front: all three from the record, or the
+    # shipped legacy trio for a genuine pre-R71 record; a partial set is a corrupt record and
+    # yields no verdict at all (fail closed, before any reviewer invocation).
+    frozen = lc_frozen_model_fields(lc)
+    if frozen is None:
+        return None, ("launch record carries a partial set of frozen model fields "
+                      "(corrupt launch.json); fail closed — no reviewer was invoked")
     diff = git("diff", f"{lc['base_sha']}..{wc}", cwd=wt)
     schema_obj = _verdict_schema_for_attempt(att)
     schema_version = schema_obj.get("properties", {}).get("schema_version", {}).get("const")
@@ -3027,7 +3050,7 @@ def review(att: Path, spec_id: str, lc: dict, wc: str, test_attestation=None):
             "claude", "-p", "--output-format", "json", "--json-schema", json.dumps(schema_obj),
             # R71: CLI alias from the frozen launch config; ids without an alias pass through
             # unchanged. Pre-config launch records keep the shipped alias (round-2 review).
-            "--model", lc_model_field(lc, "cli_aliases").get(model_id, model_id),
+            "--model", frozen["cli_aliases"].get(model_id, model_id),
             "--effort", lc["reviewer_effort"],
             # B16 round-2: cwd isolation alone does not strip user-level customizations. Verified
             # against the installed CLI (flags parse; envelope shape unchanged): --safe-mode drops
@@ -3066,9 +3089,9 @@ def review(att: Path, spec_id: str, lc: dict, wc: str, test_attestation=None):
     # review.json's sibling records, result.json, and the PR body all attribute the verdict to the
     # model that actually produced it (round-1 review: misattribution was blocking).
     if (cp.returncode != 0
-            and lc["reviewer_model"] == lc_model_field(lc, "reviewer_failover_trigger")
+            and lc["reviewer_model"] == frozen["reviewer_failover_trigger"]
             and reviewer_model_unavailable(cp.stdout)):
-        fallback_model = lc_model_field(lc, "reviewer_fallback_model")
+        fallback_model = frozen["reviewer_fallback_model"]
         primary = cp
         from_model = lc["reviewer_model"]
         (att / "raw" / "review-envelope-primary.json").write_text(primary.stdout or "")

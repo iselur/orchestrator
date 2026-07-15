@@ -17,6 +17,8 @@ ROLES = ("orchestrator", "spec_author", "utility_subagent", "worker",
          "bound_reviewer", "orchestrator_artifact_reviewer")
 VENDORS = ("claude", "codex")
 SECTIONS = ("schema_version", "roles", "reviewer_failover", "cli_aliases", "vendor_map")
+# Optional sections; absence means their default, never an error.
+OPTIONAL_SECTIONS = ("allow_same_vendor_review",)
 # Contradiction TRIPWIRE, not a classifier (round-1 review, finding 1): a name carrying a known
 # vendor prefix may not be declared as the other vendor — that misdeclaration is exactly what
 # would let same-vendor review pass. A name with no known prefix still needs its explicit
@@ -36,10 +38,12 @@ def validate(cfg) -> list:
     for k in SECTIONS:
         if k not in cfg:
             errs.append(f"missing required section: {k}")
-    for k in sorted(set(cfg) - set(SECTIONS)):
+    for k in sorted(set(cfg) - set(SECTIONS) - set(OPTIONAL_SECTIONS)):
         errs.append(f"unknown section: {k}")
     if "schema_version" in cfg and cfg["schema_version"] != "1":
         errs.append("schema_version must be the string '1'")
+    if not isinstance(cfg.get("allow_same_vendor_review", False), bool):
+        errs.append("allow_same_vendor_review must be a boolean")
 
     named_models = set()
     roles = cfg.get("roles")
@@ -105,9 +109,14 @@ def validate(cfg) -> list:
         for m in sorted(named_models - set(vm)):
             errs.append(f"model named in config but not declared in vendor_map: {m}")
 
-    # Cross-vendor role relationships (round-2 review, finding 1): the config itself must satisfy
-    # "the reviewer is never the same vendor as the author" for every review flow the repo runs —
-    # a same-vendor pairing is refused HERE, never left for a downstream CLI to trip over.
+    # Cross-vendor role relationships (round-2 review, finding 1): by default the config must
+    # satisfy "the reviewer is never the same vendor as the author" for every review flow the
+    # repo runs — a same-vendor pairing is refused HERE, never left for a downstream CLI to trip
+    # over. Owner decision 2026-07-15 (in-session): a same-vendor pairing IS permitted when the
+    # config says so explicitly — allow_same_vendor_review: true, a deliberate one-line edit —
+    # so an accidental pairing still refuses while a declared experiment does not. Gates outside
+    # this config (scripts/review's self-review refusal, the cross-vendor PASS required to merge
+    # main) are unchanged by this knob.
     #   worker authors diffs        → bound reviewer (primary, failover trigger, and fallback)
     #   orchestrator authors artifacts → orchestrator_artifact_reviewer (scripts/review)
     #   spec_author authors plans   → the orchestrator reviews them in-session
@@ -134,11 +143,13 @@ def validate(cfg) -> list:
             ("roles.worker", role_model("worker"),
              "reviewer_failover.fallback_model", fo.get("fallback_model")),
         ]
-    for author_key, author_model, reviewer_key, reviewer_model in pairings:
-        av, rv = vendor(author_model), vendor(reviewer_model)
-        if av is not None and av == rv:
-            errs.append(f"same-vendor review pairing: {author_key} ({author_model}) and "
-                        f"{reviewer_key} ({reviewer_model}) are both {av}")
+    if cfg.get("allow_same_vendor_review", False) is not True:
+        for author_key, author_model, reviewer_key, reviewer_model in pairings:
+            av, rv = vendor(author_model), vendor(reviewer_model)
+            if av is not None and av == rv:
+                errs.append(f"same-vendor review pairing: {author_key} ({author_model}) and "
+                            f"{reviewer_key} ({reviewer_model}) are both {av} "
+                            f"(set allow_same_vendor_review: true to permit deliberately)")
     return errs
 
 
