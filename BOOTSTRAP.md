@@ -57,6 +57,12 @@ instance), then `./scripts/dispatch launch <SPEC-ID>` and `./scripts/dispatch aw
 Confirm it runs the worker in isolation, passes the gates + review, and opens a draft PR. **You**
 merge it.
 
+> **Don't dispatch SPEC-001–SPEC-017 for this check.** Their reference implementations
+> (`scripts/lib/*.sh`) already ship in this template — they're fixtures for Relay's own
+> `tests/execution-policy.tsv` suite, not unsolved work. Dispatching one will report
+> `failed_worker_error: worker produced no changes`. Write a fresh spec instead (a new small
+> helper + test is the fastest way to get a genuine end-to-end run).
+
 ## 7. Optional: plan-scoped autonomy
 
 Autonomy ships **disabled**. If (and only if) you want the orchestrator to merge in-scope PRs to
