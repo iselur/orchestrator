@@ -1,7 +1,8 @@
-# Claude + Codex Orchestrator
+# Relay
 
-This repo lets you get maximum from your Claude and Codex **subscriptions** 💸 (no API key needed) and
-makes two great models work together with minimum oversight.
+Relay lets you get maximum from your Claude and Codex **subscriptions** 💸 (no API key needed) and
+makes two great models work together with minimum oversight, passing work between them like a relay
+team.
 
 This setup sets **Claude** as **Orchestrator**👩‍🏫 that manages a task backlog while **Workers**👷 (**Codex**) handle the
 implementation. They can work for days without you, while the final merge remains yours.
