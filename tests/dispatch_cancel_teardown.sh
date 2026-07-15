@@ -168,6 +168,19 @@ check("remaining_ceiling_s: 3s left REFUSES (returns 0), never grants the 30s fl
 check("remaining_ceiling_s: one second UNDER MIN refuses (returns 0)",
       d.remaining_ceiling_s(base + MIN - 1) == 0)
 
+# ROUND-2 finding 3 — deadline_timeout_prefix(): the wall-clock cap for phases without a systemd
+# RuntimeMaxSec. It must return a coreutils `timeout` prefix carrying the REMAINING seconds, and
+# None (refuse) when the deadline is spent — not just a pre-start yes/no.
+pfx = d.deadline_timeout_prefix(base + 500)
+check("deadline_timeout_prefix: returns a `timeout` prefix carrying remaining seconds",
+      pfx[:1] == ["timeout"] and "500" in pfx and "-k" in pfx)
+check("deadline_timeout_prefix: caps at the REMAINING time, not a fresh full window",
+      d.deadline_timeout_prefix(base + 120)[-1] == "120")
+check("deadline_timeout_prefix: None (refuse) when under MIN remains",
+      d.deadline_timeout_prefix(base + 3) is None)
+check("deadline_timeout_prefix: None (refuse) once the deadline has passed",
+      d.deadline_timeout_prefix(base - 10) is None)
+
 # ==================================================================================================
 # Group C — run_candidate_test_phases(): a REAL production call site (not a reimplementation),
 # driven against a synthetic policy so we control exactly how many isolated_run calls happen.
@@ -219,6 +232,11 @@ check("run_candidate_test_phases: RuntimeMaxSec strictly decreases across the lo
       f"(not a fresh ceiling each time) {ceilings}", ceilings[0] > ceilings[1])
 check("run_candidate_test_phases: the SAME deadline is spent down, not reset "
       f"(delta == simulated phase cost) {ceilings}", ceilings[0] - ceilings[1] == PHASE_DURATION_S)
+# ROUND-2 finding 3 — the candidate-READ phase runs no systemd unit, so it must be wrapped in a
+# `timeout` bound to the deadline, not left uncapped once started.
+read_runs = [c for c in calls if c[:1] == ["timeout"] and any("t3.sh" in tok for tok in c)]
+check("run_candidate_test_phases: the candidate-READ phase is wrapped in a deadline `timeout` (finding 3)",
+      len(read_runs) == 1 and "-k" in read_runs[0])
 
 # Over-grant refusal (round-1 finding 1): 3s to the deadline must refuse every remaining phase,
 # launching NO unit — not grant the 30s floor.
@@ -351,6 +369,24 @@ check("teardown_attempt: a surviving unit is reported and NOT verified (finding 
       "codex-regcand-SPEC-907-1.service" in td_r["remaining_units"] and td_r["verified"] is False)
 fake_list["output"] = ""
 
+# ROUND-2 finding 1 — verifying INSIDE the outer unit's ExecStopPost sees that outer unit still
+# 'deactivating'; it must be EXCLUDED (it is not a leaked slice member) or every hook falsely fails.
+eu_aid = "SPEC-908-1"
+eu_outer = d.unit_name("SPEC-908", 1)                 # codex-SPEC-908-1
+calls.clear()
+# Listing contains ONLY the deactivating outer unit + its (emptying) slice container.
+fake_list["output"] = (f"{eu_outer}.service loaded deactivating stop outer\n"
+                       f"{d.attempt_slice(eu_aid)} loaded active active slice\n")
+td_eu = d.teardown_attempt(eu_aid, eu_outer, stop_outer=False)  # timeout-path shape
+check("teardown_attempt: the deactivating OUTER unit is EXCLUDED from remaining (round-2 finding 1)",
+      td_eu["remaining_units"] == [] and td_eu["verified"] is True)
+# But a TRUE slice member still present alongside the deactivating outer unit is NOT excluded.
+fake_list["output"] += f"codex-worker-{eu_aid}.service loaded active running worker\n"
+td_eu2 = d.teardown_attempt(eu_aid, eu_outer, stop_outer=False)
+check("teardown_attempt: a real slice member alongside the deactivating outer unit IS still caught",
+      f"codex-worker-{eu_aid}.service" in td_eu2["remaining_units"] and td_eu2["verified"] is False)
+fake_list["output"] = ""
+
 # ==================================================================================================
 # Group F — cmd_cancel(): stops the whole slice + the outer unit, verifies, exits per verification.
 etmp = pathlib.Path(tempfile.mkdtemp())
@@ -408,6 +444,22 @@ check("cmd_cancel: unverifiable teardown escalates rather than warn-and-continue
 launch_src = inspect.getsource(d.cmd_launch)
 check("cmd_launch wires ExecStopPost=`timeout` so RuntimeMaxSec fires teardown at stop time (finding 4)",
       "ExecStopPost" in launch_src and "timeout" in launch_src)
+# ROUND-2 finding 3 — the outer unit's RuntimeMaxSec is tied to the REMAINING time to the absolute
+# deadline (systemd hard-caps the whole attempt at deadline_ts), not a fresh full ceiling.
+check("cmd_launch ties the outer unit RuntimeMaxSec to remaining-to-deadline (round-2 finding 3)",
+      "outer_ceiling_s = remaining_ceiling_s(deadline_ts)" in launch_src
+      and "RuntimeMaxSec={outer_ceiling_s}" in launch_src)
+# ROUND-2 finding 3 — review()/spec-test/worker unisolated fallbacks cap the phase itself with a
+# deadline `timeout` wrapper, not merely a pre-start check.
+review_src = inspect.getsource(d.review)
+check("review() caps the reviewer LLM call with a deadline `timeout` wrapper (round-2 finding 3)",
+      "deadline_timeout_prefix" in review_src)
+pipeline_src = inspect.getsource(d._run_pipeline)
+check("unisolated worker + spec-test phases use a deadline `timeout` wrapper, not just a pre-start check",
+      pipeline_src.count("deadline_timeout_prefix") >= 2)
+reg_src = inspect.getsource(d.run_regression_gate)
+check("unisolated regression run is wrapped in a deadline `timeout` (round-2 finding 3)",
+      '"timeout", "-k"' in reg_src)
 
 gtmp = pathlib.Path(tempfile.mkdtemp())
 d.STATE = gtmp / "state"; d.STATE.mkdir()
@@ -447,6 +499,23 @@ check("cmd_timeout: does NOT clobber an already-terminal state (idempotent, stat
 check("cmd_timeout: still tears the slice down even when state is already terminal",
       any(is_sudo_stop(c, d.attempt_slice(gaid)) for c in calls))
 
+# ROUND-2 finding 2 — a verification failure during cleanup of an ALREADY-TERMINAL attempt (normal
+# finish / cancel) must STILL escalate + exit nonzero, not only when the state was LIVE.
+d.write_state(gspec, {"attempt_id": gaid, "spec_id": gspec, "attempt": gn,
+                      "status": "passed_pr_opened", "unit": gunit})
+g_esc_before = len(list(d.ESCALATIONS.glob("*.json"))) if d.ESCALATIONS.exists() else 0
+calls.clear(); fake_list["output"] = f"codex-worker-{gaid}.service loaded active running w\n"
+try:
+    with contextlib.redirect_stdout(io.StringIO()):
+        d.cmd_timeout(gaid)
+    g_timeout_rc = 0
+except SystemExit as e:
+    g_timeout_rc = e.code
+fake_list["output"] = ""
+g_esc_after = len(list(d.ESCALATIONS.glob("*.json"))) if d.ESCALATIONS.exists() else 0
+check("cmd_timeout: a leaked member during terminal-state cleanup escalates even when NOT LIVE (finding 2)",
+      g_esc_after > g_esc_before and g_timeout_rc == 1)
+
 # ==================================================================================================
 # Group H — cmd_reconcile(): an outer unit found dead while state was LIVE (crash, box restart, or
 # the outer unit's own RuntimeMaxSec) runs the SAME teardown, not just a relabel-and-walk-away.
@@ -459,8 +528,12 @@ d.write_state(fspec, {"attempt_id": faid, "spec_id": fspec, "attempt": fn, "stat
                       "unit": funit})
 calls.clear()
 fbuf = io.StringIO()
-with contextlib.redirect_stdout(fbuf):
-    d.cmd_reconcile()  # fake systemctl show returns nothing -> unit reads inactive -> "gone"
+try:
+    with contextlib.redirect_stdout(fbuf):
+        d.cmd_reconcile()  # fake systemctl show returns nothing -> unit reads inactive -> "gone"
+    recon_rc = 0
+except SystemExit as e:
+    recon_rc = e.code
 recon = json.loads(fbuf.getvalue())
 check("cmd_reconcile: an outer unit found dead while LIVE tears down the attempt slice",
       any(is_sudo_stop(c, d.attempt_slice(faid)) for c in calls))
@@ -468,8 +541,63 @@ check("cmd_reconcile: reports per-attempt teardown verification",
       recon["reconciled"] and recon["reconciled"][0].get("teardown_verified") is True)
 check("cmd_reconcile: reports whether the live-units query itself succeeded (fail closed)",
       recon.get("live_units_query_ok") is True)
+check("cmd_reconcile: a clean reconcile exits 0", recon_rc == 0)
 fst = d.read_state(fspec)
 check("cmd_reconcile: state moves to interrupted", fst["status"] == "interrupted")
+
+# ROUND-2 finding 2 — a reconcile whose teardown leaves a member (or whose query fails) must exit
+# nonzero + escalate, not print-and-return-zero.
+d.write_state(fspec, {"attempt_id": faid, "spec_id": fspec, "attempt": fn, "status": "running",
+                      "unit": funit})
+r_esc_before = len(list(d.ESCALATIONS.glob("*.json"))) if d.ESCALATIONS.exists() else 0
+calls.clear(); fake_list["output"] = f"codex-regbase-{faid}.service loaded active running r\n"
+try:
+    with contextlib.redirect_stdout(io.StringIO()):
+        d.cmd_reconcile()
+    recon_rc2 = 0
+except SystemExit as e:
+    recon_rc2 = e.code
+fake_list["output"] = ""
+r_esc_after = len(list(d.ESCALATIONS.glob("*.json"))) if d.ESCALATIONS.exists() else 0
+check("cmd_reconcile: an unverifiable teardown exits nonzero + escalates (finding 2)",
+      recon_rc2 == 1 and r_esc_after > r_esc_before)
+
+# ==================================================================================================
+# Group I — cmd_health(): a confirmed-hang teardown that cannot be verified clean must exit nonzero
+# + escalate (round-2 finding 2), so a health loop never reads a leaky kill as success. Drive two
+# consecutive "dead" checks to reach confirmed_hang, with the fake showing the unit active + idle.
+htmp = pathlib.Path(tempfile.mkdtemp())
+d.STATE = htmp / "state"; d.STATE.mkdir()
+d.ATTEMPTS = htmp / "attempts"
+haid = "SPEC-909-1"
+hspec, hn = d.parse_attempt_id(haid)
+hunit = d.unit_name(hspec, hn)
+(d.ATTEMPTS / hspec / str(hn) / "raw").mkdir(parents=True)
+d.write_state(hspec, {"attempt_id": haid, "spec_id": hspec, "attempt": hn, "status": "running",
+                      "unit": hunit})
+# systemctl show → active + no CPU; no events file → idle_s huge → alert; two checks → confirmed_hang.
+_orig_systemctl_show, _orig_journal = d.systemctl_show, d._journal_lines_since
+d.systemctl_show = lambda unit, *props: {"ActiveState": "active", "SubState": "running",
+                                         "CPUUsageNSec": "0"}
+d._journal_lines_since = lambda unit, since_ts: 0
+h_esc_before = len(list(d.ESCALATIONS.glob("*.json"))) if d.ESCALATIONS.exists() else 0
+calls.clear(); fake_list["output"] = f"codex-test-{haid}.service loaded active running t\n"
+def run_health():
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            d.cmd_health(haid, inactivity_min=0)
+        return 0
+    except SystemExit as e:
+        return e.code
+run_health()                 # first dead check → alert_pending_confirm (no teardown yet)
+health_rc = run_health()     # second dead check → confirmed_hang → teardown (leaky) → fail closed
+fake_list["output"] = ""
+d.systemctl_show, d._journal_lines_since = _orig_systemctl_show, _orig_journal
+h_esc_after = len(list(d.ESCALATIONS.glob("*.json"))) if d.ESCALATIONS.exists() else 0
+check("cmd_health: confirmed-hang stops the attempt slice",
+      any(is_sudo_stop(c, d.attempt_slice(haid)) for c in calls))
+check("cmd_health: an unverifiable confirmed-hang teardown exits nonzero + escalates (finding 2)",
+      health_rc == 1 and h_esc_after > h_esc_before)
 
 print()
 print(f"{'FAIL' if fails else 'PASS'}: dispatch_cancel_teardown.sh ({len(fails)} failed)")

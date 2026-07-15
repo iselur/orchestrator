@@ -1176,6 +1176,20 @@ def remaining_ceiling_s(deadline_ts: float) -> int:
     return remaining
 
 
+def deadline_timeout_prefix(deadline_ts: float) -> "list[str] | None":
+    """coreutils `timeout` prefix (round-2 review, finding 3) that hard-caps a phase WITHOUT its own
+    systemd RuntimeMaxSec — the unisolated worker / spec-test / regression runs, the candidate-read
+    grader, and the reviewer LLM call — at the wall-clock time REMAINING to the ONE absolute deadline.
+    A pre-start check alone let a phase, once started, run arbitrarily far past the deadline; this
+    binds the whole phase to it. `-k 10` escalates TERM->KILL 10s later so a phase that ignores TERM
+    still cannot outlive the cap. Returns None when no time remains — the caller MUST refuse the
+    phase, exactly like remaining_ceiling_s()==0 for the systemd-capped phases."""
+    remaining = remaining_ceiling_s(deadline_ts)
+    if remaining <= 0:
+        return None
+    return ["timeout", "-k", "10", str(remaining)]
+
+
 def isolated_run(unit, argv, cwd, rw_paths, private_network, ceiling_s, stdout, stderr,
                  binds=None, env_extra=None, slice_name=None):
     """Run argv as codex-worker in a hardened transient SYSTEM service; block for completion.
@@ -1280,7 +1294,9 @@ def run_regression_gate(lc, wt, worker_commit, att, iso, deadline_ts) -> dict:
                                   ceiling_s=phase_ceiling_s, stdout=lg, stderr=subprocess.STDOUT,
                                   slice_name=attempt_slice(attempt_id))
             return cp.returncode
-        cp = run(["bash", "-c", cmd], cwd=str(cwd))
+        # Unisolated fallback: no systemd RuntimeMaxSec, so cap the run itself at the remaining time
+        # to the absolute deadline (round-2 finding 3), not just at a pre-start check.
+        cp = run(["timeout", "-k", "10", str(phase_ceiling_s), "bash", "-c", cmd], cwd=str(cwd))
         Path(log_path).write_text((cp.stdout or "") + (cp.stderr or ""))
         return cp.returncode
 
@@ -1611,10 +1627,18 @@ def cmd_launch(spec_id: str) -> None:
 
     unit = unit_name(spec_id, n)
     dispatch_bin = str(ROOT / "scripts" / "dispatch")
+    # B6 round-2 finding 3: the outer unit's RuntimeMaxSec is the REMAINING time to the absolute
+    # deadline_ts (recomputed HERE, after launch.json was written), not a fresh full ceiling that
+    # would start counting only when the unit activates — so systemd hard-caps the WHOLE attempt
+    # (worker, tests, regression, review, control-plane) at the one absolute deadline, and cannot
+    # drift later than it by the launch offset.
+    outer_ceiling_s = remaining_ceiling_s(deadline_ts)
+    if outer_ceiling_s <= 0:
+        die("attempt deadline already exhausted before the outer unit could launch (B6)", 10)
     cmd = [
         "systemd-run", "--user", f"--unit={unit}", "--collect",
         f"--property=Description=Codex worker {attempt_id}",
-        f"--property=RuntimeMaxSec={ceiling_s}",   # hard ceiling (D10), default-on
+        f"--property=RuntimeMaxSec={outer_ceiling_s}",   # hard ceiling (D10) tied to the absolute deadline
         # B6 finding 4: when RuntimeMaxSec fires (or the unit is otherwise stopped), tear down the
         # attempt's independent SYSTEM slice + verify AT STOP TIME, instead of leaving orphaned
         # worker/test/regression units for a later reconcile. Idempotent + state-safe (see
@@ -1768,10 +1792,13 @@ def run_candidate_test_phases(lc: dict, wt: Path, worker_commit: str, att: Path,
                      if assigned == "candidate-isolated" else
                      "isolated observation retained; box-precondition PASS alone grades the host boundary")
         else:
-            # candidate-read runs no unit, but it still consumes wall-clock against the ONE absolute
-            # deadline (B6) — refuse it too once the deadline is spent, so a late phase cannot run on.
+            # candidate-read runs no systemd unit, but it still consumes wall-clock against the ONE
+            # absolute deadline (B6) — cap the run itself with a `timeout` wrapper tied to the
+            # remaining time (round-2 finding 3), and refuse once no time remains, so a late or slow
+            # read phase can neither start after nor run past the deadline.
             identity = execution_identity()
-            if remaining_ceiling_s(deadline_ts) <= 0:
+            prefix = deadline_timeout_prefix(deadline_ts)
+            if prefix is None:
                 log.write_text("attempt deadline exhausted before this candidate-read test could "
                                 "start (single absolute ceiling, B6); refusing\n")
                 rc = 124
@@ -1782,7 +1809,7 @@ def run_candidate_test_phases(lc: dict, wt: Path, worker_commit: str, att: Path,
                        "GIT_NO_REPLACE_OBJECTS": "1", "ORCH_TEST_TARGET_ROOT": str(wt),
                        "ORCH_TEST_TARGET_COMMIT": worker_commit}
                 with open(log, "w") as out:
-                    cp = subprocess.run(["bash", str(ROOT / rel)], cwd=str(ROOT), env=env,
+                    cp = subprocess.run([*prefix, "bash", str(ROOT / rel)], cwd=str(ROOT), env=env,
                                         stdin=subprocess.DEVNULL, stdout=out,
                                         stderr=subprocess.STDOUT)
                 rc = cp.returncode
@@ -1878,6 +1905,8 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
     deadline_ts = lc.get("deadline_ts")
     if deadline_ts is None:
         deadline_ts = time.time() + float(lc.get("hard_ceiling_hours", DEFAULT_CEILING_HOURS)) * 3600
+    # Make the resolved deadline authoritative for every phase reached through lc (esp. review()).
+    lc["deadline_ts"] = deadline_ts
     # Codex flags common to both paths. Fast mode (priority service tier): faster wall-clock at the
     # SAME model + reasoning depth. `service_tier` is the real key (`model_service_tier` is rejected).
     codex_args = ["exec", "--cd", str(wt),
@@ -1937,9 +1966,11 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
                 binds=binds, slice_name=attempt_slice(attempt_id))
         else:
             # Fallback (fresh box / CI): same-user launch with Codex's bwrap sandbox. No systemd
-            # RuntimeMaxSec here, so the absolute deadline (B6) is the ONLY ceiling — refuse to start
-            # once it is spent, exactly like the isolated path.
-            if remaining_ceiling_s(deadline_ts) <= 0:
+            # RuntimeMaxSec here, so cap the run itself at the time remaining to the absolute deadline
+            # (round-2 finding 3) — a `timeout` wrapper, not just a pre-start check that would let a
+            # started worker run arbitrarily far past the deadline. None => no time left => refuse.
+            prefix = deadline_timeout_prefix(deadline_ts)
+            if prefix is None:
                 finish("failed_launch", ERR_TIMEOUT,
                        detail="attempt deadline already exhausted before the worker phase could "
                               "start (single absolute ceiling, B6); refusing")
@@ -1948,7 +1979,7 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
                 "PATH": f"{OPERATOR_HOME}/.local/bin:/usr/bin:/bin",
                 "CODEX_HOME": f"{OPERATOR_HOME}/.codex", "TERM": "dumb", "LANG": "C.UTF-8",
             }
-            worker_cmd = ["codex", *codex_args, "--sandbox", "workspace-write",
+            worker_cmd = [*prefix, "codex", *codex_args, "--sandbox", "workspace-write",
                           "--output-last-message", str(raw / "worker-last-message.txt"), prompt]
             with open(os.devnull) as devnull:
                 wc = subprocess.run(worker_cmd, env=scrubbed, stdin=devnull, stdout=ev, stderr=er)
@@ -2056,12 +2087,15 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
                 slice_name=attempt_slice(attempt_id))
         test_rc = tcp.returncode
     else:
-        # Unisolated fallback: no RuntimeMaxSec, so the absolute deadline (B6) is the only ceiling.
-        if remaining_ceiling_s(deadline_ts) <= 0:
+        # Unisolated fallback: no RuntimeMaxSec, so cap the run itself at the remaining time to the
+        # absolute deadline (round-2 finding 3) — a `timeout` wrapper, not just a pre-start check.
+        prefix = deadline_timeout_prefix(deadline_ts)
+        if prefix is None:
             finish("failed_test", ERR_TIMEOUT, worker_commit=worker_commit,
                    detail="attempt deadline exhausted before the spec test phase could start "
                           "(single absolute ceiling, B6); refusing")
-        tc = run(["bash", "-c", lc["test_command"]], cwd=str(wt), env={**os.environ, **test_env})
+        tc = run([*prefix, "bash", "-c", lc["test_command"]], cwd=str(wt),
+                 env={**os.environ, **test_env})
         (att / "test.log").write_text((tc.stdout or "") + (tc.stderr or ""))
         test_rc = tc.returncode
     if test_rc != 0:
@@ -2444,7 +2478,15 @@ def review(att: Path, spec_id: str, lc: dict, wc: str, test_attestation=None):
     # confused-deputy risk (SOL). It gets the full spec + diff + evidence in the prompt and needs NO
     # host filesystem access, so ALL tools (incl. Read/Grep/Glob) are denied: a prompt-injected
     # reviewer cannot browse the operator's files. Nothing to inspect beyond what the orchestrator provided.
+    # B6 round-2 finding 3: the reviewer LLM call is the one long control-plane phase; cap it at the
+    # remaining time to the absolute deadline too (the outer unit's RuntimeMaxSec is the whole-attempt
+    # backstop, this bounds the phase itself). None => no time left => fail closed (no verdict).
+    dl = lc.get("deadline_ts")
+    prefix = deadline_timeout_prefix(dl) if dl is not None else []
+    if prefix is None:
+        return None, "attempt deadline exhausted before the review phase (B6); fail closed"
     cmd = [
+        *prefix,
         "claude", "-p", "--output-format", "json", "--json-schema", json.dumps(schema_obj),
         "--model", lc["reviewer_model"].replace("claude-fable-5", "fable"),
         "--effort", lc["reviewer_effort"],
@@ -2556,13 +2598,22 @@ def cmd_await(attempt_id: str, interval: int = 5, max_wait: int = 8 * 3600,
 
 
 # =============================================================== cancel =======
-def attempt_units_remaining(attempt_id: str) -> tuple[list[str], bool]:
-    """B6 verification: after teardown, no unit for this attempt should remain in EITHER systemd
-    manager — the outer pipeline unit (user) or any slice member (system). Returns
-    (offending unit names, query_ok). query_ok is False if the underlying list-units query FAILED on
-    either manager — a failed query is never read as 'nothing remains' (fail closed, round-1 review)."""
+def attempt_units_remaining(attempt_id: str, outer_unit: str | None = None) -> tuple[list[str], bool]:
+    """B6 verification: after teardown, no true SLICE MEMBER (worker/test/regression SYSTEM service)
+    for this attempt should remain. Returns (offending unit names, query_ok). query_ok is False if
+    the underlying list-units query FAILED on either manager — a failed query is never read as
+    'nothing remains' (fail closed, round-1 review).
+
+    Round-2 finding 1: when this runs inside the outer unit's OWN ExecStopPost (the timeout path),
+    that outer --user pipeline unit is still 'deactivating' and list-units reports it — it is NOT a
+    leaked slice member, so exclude it (and the slice CONTAINER unit itself, which empties on stop).
+    Otherwise every hook invocation would falsely read verified=False and escalate."""
     units, query_ok = _list_codex_units()
-    return [u for u in units if attempt_id in u], query_ok
+    excluded = {attempt_slice(attempt_id)}                 # codex-<aid>.slice — a container, not work
+    if outer_unit:
+        excluded.add(outer_unit)                           # codex-<aid>  (defensive, if unsuffixed)
+        excluded.add(f"{outer_unit}.service")              # codex-<aid>.service as list-units prints it
+    return [u for u in units if attempt_id in u and u not in excluded], query_ok
 
 
 def teardown_attempt(attempt_id: str, outer_unit: str | None, *, stop_outer: bool = True) -> dict:
@@ -2588,7 +2639,9 @@ def teardown_attempt(attempt_id: str, outer_unit: str | None, *, stop_outer: boo
     if stop_outer and outer_unit:
         # producer is quiesced now; a second slice stop reaps any member it launched mid-teardown
         slice_stop_rc = run(["sudo", "-n", "systemctl", "stop", slice_name]).returncode
-    remaining, query_ok = attempt_units_remaining(attempt_id)
+    # Exclude the outer unit from the remaining set: on the timeout path it is deactivating (us), and
+    # on cancel/health we have just stopped it — either way it is not a leaked slice member (finding 1).
+    remaining, query_ok = attempt_units_remaining(attempt_id, outer_unit)
     return {"slice": slice_name, "outer_stop_rc": outer_stop_rc, "slice_stop_rc": slice_stop_rc,
             "remaining_units": remaining, "query_ok": query_ok,
             "verified": query_ok and not remaining}
@@ -2638,17 +2691,23 @@ def cmd_timeout(attempt_id: str) -> None:
     terminal state (`finish` already ran) or an operator cancel.
 
     It runs as an ExecStopPost of the dying outer unit, so systemd is already stopping the producer:
-    stop_outer=False (we must not try to stop ourselves), the ordering guarantee still holds."""
+    stop_outer=False (we must not try to stop ourselves), the ordering guarantee still holds. The
+    outer unit name is still passed so verification EXCLUDES this deactivating unit itself (round-2
+    finding 1)."""
     spec_id, n = parse_attempt_id(attempt_id)
-    td = teardown_attempt(attempt_id, None, stop_outer=False)
+    unit = unit_name(spec_id, n)
+    td = teardown_attempt(attempt_id, unit, stop_outer=False)
     st = read_state(spec_id) or {}
     if st.get("attempt_id") == attempt_id and st.get("status") in LIVE:
         write_state(spec_id, {**st, "status": "interrupted", "error_class": ERR_TIMEOUT,
                               "detail": "attempt outer unit stopped (hard ceiling / RuntimeMaxSec "
                                         "or external stop); slice torn down" + _teardown_detail(td)})
-        if not td["verified"]:
-            escalate(spec_id, "timeout teardown could not be verified clean (B6)",
-                     {"attempt_id": attempt_id, **td})
+    # finding 2: a failed verification is escalated + a nonzero exit on EVERY hook invocation, not
+    # only when the state was LIVE — a leaked member during a normal-finish/cancel cleanup is still a
+    # durable incident. (With finding 1, a clean teardown verifies true, so no false escalation.)
+    if not td["verified"]:
+        escalate(spec_id, "timeout teardown could not be verified clean (B6)",
+                 {"attempt_id": attempt_id, **td})
     print(json.dumps({"attempt_id": attempt_id, "verified": td["verified"],
                       "remaining_units": td["remaining_units"],
                       "state_was_live": st.get("status") in LIVE}))
@@ -2703,6 +2762,7 @@ def cmd_health(attempt_id: str, inactivity_min: int = HEALTH_INACTIVITY_MIN) -> 
            "idle_seconds": round(idle_s), "event_lines": ev_lines, "cpu_nsec": cpu}
 
     action = "none"
+    teardown_failed = False
     if not active:
         health = "unit_inactive"          # terminal/gone — status/await handle it, not a hang
         consecutive_dead = 0
@@ -2736,11 +2796,15 @@ def cmd_health(attempt_id: str, inactivity_min: int = HEALTH_INACTIVITY_MIN) -> 
                 td = teardown_attempt(attempt_id, unit)   # B6: producer first, then slice, then verify
                 out["remaining_units"] = td["remaining_units"]
                 out["teardown_verified"] = td["verified"]
-                if labelled and not td["verified"]:
-                    cur = read_state(spec_id) or {}
-                    if cur.get("attempt_id") == attempt_id:
-                        write_state(spec_id, {**cur,
-                                              "detail": (cur.get("detail", "") + _teardown_detail(td))})
+                teardown_failed = not td["verified"]
+                if teardown_failed:
+                    # finding 2: escalate + exit nonzero on ANY verification failure, not only when we
+                    # wrote the label — a leaked member is a durable incident regardless.
+                    if labelled:
+                        cur = read_state(spec_id) or {}
+                        if cur.get("attempt_id") == attempt_id:
+                            write_state(spec_id, {**cur,
+                                                  "detail": (cur.get("detail", "") + _teardown_detail(td))})
                     escalate(spec_id, "confirmed-hang teardown could not be verified clean (B6)",
                              {"attempt_id": attempt_id, **td})
             else:
@@ -2754,6 +2818,10 @@ def cmd_health(attempt_id: str, inactivity_min: int = HEALTH_INACTIVITY_MIN) -> 
         "event_lines": ev_lines, "consecutive_dead": consecutive_dead,
     }, indent=2))
     print(json.dumps(out, indent=2))
+    # finding 2: a confirmed-hang teardown that could not be verified clean exits nonzero (fail
+    # closed) so an automated health loop cannot read the kill as success. A clean check returns 0.
+    if teardown_failed:
+        sys.exit(1)
 
 
 # ============================================================= reconcile ======
@@ -2766,6 +2834,7 @@ def cmd_reconcile() -> None:
     it also stops the attempt slice and verifies nothing was left running, instead of just relabeling
     state and leaving orphans."""
     reconciled = []
+    any_unverified = False
     for st in all_states():
         if st.get("status") not in LIVE:
             continue
@@ -2786,6 +2855,7 @@ def cmd_reconcile() -> None:
             if aid and not td["verified"]:
                 escalate(spec_id, "reconcile teardown could not be verified clean (B6)",
                          {"attempt_id": aid, **td})
+                any_unverified = True
             reconciled.append({"attempt_id": aid, "from": st.get("status"),
                                "to": "interrupted", "unit_active": False,
                                "remaining_units": td["remaining_units"],
@@ -2796,6 +2866,10 @@ def cmd_reconcile() -> None:
     live_units, query_ok = _list_codex_units()
     print(json.dumps({"reconciled": reconciled, "live_units": live_units,
                       "live_units_query_ok": query_ok}, indent=2))
+    # finding 2: a teardown that could not be verified clean OR a failed final live-units query exits
+    # nonzero (fail closed) — reconcile must not return 0 while an orphan may still be running.
+    if any_unverified or not query_ok:
+        sys.exit(1)
 
 
 def _list_codex_units() -> tuple[list[str], bool]:
