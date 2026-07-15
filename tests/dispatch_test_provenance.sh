@@ -307,46 +307,73 @@ try:
 finally:
     d.ROOT = _ir_root
 
-# --- Finding 2: box + candidate-read tests execute IMMUTABLE committed bytes -----------------
-# The graded run must come from a materialized blob at an unpredictable path (not the swappable
-# ROOT/rel), while the test's own dirname("$0")/.. still resolves the repo root.
-echo0 = ('#!/bin/sh\necho "RAN_FROM=$0"\n'
-         'echo "SELF_ROOT=$(cd "$(dirname "$0")/.." && pwd)"\nexit 0\n')
+# --- Findings 1+2 (round 2): graders execute from an IMMUTABLE tree OUTSIDE the working tree ---
+# Round 1's nonce-under-tests/ is gone (it regressed grader_drift, and a same-uid rename could
+# still race the well-known path). A grader that echoes $0, its self-located root, and a data
+# dependency read via that root proves: (a) the executed path is OUTSIDE the repo working tree,
+# (b) self-location resolves the grader tree, (c) the data dependency is the PINNED commit's even
+# when the working-tree copy is tampered (finding 3), (d) no dotfile is left under tests/ (2a).
+grader = ('#!/bin/sh\necho "RAN_FROM=$0"\n'
+          'echo "SELF_ROOT=$(cd "$(dirname "$0")/.." && pwd)"\n'
+          'echo "DEP=$(cat "$(dirname "$0")/../data/dep.txt")"\nexit 0\n')
+dep_files = {**std_files, "tests/a.sh": grader, "data/dep.txt": "PINNED-DEP\n"}
 _saved = (d.ROOT, d.EXECUTION_POLICY, d.STATE)
 try:
-    # candidate-read
-    cr, crc = make_repo({**std_files, "tests/a.sh": echo0})
-    d.ROOT, d.EXECUTION_POLICY = cr, cr / "tests" / "execution-policy.tsv"
-    d.STATE = pathlib.Path(tempfile.mkdtemp())
-    pol = d.execution_policy(cr, crc)
-    catt = pathlib.Path(tempfile.mkdtemp()); (catt / "raw").mkdir(parents=True)
-    d.run_candidate_test_phases({"execution_policy": pol, "test_runtime": None,
-                                 "test_unit": "u"}, cr, "d" * 40, catt, 60, [])
-    crlog = (catt / "raw" / "candidate-read-a.log").read_text()
-    check("candidate-read executed a materialized nonce, not tests/a.sh",
-          "/tests/.b4run-" in crlog and f"RAN_FROM={cr}/tests/a.sh" not in crlog)
-    check("candidate-read self-location still resolves the repo root",
-          f"SELF_ROOT={cr}" in crlog)
-    check("candidate-read left no nonce behind (cleaned up)",
-          not any(p.name.startswith(".b4run-") for p in (cr / "tests").iterdir()))
-
-    # box-precondition
-    br, brc = make_repo({**std_files, "tests/a.sh": echo0,
-                         "tests/execution-policy.tsv": "tests/a.sh\tbox-precondition\tx\n"})
-    d.ROOT, d.EXECUTION_POLICY = br, br / "tests" / "execution-policy.tsv"
-    d.STATE = pathlib.Path(tempfile.mkdtemp())
-    bpol = d.execution_policy(br, brc)
-    batt = pathlib.Path(tempfile.mkdtemp()); (batt / "raw").mkdir(parents=True)
-    d.run_box_preconditions(batt, bpol)
-    brlog = (batt / "raw" / "box-precondition-a.log").read_text()
-    check("box-precondition executed a materialized nonce, not tests/a.sh",
-          "/tests/.b4run-" in brlog and f"RAN_FROM={br}/tests/a.sh" not in brlog)
-    check("box-precondition self-location still resolves the repo root",
-          f"SELF_ROOT={br}" in brlog)
-    check("box-precondition left no nonce behind (cleaned up)",
-          not any(p.name.startswith(".b4run-") for p in (br / "tests").iterdir()))
+    for label, mode, logname, runner in (
+        ("candidate-read", "candidate-read", "candidate-read-a.log",
+         lambda att, pol, root: d.run_candidate_test_phases(
+             {"execution_policy": pol, "test_runtime": None, "test_unit": "u"},
+             root, "d" * 40, att, 60, [])),
+        ("box-precondition", "box-precondition", "box-precondition-a.log",
+         lambda att, pol, root: d.run_box_preconditions(att, pol)),
+    ):
+        gr, grc = make_repo({**dep_files, "tests/execution-policy.tsv": f"tests/a.sh\t{mode}\tx\n"})
+        d.ROOT, d.EXECUTION_POLICY = gr, gr / "tests" / "execution-policy.tsv"
+        d.STATE = pathlib.Path(tempfile.mkdtemp())
+        pol = d.execution_policy(gr, grc)
+        # tamper the WORKING-TREE data dependency — it is not a grader_drift-tracked *.sh path, so
+        # grading proceeds; the grader must still read the PINNED bytes from the immutable tree.
+        (gr / "data" / "dep.txt").write_text("TAMPERED-DEP\n")
+        att = pathlib.Path(tempfile.mkdtemp()); (att / "raw").mkdir(parents=True)
+        runner(att, pol, gr)
+        logtext = (att / "raw" / logname).read_text()
+        check(f"{label}: executed a path OUTSIDE the repo working tree",
+              "RAN_FROM=/" in logtext and f"RAN_FROM={gr}/" not in logtext)
+        check(f"{label}: self-location resolves the immutable grader tree, not the working tree",
+              "SELF_ROOT=/" in logtext and f"SELF_ROOT={gr}" not in logtext)
+        check(f"{label}: read the PINNED data dependency, not the tampered working-tree copy",
+              "DEP=PINNED-DEP" in logtext and "TAMPERED-DEP" not in logtext)
+        check(f"{label}: left NO file under tests/ (round-1 dotfile regression is gone)",
+              sorted(p.name for p in (gr / "tests").iterdir())
+              == ["a.sh", "execution-policy.tsv"])
+        check(f"{label}: grader_drift stays clean afterward (no nonce pollution, finding 2a)",
+              d.grader_drift(grc, gr) == [])
 finally:
     d.ROOT, d.EXECUTION_POLICY, d.STATE = _saved
+
+# --- Finding 4: refs/replace must not reach the integrity/scope object reads ------------------
+# scope_check() parses `git diff base..wc`. Plant a replace that makes the base resolve to the
+# candidate tree (so a replace-enabled diff is empty and scope would PASS vacuously); with
+# --no-replace-objects the gate must still see the real, out-of-scope change.
+sr, _ = make_repo({"in/a.txt": "base\n"})
+sh("git", "config", "user.email", "t@t", cwd=sr); sh("git", "config", "user.name", "t", cwd=sr)
+sbase = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(sr),
+                       capture_output=True, text=True).stdout.strip()
+(sr / "outside.txt").write_text("oops\n")
+sh("git", "add", "-A", cwd=sr); sh("git", "commit", "-qm", "worker", cwd=sr)
+swc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(sr),
+                     capture_output=True, text=True).stdout.strip()
+sh("git", "replace", sbase, swc, cwd=sr)   # base now resolves to the candidate commit
+replaced_diff = subprocess.run(["git", "diff", "--name-only", f"{sbase}..{swc}"], cwd=str(sr),
+                               capture_output=True, text=True).stdout.strip()
+check("refs/replace really neutralizes a plain diff (empty base..wc)", replaced_diff == "")
+sc = d.scope_check(sr, sbase, swc, ["in/**"])
+check("scope_check ignores the replacement and still catches the out-of-scope change",
+      sc["result"] == "FAIL" and sc["out_of_scope"] == ["outside.txt"])
+# integrity() ancestry read is routed through the same no-replace wrapper (git_cp)
+integ, ok = d.integrity(sr, sbase, swc)
+check("integrity descends_from_base is computed with replace disabled",
+      integ["descends_from_base"] is True)
 
 print(f"\n{'PASS' if not fails else 'FAIL'}: B4 test-provenance guards ({len(fails)} failed)")
 sys.exit(1 if fails else 0)
