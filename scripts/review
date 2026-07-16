@@ -13,7 +13,10 @@
 #     own launch.json worker_model, written by the dispatcher before this script could ever run;
 #   - a --context file named PLAN-NNN.{md,stdout,stderr} is codex-plan output — that is codex-plan's
 #     reserved identifier namespace, recognized in ANY directory (codex-plan's --out can write it
-#     outside .orchestrator/plans; keying on the directory was a bypass);
+#     outside .orchestrator/plans; keying on the directory was a bypass). Its author VENDOR is read
+#     from the .md frontmatter's author_model — written by codex-plan before this script could ever
+#     run — via the models.json vendor_map; a missing sibling .md, missing frontmatter/key, or an
+#     unmapped model refuses outright (fail closed) rather than guessing;
 #   - a --context file inside a recorded worker worktree (launch.json "worktree", or either root
 #     dispatch.py ever hands to a worker) is likewise codex;
 #   - anything else is claude (this system has exactly two producers; nothing else writes to a
@@ -33,6 +36,8 @@
 # Usage: scripts/review --topic <slug> --author <claude|codex> --context FILE [--context FILE]...
 #        [--] [PROMPT...]
 #        PROMPT as arguments or on stdin. Output: .orchestrator/reviews/<slug>/round-N.md
+# A PLAN-NNN context BINDS the topic: it must be exactly plan-nnn (the lowercased artifact id), so
+# the round counter is keyed to the artifact — a renamed topic can no longer reset the 5-round cap.
 # Callers run this detached (it can take hours — see AGENTS.md); never wrap it in a short timeout.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -76,7 +81,6 @@ esac
 
 # ---------------------------------------------------------------- B18: derive authorship --------
 attempts_root="$ROOT/.orchestrator/attempts"
-plans_root="$ROOT/.orchestrator/plans"
 iso_worktrees="/srv/codexwork/worktrees"
 local_worktrees="$ROOT/.worktrees"
 
@@ -136,23 +140,50 @@ print(d.get('worker_model') or '')
   fi
 
   # 2. codex-plan's own output naming (PLAN-NNN.{md,stdout,stderr}). This is codex-plan's RESERVED
-  #    identifier namespace — allocated and written by that script alone — so it marks Codex
-  #    authorship no matter WHERE the file lands. Keying on the directory was a B18 hole: codex-plan
-  #    takes `--out DIR` (scripts/codex-plan) and writes genuine PLAN-NNN artifacts anywhere, so a
-  #    real Codex plan placed outside .orchestrator/plans would have derived 'claude' and been
-  #    laundered through a forged --author claude — the exact bypass, via an original producer
-  #    artifact (not content laundering). Match the basename, not the directory. This runs AFTER the
-  #    attempt check, so a PLAN-NNN file inside an attempt still derives from that attempt's
-  #    launch.json (also Codex). The trade-off is deliberate and fail-safe: any file that happens to
-  #    carry codex-plan's reserved PLAN-NNN name is treated as Codex, so at worst a mis-named
-  #    Claude artifact is refused for Codex review (safe) — never the reverse.
+  #    identifier namespace — allocated and written by that script alone — recognized no matter
+  #    WHERE the file lands (keying on the directory was a B18 hole: codex-plan takes `--out DIR`
+  #    and writes genuine PLAN-NNN artifacts anywhere). This runs AFTER the attempt check, so a
+  #    PLAN-NNN file inside an attempt still derives from that attempt's launch.json. The author
+  #    VENDOR comes from the .md frontmatter's author_model, which codex-plan writes from
+  #    models.json at allocation time — spec_author is a role, not a vendor, so an unconditional
+  #    'codex' here would misclassify the moment the owner flips the role in models.json. Every
+  #    failure refuses (fail closed): a sibling .md that is missing, frontmatter that is absent,
+  #    an author_model key that is empty, or a model outside vendor_map all print 'error' — at
+  #    worst an artifact with broken provenance is refused for review (safe), never laundered.
   local base="${real##*/}"
   if [[ "$base" =~ ^PLAN-[0-9]+\.(md|stdout|stderr)$ ]]; then
-    if [[ "$real" == "$plans_root"/* ]]; then
-      printf 'codex\tcodex-plan output %s\n' "$base"
-    else
-      printf 'codex\tcodex-plan output naming %s (reserved Codex namespace via --out, dir %s)\n' "$base" "${real%/*}"
+    local md_file="$real" am vendor
+    if [[ "$base" != *.md ]]; then
+      md_file="${real%.*}.md"
     fi
+    if [[ ! -f "$md_file" ]]; then
+      printf 'error\t%s is codex-plan output but its sibling %s is missing; author_model cannot be read\n' "$f" "$md_file"
+      return 0
+    fi
+    am=$(python3 - "$md_file" <<'PYEOF'
+import re, sys
+try:
+    content = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+except Exception:
+    sys.exit(1)
+m = re.match(r"^---\n(.*?)\n---\n", content, re.DOTALL)
+if not m:
+    sys.exit(1)
+for line in m.group(1).splitlines():
+    if line.startswith("author_model:"):
+        val = line[len("author_model:"):].strip().strip("\"'")
+        if val:
+            print(val)
+            sys.exit(0)
+sys.exit(1)
+PYEOF
+    ) || { printf 'error\t%s has no readable frontmatter author_model; plan provenance cannot be established\n' "$md_file"; return 0; }
+    vendor=$(classify_model "$am")
+    if [[ "$vendor" != "claude" && "$vendor" != "codex" ]]; then
+      printf 'error\t%s frontmatter author_model %s does not match a known vendor; refuse rather than guess\n' "$md_file" "$am"
+      return 0
+    fi
+    printf '%s\tcodex-plan output %s frontmatter author_model=%s\n' "$vendor" "$base" "$am"
     return 0
   fi
 
@@ -219,6 +250,33 @@ if [[ "$derived" == "codex" ]]; then
   for line in "${evidence_lines[@]}"; do echo "        evidence: $line" >&2; done
   echo "        Never Codex-grades-Codex (CLAUDE.md). Have Claude review this artifact instead." >&2
   exit 4
+fi
+
+# ------------------------------------------ bind round dirs to artifact identity (PLAN reviews) --
+# The 5-round cap counts round-N.md files under $out_root/<topic>, so a caller who renamed the
+# topic slug got a fresh directory and a fresh counter for the same artifact — a real cap reset.
+# For PLAN-NNN artifacts the topic is therefore DERIVED, not chosen: it must be exactly plan-nnn
+# (the artifact id lowercased, digits verbatim), which already satisfies the slug regex above.
+# Non-PLAN contexts keep caller-chosen topics: they have no durable artifact id to bind to.
+declare -A plan_ids=()
+for context in "${contexts[@]}"; do
+  ctx_base="$(realpath -e -- "$context")"
+  ctx_base="${ctx_base##*/}"
+  if [[ "$ctx_base" =~ ^PLAN-([0-9]+)\.(md|stdout|stderr)$ ]]; then
+    plan_ids["${BASH_REMATCH[1]}"]=1
+  fi
+done
+if (( ${#plan_ids[@]} > 1 )); then
+  die "REFUSED — context files reference multiple distinct PLAN artifacts (${!plan_ids[*]}); one artifact per review, its rounds are its cap"
+fi
+if (( ${#plan_ids[@]} == 1 )); then
+  plan_num="${!plan_ids[@]}"
+  required_topic="plan-$plan_num"
+  if [[ "$topic" != "$required_topic" ]]; then
+    echo "review: REFUSED — PLAN-$plan_num is under review, so --topic must be '$required_topic' (got '$topic')." >&2
+    echo "        Round dirs are bound to the artifact id: a renamed topic must never reset the 5-round cap." >&2
+    exit 6
+  fi
 fi
 # --------------------------------------------------------------------------------------------------
 
