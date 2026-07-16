@@ -39,15 +39,18 @@ name=""; args=()
 while (($#)); do
   case "$1" in
     -t|-s) name=$2; shift 2 ;;
-    -d|-o|-p) shift ;;
-    -c|-x|-y) shift 2 ;;
+    -d|-o|-p|-P) shift ;;
+    -c|-x|-y|-F) shift 2 ;;
     *) args+=("$1"); shift ;;
   esac
 done
 case "$cmd" in
   has-session)    [ -e "$S/sessions/$name" ] ;;
   new-session)    touch "$S/sessions/$name"; echo bash > "$S/sessions/$name.cmd"
-                  printf '$0:100:500\n' > "$S/sessions/$name.pane" ;;
+                  printf '$0:100:500\n' > "$S/sessions/$name.pane"
+                  printf '$0:100:500\n'                      # -P: the created session's own triple
+                  # replacement hook: the session is swapped for a foreign one the instant it exists
+                  if [ -n "${FAKE_TMUX_SWAP_AFTER_NEW:-}" ]; then printf '$7:900:800\n' > "$S/sessions/$name.pane"; fi ;;
   send-keys)      printf '%s\n' "${args[*]}" >> "$S/sessions/$name.keys"
                   echo claude > "$S/sessions/$name.cmd" ;;
   display-message) cat "$S/sessions/$name.cmd" 2>/dev/null || echo bash ;;
@@ -106,6 +109,9 @@ cat > "$F/ps" <<'FAKE'
 n=$(cat "$FAKE_PS_COUNT" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$FAKE_PS_COUNT"
 echo "ps $*" >> "$FAKE_TMUX_STATE/invocations.log"   # shared log: adjacency assertions read the ORDER
 [ -n "${FAKE_PS_MAKE_HALT:-}" ] && [ "${FAKE_PS_MAKE_HALT_ON:-1}" -le "$n" ] && touch "$FAKE_PS_MAKE_HALT"
+# identity-swap hook: the supervised session is replaced DURING this presence read — proves the
+# action authorization is re-read after the scan, not before it
+[ -n "${FAKE_PS_SWAP_PANE:-}" ] && [ "${FAKE_PS_SWAP_ON:-1}" -le "$n" ] && printf '$7:900:800\n' > "$FAKE_TMUX_STATE/sessions/orch-auto.pane"
 [ -n "${FAKE_PS_FAIL:-}" ] && exit 3
 [ "$*" = "-eo pid=,ppid=,comm=" ] || exit 1
 [ -n "${FAKE_PS_TABLE:-}" ] && cat "$FAKE_PS_TABLE" 2>/dev/null
@@ -127,7 +133,8 @@ reset() { # fresh state between scenarios
   rm -f "$FAKE_CURL_LOG" "$FAKE_ACTIVE_UNITS" "$FAKE_UUID_COUNT" "$FAKE_PS_COUNT" "$LEDGER.lock"
   printf '%s\n' "$HEADER" > "$LEDGER"
   unset FAKE_CURL_EXIT FAKE_TMUX_FAIL FAKE_CLAUDE_VERSION FAKE_PS_TABLE FAKE_PS_FAIL \
-        FAKE_PS_MAKE_HALT FAKE_PS_MAKE_HALT_ON FAKE_PS_ADD_ROW FAKE_PS_ADD_AFTER 2>/dev/null || true
+        FAKE_PS_MAKE_HALT FAKE_PS_MAKE_HALT_ON FAKE_PS_ADD_ROW FAKE_PS_ADD_AFTER \
+        FAKE_PS_SWAP_PANE FAKE_PS_SWAP_ON FAKE_TMUX_SWAP_AFTER_NEW 2>/dev/null || true
 }
 open_row() { (cd "$R" && scripts/intake -g "${1:-drill goal}" -d "done when the drill criterion holds" >/dev/null); }
 keys() { cat "$TS/sessions/orch-auto.keys" 2>/dev/null || true; }
@@ -142,9 +149,10 @@ bind_session() { # record the ownership binding a real launch would have written
   printf '$0:100:500\n' > "$TS/sessions/orch-auto.pane"
   printf '$0:100:500\n' > "$WDIR/pane"
 }
-adjacent() { # $1 action regex: the invocation logged immediately before the LAST such action must
-  # be the barrier's process-table read — proof that nothing external runs between check and action
-  awk -v act="$1" '{l[NR]=$0} END{for(i=NR;i>1;i--) if (l[i] ~ act) { exit (l[i-1] ~ /^ps / ? 0 : 1) }; exit 1}' "$TS/invocations.log"
+adjacent() { # $1 action regex: the LAST such action must be immediately preceded by the identity
+  # verification (list-panes) with the presence read (ps) right before that — proof that the
+  # authorization is the final external read, and nothing else runs between the barrier and the action
+  awk -v act="$1" '{l[NR]=$0} END{for(i=NR;i>2;i--) if (l[i] ~ act) { exit ((l[i-1] ~ /^tmux list-panes/ && l[i-2] ~ /^ps /) ? 0 : 1) }; exit 1}' "$TS/invocations.log"
 }
 alert_env() { # configure a complete owner alert channel
   mkdir -p "$WDIR"
@@ -836,24 +844,60 @@ run_wd
 keys | tail -1 | grep -q "usage window has reset" && [ ! -e "$WDIR/usage-wait" ] \
   && ok "retry delivered next tick and the wait was consumed" || bad "armed wait never delivered"
 
-echo "== W20: barrier adjacency — the process-table read is the LAST external call before each action"
+echo "== W20: gate adjacency — presence read, then identity verification, then the action, nothing between"
 reset; open_row
 run_wd                                              # (a) initial send
-adjacent 'tmux send-keys' && ok "launch: presence read immediately precedes the send" || bad "launch: something external runs between the barrier and the send"
+adjacent 'tmux send-keys' && ok "launch: identity is the final read before the send, presence right before it" || bad "launch: something external runs between the gates and the send"
 dead_pane
 run_wd                                              # (b) respawn send
-adjacent 'tmux send-keys' && ok "respawn: presence read immediately precedes the send" || bad "respawn: barrier not adjacent to the send"
+adjacent 'tmux send-keys' && ok "respawn: identity is the final read before the send" || bad "respawn: gates not adjacent to the send"
 printf 'USAGE_RETRY_MODE=active\n' > "$WDIR/env"; chmod 600 "$WDIR/env"
 gen=$(cat "$WDIR/generation")
 echo "$(( $(date +%s) - 60 )) $gen drill.sed" > "$WDIR/usage-wait"
 run_wd                                              # (c) retry send
-adjacent 'tmux send-keys' && ok "retry: presence read immediately precedes the send" || bad "retry: barrier not adjacent to the send"
+adjacent 'tmux send-keys' && ok "retry: identity is the final read before the send" || bad "retry: gates not adjacent to the send"
 reset
 mkdir -p "$TS/sessions"; touch "$TS/sessions/orch-auto"; dead_pane; bind_session
 printf '00000000-0000-4000-8000-000000000099\n' > "$WDIR/session-id"
 printf '00000000-0000-4000-8000-000000000099\n' > "$WDIR/launched"
 run_wd                                              # idle rotation kill
-adjacent 'tmux kill-session' && ok "rotation: presence read immediately precedes the kill" || bad "rotation: barrier not adjacent to the kill"
+adjacent 'tmux kill-session' && ok "rotation: identity is the final read before the kill" || bad "rotation: gates not adjacent to the kill"
+
+echo "== W22: identity replaced DURING the presence scan is caught — authorization is re-read after it"
+reset; open_row
+run_wd                                              # launch
+dead_pane
+rm -f "$FAKE_PS_COUNT"
+export FAKE_PS_SWAP_PANE=1 FAKE_PS_SWAP_ON=2       # entry read clean; the respawn barrier read swaps identity
+n_before=$(keys | wc -l)
+run_wd
+unset FAKE_PS_SWAP_PANE FAKE_PS_SWAP_ON
+[ "$(keys | wc -l)" = "$n_before" ] && ok "respawn: swap during the barrier scan refused" || bad "acted on a session replaced during the presence scan"
+[ -e "$WDIR/ALERT-foreign-session" ] && ok "stale-authorization refusal visible" || bad "stale-authorization refusal silent"
+
+echo "== W22b: a same-name replacement right after creation is never bound as ours"
+reset; open_row
+export FAKE_TMUX_SWAP_AFTER_NEW=1                   # the session is replaced the instant it exists
+run_wd
+unset FAKE_TMUX_SWAP_AFTER_NEW
+[ -z "$(keys)" ] && ok "initial prompt withheld from the replacement" || bad "typed into the replacement session"
+[ ! -e "$WDIR/launched" ] && ok "replacement never marked launched" || bad "launched marker written for a replacement"
+[ -e "$WDIR/ALERT-foreign-session" ] && ok "replacement refusal visible" || bad "replacement refusal silent"
+[ "$(cat "$WDIR/pane")" = '$0:100:500' ] && ok "binding records what creation printed, never a name lookup" || bad "binding captured the replacement's identity"
+
+echo "== W22c: a refused respawn advances neither the storm counter nor the generation"
+reset; open_row
+run_wd                                              # launch
+gen_before=$(cat "$WDIR/generation")
+dead_pane
+printf '$7:900:800\n' > "$TS/sessions/orch-auto.pane"
+run_wd                                              # foreign identity: respawn refused
+[ "$(cat "$WDIR/generation")" = "$gen_before" ] && ok "generation unchanged on refusal" || bad "refusal bumped the generation"
+[ "$(cat "$WDIR/respawns" 2>/dev/null || echo 0)" = "0" ] && ok "storm counter unchanged on refusal" || bad "refusal counted as a respawn"
+printf '$0:100:500\n' > "$TS/sessions/orch-auto.pane"
+run_wd                                              # genuine respawn
+[ "$(cat "$WDIR/respawns")" = "1" ] && ok "a real respawn counts toward the storm alert" || bad "real respawn not counted"
+[ "$(cat "$WDIR/generation")" != "$gen_before" ] && ok "a real respawn bumps the generation" || bad "generation not bumped by a real respawn"
 
 echo "== W21: HALT landing during the idle-alert barrier detection — no record touched, no raise"
 reset; open_row
