@@ -63,7 +63,8 @@ Prefer a fresh session per workstream.
   the owner's home. Known gaps are in SECURITY.md. Never claim more protection than tests prove.
 - Stop a job with `dispatch cancel`, never by killing a process number — that once killed the
   wrong thing. Interrupted work restarts as a fresh attempt; never finish it by hand.
-- Autonomy is off by default and needs an explicit grant file — untracked `AUTONOMY.local.json`,
-  or the tracked `AUTONOMY.json` that ships disabled. Autonomy reaches only `ready-for-main`,
-  through the gated `./scripts/dispatch merge` or `dispatch integrate` — never a bare
-  `gh pr merge`, never `main`.
+- Under an autonomy grant, the orchestrator finishes the job itself: it answers review findings
+  (up to 5 fix rounds) and, with `ci` green, merges to `ready-for-main` through the gated
+  `./scripts/dispatch merge` (or `dispatch integrate`) — never `main`, never a bare `gh pr merge`.
+  It stops to ask the owner only if the work still FAILS after those rounds, or on HALT. No grant
+  means no autonomy: the shipped `AUTONOMY.json` is off by default, so a copy of the repo is not.
