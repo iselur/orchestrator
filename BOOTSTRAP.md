@@ -58,10 +58,11 @@ Confirm it runs the worker in isolation, passes the gates + review, and opens a 
 merge it.
 
 > **Don't dispatch the shipped sample specs (SPEC-001–017) for this check.** They are fixtures
-> for Relay's own `tests/execution-policy.tsv` suite, not unsolved work: many are already
+> and leftovers from this repo's own history, not a curated first exercise: some ship already
 > implemented in `scripts/lib/` (those no-op with `failed_worker_error: worker produced no
-> changes`), and the rest deliberately probe failure and refusal paths — none gives a genuine
-> end-to-end run. Write a fresh spec instead (a new small helper + test is the fastest way).
+> changes`), some deliberately probe failure and refusal paths, and the rest are obsolete
+> historical specs. For a dependable end-to-end run, write a fresh spec (a new small helper
+> + test is the fastest way).
 
 ## 7. Optional: plan-scoped autonomy
 
