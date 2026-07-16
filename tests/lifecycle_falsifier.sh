@@ -106,8 +106,14 @@ done
 check "an EXPIRED owner loses every authority operation BEFORE any takeover" $exp_fails
 sed -i 's/^expiry=.*/expiry=bogus/' "$ROOT/state/rows/ROWE.lease"
 lf_start_job ROWE sessE "$ge" JOBE2 2>/dev/null; [ $? -eq 1 ]
-check "a malformed lease grants no authority to its own owner either" $?
-sed -i 's/^expiry=.*/expiry=0/' "$ROOT/state/rows/ROWE.lease"
+check "a malformed EXPIRY grants no authority to its own owner" $?
+sed -i "s/^expiry=.*/expiry=$(( $(date +%s) + 60 ))/; s/^generation=.*/generation=bogus/" "$ROOT/state/rows/ROWE.lease"
+lf_start_job ROWE sessE bogus JOBE3 2>/dev/null; [ $? -eq 1 ]
+check "a live lease with a NON-NUMERIC generation grants nothing (whole-schema authority)" $?
+sed -i "s/^generation=.*/generation=$ge/; s/^row=.*/row=OTHER/" "$ROOT/state/rows/ROWE.lease"
+lf_start_job ROWE sessE "$ge" JOBE4 2>/dev/null; [ $? -eq 1 ]
+check "a lease whose row field disagrees with its filename grants nothing" $?
+sed -i "s/^row=.*/row=ROWE/; s/^expiry=.*/expiry=0/" "$ROOT/state/rows/ROWE.lease"
 
 # ---- soft trip ------------------------------------------------------------------------------------------
 lf_soft_trip ROW1 "$loser" "$gen" 2>/dev/null; [ $? -eq 1 ];   check "a non-owner cannot request rotation" $?
@@ -150,6 +156,12 @@ cp "$ROOT/h.bak" "$H"; printf 'row=OTHER\n' >> "$H"
 lf_consume_handoff ROWP sessQ 2>/dev/null; [ $? -eq 1 ];       check "duplicate contradictory fields refuse (uniqueness)" $?
 cp "$ROOT/h.bak" "$H"; sed -i 's/^jobs=.*/jobs=FORGED/' "$H"
 lf_consume_handoff ROWP sessQ 2>/dev/null; [ $? -eq 1 ];       check "a jobs field that differs from the LEDGER's recomputed trace refuses" $?
+cp "$ROOT/h.bak" "$H"; sed -i 's/^from_session=.*/from_session=sessForged/' "$H"
+lf_consume_handoff ROWP sessQ 2>/dev/null; [ $? -eq 1 ]
+check "a valid-looking but FOREIGN predecessor refuses (checked against the job ledger)" $?
+cp "$ROOT/h.bak" "$H"; printf 'successor=evil\n' >> "$H"
+lf_consume_handoff ROWP sessQ 2>/dev/null; [ $? -eq 1 ]
+check "an unknown/injected field refuses (closed-world handoff schema)" $?
 cp "$ROOT/h.bak" "$H"
 cp "$H" "$ROOT/state/handoffs/ROWP.gen999"
 lf_consume_handoff ROWP sessQ 2>/dev/null; [ $? -eq 1 ];       check "TWO handoffs for one row refuse" $?
@@ -208,6 +220,24 @@ LF_HALT_AT=commit lf_activity ROW2 sessNew "$g4" 2>/dev/null; rc=$?
 check "raw transitions (marker/counter removal) honor the commit gate" $?
 rm -f "$ROOT/state/HALT"
 lf_activity ROW2 sessNew "$g4"
+# floor-specific HALT window: the primary record publishes, the floor update is SKIPPED whole
+floor_before=$(cat "$ROOT/state/.last_now")
+exp_before=$(sed -n 's/^expiry=//p' "$ROOT/state/rows/ROW2.lease")
+LF_HALT_AT=floor lf_renew ROW2 sessNew "$g4" 120; rc=$?
+tmps=$(find "$ROOT/state" -maxdepth 1 -name '.tmp.*' | wc -l)
+[ "$rc" -eq 0 ] && [ "$(sed -n 's/^expiry=//p' "$ROOT/state/rows/ROW2.lease")" != "$exp_before" ] \
+  && [ "$(cat "$ROOT/state/.last_now")" = "$floor_before" ] && [ "$tmps" -eq 0 ]
+check "HALT in the floor-publish window: primary record landed, floor skipped whole, no temp" $?
+rm -f "$ROOT/state/HALT"
+# ordinary I/O failure aborts the transaction BEFORE dependent writes (no errexit reliance)
+gio=$(lf_acquire ROWIO sessIO 600); lf_start_job ROWIO sessIO "$gio" JOBIO >/dev/null
+chmod 555 "$ROOT/state/handoffs"
+lf_commit_boundary ROWIO sessIO "$gio" 2>/dev/null; rc=$?
+chmod 755 "$ROOT/state/handoffs"
+[ "$rc" -ne 0 ] && [ "$(sed -n 's/^session=//p' "$ROOT/state/rows/ROWIO.lease")" = "sessIO" ] \
+  && [ ! -e "$ROOT/state/handoffs/ROWIO.gen$gio" ]
+check "a failed handoff publish ABORTS the boundary — the lease is NOT released (no stranding)" $?
+lf_release ROWIO sessIO "$gio" 2>/dev/null || true
 
 # ---- crash matrix: point-specific oracles AND proven injections ---------------------------------------------
 crash_fails=0
@@ -259,6 +289,9 @@ check "job record exists after its publish point and not before" $?
 CR="$ROOT/crash-after-consume-record"
 LF_ROOT="$CR" lf_acquire CROW s3 60 >/dev/null 2>&1; [ $? -eq 1 ]
 check "interrupted consumption fences bare acquisition" $?
+LF_ROOT="$CR" lf_consume_handoff CROW s3 >/dev/null 2>&1; [ $? -eq 1 ]
+[ "$(sed -n 's/^successor=//p' "$CR/consumed/CROW.gen1")" = "s2" ]
+check "a SECOND consumer cannot overwrite the recorded successor (duplicate consumption refused)" $?
 fin=$(LF_ROOT="$CR" lf_recover_finish CROW)
 [ "$fin" = "s2" ] && [ "$(LF_ROOT="$CR" lf_recover CROW)" = "owner s2" ] \
   && [ ! -e "$CR/handoffs/CROW.gen1" ]
@@ -349,15 +382,25 @@ check "teardown: ALL lifecycle roots (state + every crash fixture + fake credent
 repo_writes=$(find . -path ./.git -prune -o -newer "$STAMP" -type f -print 2>/dev/null | wc -l)
 [ "$repo_writes" -eq 0 ]
 check "audit: ZERO repo-tree files written during the run" $?
-# the evidence copy must be an absolute path OUTSIDE the repository, validated BEFORE writing
+# the evidence copy must NORMALIZE (symlinks, dot-dot) to an absolute path OUTSIDE the repo
+manifest_out_ok() {  # $1 candidate path -> rc 0 iff safe
+    local norm repo
+    norm=$(realpath -m -- "$1" 2>/dev/null) || return 1
+    repo=$(realpath -- "$PWD") || return 1
+    case "$norm" in
+        "$repo"|"$repo"/*) return 1 ;;
+        /*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+manifest_out_ok "$PWD/../$(basename "$PWD")/probe" 2>/dev/null; [ $? -ne 0 ]
+check "a dot-dot path that RESOLVES inside the repository is rejected (normalized check)" $?
 MANIFEST_OUT_OK=1
 if [ -n "${LF_MANIFEST_OUT:-}" ]; then
-    case "$LF_MANIFEST_OUT" in
-        "$PWD"/*|[!/]*) MANIFEST_OUT_OK=0 ;;
-    esac
+    manifest_out_ok "$LF_MANIFEST_OUT" || MANIFEST_OUT_OK=0
 fi
 [ "$MANIFEST_OUT_OK" -eq 1 ]
-check "LF_MANIFEST_OUT is absolute and outside the repository (or unset)" $?
+check "LF_MANIFEST_OUT normalizes to an absolute path outside the repository (or is unset)" $?
 END_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 MANIFEST=$(
@@ -372,7 +415,8 @@ MANIFEST=$(
 printf '%s\n' "$MANIFEST"
 echo "manifest_sha256=$(printf '%s\n' "$MANIFEST" | sha256sum | cut -d' ' -f1)"
 if [ -n "${LF_MANIFEST_OUT:-}" ] && [ "$MANIFEST_OUT_OK" -eq 1 ]; then
-    printf '%s\n' "$MANIFEST" > "$LF_MANIFEST_OUT"
+    printf '%s\n' "$MANIFEST" > "$LF_MANIFEST_OUT" \
+        || { echo "FAIL manifest evidence copy could not be written"; fails=1; }
 fi
 
 if [ "$fails" -ne 0 ]; then echo "FAIL lifecycle_falsifier.sh"; exit 1; fi
