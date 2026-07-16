@@ -37,7 +37,7 @@ Prefer a fresh session per workstream.
    model agreement everywhere else — agreement is not evidence.
 7. **Maximal delegation:** the orchestrator delegates every delegable task to the worker, and works
    directly only when no worker is available or the task is its own (dispatch, review, the trust
-   boundary). The reviewer is never the same vendor as the author.
+   boundary). Same-vendor pairings are default-off; allow_same_vendor_review: true in scripts/models.json permits them when the owner chooses, and nothing reviews its own work.
 
 ## Safety invariants (never violate)
 
