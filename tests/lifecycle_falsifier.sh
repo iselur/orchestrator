@@ -218,7 +218,8 @@ for op in "lf_acquire ROW3 sessH 60" "lf_renew ROW2 sessNew $g4 60" "lf_release 
           "lf_consume_handoff ROW2 sessH" "lf_respawn ROW2 supervisor-token" \
           "lf_activity ROW2 sessNew $g4" "lf_safety_flag ROW2 sessNew $g4" \
           "lf_observe sessNew stale id ROW2 $g4 t1" "lf_kill_eligible sessNew id ROW2 $g4" \
-          "lf_kill sessNew id ROW2 $g4" "lf_type sessNew ROW2 $g4 hello" "lf_recover_finish ROW2"; do
+          "lf_kill sessNew id ROW2 $g4" "lf_type sessNew ROW2 $g4 hello" "lf_recover_finish ROW2" \
+          "lf_recover_boundary ROW2"; do
     $op >/dev/null 2>&1; rc=$?
     [ "$rc" -eq 9 ] || { echo "FAIL HALT did not stop: $op (rc=$rc)"; halt_fails=1; }
 done
@@ -269,6 +270,28 @@ chmod 644 "$ROOT/state/handoffs/ROWIO.gen$gio"
 [ "$rc" -ne 0 ] && [ ! -e "$ROOT/state/consumed/ROWIO.gen$gio" ] \
   && [ -e "$ROOT/state/handoffs/ROWIO.gen$gio" ]
 check "an UNREADABLE handoff ABORTS consumption — no partial successor-only record" $?
+# an UNWRITABLE consumption journal aborts the WHOLE transaction (heredoc, not a pipe — the
+# journal publish failure must stop the handoff retirement and the lease mint)
+chmod 555 "$ROOT/state/consumed"
+lf_consume_handoff ROWIO sessIO2 2>/dev/null; rc=$?
+chmod 755 "$ROOT/state/consumed"
+[ "$rc" -ne 0 ] && [ ! -e "$ROOT/state/consumed/ROWIO.gen$gio" ] \
+  && [ -e "$ROOT/state/handoffs/ROWIO.gen$gio" ] \
+  && [ -z "$(sed -n 's/^session=//p' "$ROOT/state/rows/ROWIO.lease")" ]
+check "an UNWRITABLE consumption journal aborts everything — no authority without the journal" $?
+# an UNSEARCHABLE jobs directory and a PLANTED subdirectory both abort the boundary
+gjd=$(lf_acquire ROWJD sessJD 600)
+chmod 600 "$ROOT/state/jobs"
+lf_commit_boundary ROWJD sessJD "$gjd" 2>/dev/null; rc=$?
+chmod 755 "$ROOT/state/jobs"
+[ "$rc" -ne 0 ] && [ ! -e "$ROOT/state/handoffs/ROWJD.gen$gjd" ]
+check "an UNSEARCHABLE jobs directory aborts the boundary (readable-but-unsearchable is an error)" $?
+mkdir "$ROOT/state/jobs/planted-dir"
+lf_commit_boundary ROWJD sessJD "$gjd" 2>/dev/null; rc=$?
+rmdir "$ROOT/state/jobs/planted-dir"
+[ "$rc" -ne 0 ] && [ ! -e "$ROOT/state/handoffs/ROWJD.gen$gjd" ]
+check "a planted non-file in the jobs ledger is an ERROR, never a silent no-match" $?
+lf_release ROWJD sessJD "$gjd"
 lf_consume_handoff ROWIO sessIO2 >/dev/null
 
 # ---- crash matrix: point-specific oracles AND proven injections ---------------------------------------------
@@ -337,6 +360,28 @@ check "recovery retires the leftover handoff and mints exactly the RECORDED succ
 CR="$ROOT/crash-after-handoff-write"
 LF_ROOT="$CR" lf_consume_handoff CROW s3 >/dev/null 2>&1; [ $? -eq 1 ]
 check "a handoff beside a live lease is unconsumable (no dual authority)" $?
+# the interrupted-boundary dead end (round-6 blocking 3): the owner crashed after the handoff
+# write, its lease then EXPIRES — recovery must report it and complete the boundary from
+# durable state, after which consumption proceeds normally
+sed -i 's/^expiry=.*/expiry=1/' "$CR/rows/CROW.lease"
+[ "$(LF_ROOT="$CR" lf_recover CROW)" = "boundary-incomplete" ]
+check "an expired owner with a written handoff is reported boundary-incomplete, never stranded" $?
+fin=$(LF_ROOT="$CR" lf_recover_boundary CROW)
+[ "$fin" = "s1" ] && grep -q '^last_session=s1$' "$CR/rows/CROW.lease"
+check "recover_boundary completes the release from durable state (last_session = the recorded owner)" $?
+g10=$(LF_ROOT="$CR" lf_consume_handoff CROW s4)
+[ -n "$g10" ]
+check "after boundary recovery the handoff consumes normally — no permanent dead end" $?
+# recover_finish refuses ambiguous multi-handoff state (cardinality holds through recovery):
+# a dedicated fixture driven to the interrupted-consumption state, plus a planted second handoff
+CRX="$ROOT/crash-multi"; mkdir -p "$CRX"
+( . tests/lifecycle/proto.sh; lf_init "$CRX" sup
+  g=$(lf_acquire CROW s1 600); lf_commit_boundary CROW s1 "$g"
+  LF_CRASH_POINT=after-consume-record lf_consume_handoff CROW s2 ) >/dev/null 2>&1
+printf 'row=CROW\nfrom_generation=9\nfrom_session=s9\njobs=\nsource=ledger\n' > "$CRX/handoffs/CROW.gen9"
+( . tests/lifecycle/proto.sh; LF_ROOT="$CRX" lf_recover_finish CROW ) >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 1 ] && [ "$(ls -1 "$CRX/handoffs/" | wc -l)" -eq 2 ]
+check "recover_finish refuses ambiguous MULTI-handoff state (one-handoff cardinality, nothing removed)" $?
 CR="$ROOT/crash-mkr"; mkdir -p "$CR"
 ( . tests/lifecycle/proto.sh; lf_init "$CR" sup
   g=$(lf_acquire CROW s1 600); lf_soft_trip CROW s1 "$g"
@@ -407,7 +452,10 @@ lf_kill sessM id-m ROWM "$gm" 2>/dev/null; [ $? -eq 1 ]
 check "a lease with a FORGED row field cannot authorize a kill (whole-schema authority)" $?
 [ "$(lf_recover ROWM)" = "invalid-lease" ]
 check "recovery reports invalid-lease for a forged record — never a promptable owner" $?
-sed -i 's/^row=.*/row=ROWM/' "$ROOT/state/rows/ROWM.lease"
+sed -i 's/^row=.*/row=ROWM/; s/^expiry=.*/expiry=bogus/' "$ROOT/state/rows/ROWM.lease"
+[ "$(lf_recover ROWM)" = "invalid-lease" ]
+check "recovery reports invalid-lease for a MALFORMED EXPIRY too — never an owner" $?
+sed -i "s/^expiry=.*/expiry=$(( $(date +%s) + 60 ))/" "$ROOT/state/rows/ROWM.lease"
 lf_release ROWM sessM "$gm"
 
 # ---- N=1 --------------------------------------------------------------------------------------------------------------
