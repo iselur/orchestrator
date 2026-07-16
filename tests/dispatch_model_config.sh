@@ -98,28 +98,18 @@ check("failover model missing from vendor_map refuses launch (exit 2)", load_res
 bad = copy.deepcopy(good); bad["cli_aliases"]["claude-fable-5"] = 7
 scratch.write_text(json.dumps(bad))
 check("non-string CLI alias refuses launch (exit 2)", load_result() == "exit2")
-# Round-2 review, finding 1: the config itself must satisfy "the reviewer is never the same
-# vendor as the author" for every review flow — same-vendor pairings refuse the launch.
+# Owner decision 2026-07-16: vendor pairing is config-authored, never policed — a same-vendor
+# config VALIDATES. The mechanical rule that remains: the failover pair may not span vendors
+# (the retry would switch CLIs mid-attempt).
+sv = copy.deepcopy(good)
+sv["roles"]["worker"]["model"] = "claude-sonnet-4-6"    # same vendor as the bound reviewer
+scratch.write_text(json.dumps(sv))
+check("same-vendor worker/bound-reviewer config VALIDATES (owner authority)",
+      load_result() == "ok")
 bad = copy.deepcopy(good)
-bad["roles"]["worker"]["model"] = "claude-sonnet-4-6"   # worker and bound reviewer both claude
+bad["reviewer_failover"]["fallback_model"] = "gpt-5.6-sol"   # claude trigger, codex fallback
 scratch.write_text(json.dumps(bad))
-check("same-vendor worker/bound-reviewer pairing refuses launch (exit 2)",
-      load_result() == "exit2")
-bad = copy.deepcopy(good)
-bad["reviewer_failover"]["fallback_model"] = "gpt-5.6-sol"   # codex fallback reviews codex worker
-scratch.write_text(json.dumps(bad))
-check("same-vendor worker/failover-fallback pairing refuses launch (exit 2)",
-      load_result() == "exit2")
-bad = copy.deepcopy(good)
-bad["roles"]["orchestrator_artifact_reviewer"]["model"] = "claude-opus-4-8"
-scratch.write_text(json.dumps(bad))
-check("same-vendor orchestrator/artifact-reviewer pairing refuses launch (exit 2)",
-      load_result() == "exit2")
-bad = copy.deepcopy(good)
-bad["roles"]["spec_author"]["model"] = "claude-sonnet-4-6"   # orchestrator reviews plans in-session
-scratch.write_text(json.dumps(bad))
-check("same-vendor spec-author/orchestrator pairing refuses launch (exit 2)",
-      load_result() == "exit2")
+check("cross-vendor failover pair refuses launch (exit 2)", load_result() == "exit2")
 # Round-2 review, finding 3: the models_check CLI itself (the shell consumers' path) must refuse
 # non-UTF-8 bytes with exit 2, not a decode traceback.
 import subprocess
@@ -151,8 +141,8 @@ check("resolver freezes failover pair and alias map from config",
       r["reviewer_failover_trigger"] == cfg["reviewer_failover"]["trigger_model"]
       and r["reviewer_fallback_model"] == cfg["reviewer_failover"]["fallback_model"]
       and r["cli_aliases"] == cfg["cli_aliases"])
-# Pins must be DECLARED, CROSS-VENDOR models to be honored (round-3 review, finding 2): the
-# resolver revalidates the RESOLVED pairing, so an approval pin cannot bypass never-same-vendor.
+# Pins must be DECLARED models (authorship classification) and never the worker itself
+# (self-review); vendor pairing is not policed (owner decision 2026-07-16).
 pinned = d.resolve_launch_models(
     {"worker_model": "gpt-5.6-sol", "worker_reasoning_effort": "low",
      "reviewer_model": "claude-opus-4-8", "reviewer_effort": "medium"}, cfg)
@@ -173,42 +163,30 @@ def resolve_result(approval):
     except SystemExit as e:
         return f"exit{e.code}"
 
-check("pinning the worker to the reviewers' vendor refuses launch (exit 2)",
-      resolve_result({"worker_model": "claude-sonnet-4-6"}) == "exit2")
-check("pinning the reviewer to the worker's vendor refuses launch (exit 2)",
-      resolve_result({"reviewer_model": "gpt-5.6-sol"}) == "exit2")
+# Same-vendor pins resolve freely; unmapped pins refuse; same-MODEL refuses always.
+check("same-vendor worker pin resolves (config/approval authority)",
+      d.resolve_launch_models({"worker_model": "claude-sonnet-4-6"}, cfg)
+      ["worker_model"] == "claude-sonnet-4-6")
 check("pinning an unmapped worker model refuses launch (exit 2)",
       resolve_result({"worker_model": "mystery-model-9"}) == "exit2")
 check("pinning an unmapped reviewer model refuses launch (exit 2)",
       resolve_result({"reviewer_model": "mystery-model-9"}) == "exit2")
-# With the default primary (== trigger) the failover is armed, so the fallback was part of the
-# accepted pairing above; the fallback stays claude while the worker pin is codex.
-check("armed failover keeps a cross-vendor fallback in the accepted pairing",
+check("armed failover keeps the config fallback in the resolved fields",
       d.resolve_launch_models({"worker_model": "gpt-5.6-sol"}, cfg)
       ["reviewer_fallback_model"] == cfg["reviewer_failover"]["fallback_model"])
-
-# Owner decision 2026-07-15: a same-vendor pairing IS permitted when the config defines it —
-# allow_same_vendor_review: true. The knob is explicit and boolean; declaration in vendor_map
-# stays mandatory either way (an unmapped model is never launchable).
-sv = copy.deepcopy(good)
-sv["allow_same_vendor_review"] = True
-sv["roles"]["worker"]["model"] = "claude-sonnet-4-6"   # same vendor as the bound reviewer
-scratch.write_text(json.dumps(sv))
-check("knob true: same-vendor config validates", load_result() == "ok")
-sv_cfg = d.load_model_config()
-check("knob true: same-vendor pin resolves instead of refusing",
-      d.resolve_launch_models({"worker_model": "claude-sonnet-4-6"}, sv_cfg)
-      ["worker_model"] == "claude-sonnet-4-6")
-def resolve_with(cfg_used, approval):
-    try:
-        d.resolve_launch_models(approval, cfg_used); return "ok"
-    except SystemExit as e:
-        return f"exit{e.code}"
-check("knob true: an UNMAPPED pin still refuses (declaration is not optional)",
-      resolve_with(sv_cfg, {"worker_model": "mystery-model-9"}) == "exit2")
-bad = copy.deepcopy(good); bad["allow_same_vendor_review"] = "yes"
-scratch.write_text(json.dumps(bad))
-check("non-boolean allow_same_vendor_review refuses launch (exit 2)", load_result() == "exit2")
+# "Nothing reviews its own work" — the one hard limit (CLAUDE.md rule 7): the resolved
+# reviewer, or an ARMED fallback, equal to the worker model refuses unconditionally.
+check("same-model reviewer==worker refuses launch (exit 2)",
+      resolve_result({"worker_model": "claude-fable-5"}) == "exit2")
+check("same-model pinned both ways refuses launch (exit 2)",
+      resolve_result({"worker_model": "gpt-5.6-sol",
+                      "reviewer_model": "gpt-5.6-sol"}) == "exit2")
+check("armed fallback equal to the worker refuses launch (exit 2)",
+      resolve_result({"worker_model": "claude-opus-4-8"}) == "exit2")
+check("same-vendor different-model pairing resolves (the falsifier shape)",
+      d.resolve_launch_models({"worker_model": "gpt-5.6-luna",
+                               "reviewer_model": "gpt-5.6-sol"}, cfg)
+      ["reviewer_model"] == "gpt-5.6-sol")
 
 # Alias map semantics: exact translation for listed ids, pass-through for everything else.
 aliases = cfg["cli_aliases"]

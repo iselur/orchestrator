@@ -17,8 +17,6 @@ ROLES = ("orchestrator", "spec_author", "utility_subagent", "worker",
          "bound_reviewer", "orchestrator_artifact_reviewer")
 VENDORS = ("claude", "codex")
 SECTIONS = ("schema_version", "roles", "reviewer_failover", "cli_aliases", "vendor_map")
-# Optional sections; absence means their default, never an error.
-OPTIONAL_SECTIONS = ("allow_same_vendor_review",)
 # Contradiction TRIPWIRE, not a classifier (round-1 review, finding 1): a name carrying a known
 # vendor prefix may not be declared as the other vendor — that misdeclaration is exactly what
 # would let same-vendor review pass. A name with no known prefix still needs its explicit
@@ -38,12 +36,10 @@ def validate(cfg) -> list:
     for k in SECTIONS:
         if k not in cfg:
             errs.append(f"missing required section: {k}")
-    for k in sorted(set(cfg) - set(SECTIONS) - set(OPTIONAL_SECTIONS)):
+    for k in sorted(set(cfg) - set(SECTIONS)):
         errs.append(f"unknown section: {k}")
     if "schema_version" in cfg and cfg["schema_version"] != "1":
         errs.append("schema_version must be the string '1'")
-    if not isinstance(cfg.get("allow_same_vendor_review", False), bool):
-        errs.append("allow_same_vendor_review must be a boolean")
 
     named_models = set()
     roles = cfg.get("roles")
@@ -109,47 +105,21 @@ def validate(cfg) -> list:
         for m in sorted(named_models - set(vm)):
             errs.append(f"model named in config but not declared in vendor_map: {m}")
 
-    # Cross-vendor role relationships (round-2 review, finding 1): by default the config must
-    # satisfy "the reviewer is never the same vendor as the author" for every review flow the
-    # repo runs — a same-vendor pairing is refused HERE, never left for a downstream CLI to trip
-    # over. Owner decision 2026-07-15 (in-session): a same-vendor pairing IS permitted when the
-    # config says so explicitly — allow_same_vendor_review: true, a deliberate one-line edit —
-    # so an accidental pairing still refuses while a declared experiment does not. Gates outside
-    # this config (scripts/review's self-review refusal, the cross-vendor PASS required to merge
-    # main) are unchanged by this knob.
-    #   worker authors diffs        → bound reviewer (primary, failover trigger, and fallback)
-    #   orchestrator authors artifacts → orchestrator_artifact_reviewer (scripts/review)
-    #   spec_author authors plans   → the orchestrator reviews them in-session
-    def role_model(name):
-        entry = roles.get(name)
-        return entry.get("model") if isinstance(entry, dict) else None
-
+    # Owner decision 2026-07-16: vendor PAIRING is the owner's call, made by editing this
+    # config — nothing here polices same- vs cross-vendor. Two mechanical rules remain:
+    # the failover pair must share one vendor (the frozen reviewer vendor must stay correct
+    # across the Fable→Opus retry — a cross-vendor fallback would be driven by the wrong CLI),
+    # and same-MODEL self-review is refused at resolution in dispatch.py ("nothing reviews its
+    # own work" — the one hard limit the rulebook keeps).
     def vendor(model):
         v = vm.get(model) if isinstance(model, str) else None
         return v if v in VENDORS else None
 
-    pairings = [
-        ("roles.worker", role_model("worker"),
-         "roles.bound_reviewer", role_model("bound_reviewer")),
-        ("roles.orchestrator", role_model("orchestrator"),
-         "roles.orchestrator_artifact_reviewer", role_model("orchestrator_artifact_reviewer")),
-        ("roles.spec_author", role_model("spec_author"),
-         "roles.orchestrator", role_model("orchestrator")),
-    ]
     if isinstance(fo, dict):
-        pairings += [
-            ("roles.worker", role_model("worker"),
-             "reviewer_failover.trigger_model", fo.get("trigger_model")),
-            ("roles.worker", role_model("worker"),
-             "reviewer_failover.fallback_model", fo.get("fallback_model")),
-        ]
-    if cfg.get("allow_same_vendor_review", False) is not True:
-        for author_key, author_model, reviewer_key, reviewer_model in pairings:
-            av, rv = vendor(author_model), vendor(reviewer_model)
-            if av is not None and av == rv:
-                errs.append(f"same-vendor review pairing: {author_key} ({author_model}) and "
-                            f"{reviewer_key} ({reviewer_model}) are both {av} "
-                            f"(set allow_same_vendor_review: true to permit deliberately)")
+        tv, fv = vendor(fo.get("trigger_model")), vendor(fo.get("fallback_model"))
+        if tv is not None and fv is not None and tv != fv:
+            errs.append(f"reviewer_failover pair spans vendors ({tv} → {fv}): the retry would "
+                        f"switch CLIs mid-attempt; trigger and fallback must share a vendor")
     return errs
 
 
