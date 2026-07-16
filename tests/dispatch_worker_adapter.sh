@@ -107,6 +107,34 @@ check("zero exit classifies as completion (None)",
 check("completed turn + nonzero exit still classifies as completion (pre-refactor rule)",
       w.classify_error(1, "warning noise", raw) is None)
 
+# ---- composed isolated service environment (round-2 major) --------------------------------
+# Pin the ACTUAL --setenv set isolated_run hands systemd, not just the adapter method's return:
+# every isolated unit keeps the pre-Job-2 base env (incl. CODEX_HOME — a spec test_command may
+# read it), and the worker call's adapter env_extra merges to the same single value.
+import subprocess as _sp
+captured = {}
+_orig_run = _sp.run
+def _capture(cmd, **kw):
+    captured["cmd"] = cmd
+    class R: returncode = 0
+    return R()
+d.subprocess.run = _capture
+try:
+    d.isolated_run("t-unit", ["true"], cwd=None, rw_paths=[], private_network=True,
+                   ceiling_s=1, stdout=None, stderr=None)
+    base_setenv = [a for a in captured["cmd"] if a.startswith("--setenv=")]
+    check("base isolated env still carries CODEX_HOME (non-worker units unchanged)",
+          "--setenv=CODEX_HOME=/home/codex-worker/.codex" in base_setenv
+          and "--setenv=HOME=/home/codex-worker" in base_setenv)
+    d.isolated_run("w-unit", ["true"], cwd=None, rw_paths=[], private_network=False,
+                   ceiling_s=1, stdout=None, stderr=None,
+                   env_extra=w.iso_env_extra(pathlib.Path("/home/codex-worker")))
+    worker_setenv = [a for a in captured["cmd"] if a.startswith("--setenv=CODEX_HOME=")]
+    check("worker call composes to exactly one CODEX_HOME at the pre-refactor value",
+          worker_setenv == ["--setenv=CODEX_HOME=/home/codex-worker/.codex"])
+finally:
+    d.subprocess.run = _orig_run
+
 # ---- integrate branch-deletion guard (round-1 BLOCKING) -----------------------------------
 check("frozen codex/<aid> branch validates for its own attempt",
       d.valid_attempt_branch("codex/SPEC-000-1", "SPEC-000-1"))

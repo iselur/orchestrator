@@ -1650,13 +1650,16 @@ def isolated_run(unit, argv, cwd, rw_paths, private_network, ceiling_s, stdout, 
     # refs/replace, so a grader's OWN in-process `git` object reads would still resolve replacement
     # objects unless the child's environment disables them. Export it into every hardened grader
     # unit (candidate-isolated + regression phases + the spec test_command all route through here).
-    # R73 Job 2 round-1 review: vendor auth/state variables (CODEX_HOME) are adapter surface,
-    # not role envelope — the worker call site passes them via env_extra
-    # (worker_adapter.iso_env_extra). Dropping the hardcode is value-identical for every other
-    # unit: nothing else here runs a vendor CLI, and codex's default state dir under
-    # HOME=WORKER_HOME is the same path the removed variable named.
+    # R73 Job 2 rounds 1+2: the worker's vendor auth/state variables are adapter surface — the
+    # worker call site supplies them via env_extra (worker_adapter.iso_env_extra), which
+    # OVERRIDES this base by dict merge, so a Job 3 vendor injects its own without touching
+    # other units. CODEX_HOME itself STAYS in the base env (round-2 review): every isolated
+    # unit — runtime probes, spec test_command, regression and integration graders — carried it
+    # before Job 2, and a test_command reading $CODEX_HOME must not change terminal status
+    # under a behavior-identical refactor. Retiring the legacy base variable is Job 3 work,
+    # reviewable together with the non-worker units' environment contract.
     envs = {"HOME": str(WORKER_HOME), "PATH": "/usr/bin:/bin",
-            "TERM": "dumb", "LANG": "C.UTF-8",
+            "CODEX_HOME": str(WORKER_HOME / ".codex"), "TERM": "dumb", "LANG": "C.UTF-8",
             "GIT_NO_REPLACE_OBJECTS": "1", **(env_extra or {})}
     setenvs = [f"--setenv={k}={v}" for k, v in envs.items()]
     cmd = ["sudo", "-n", "systemd-run", f"--uid={WORKER_USER}", f"--gid={WORKER_USER}",
