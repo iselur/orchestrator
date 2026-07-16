@@ -104,6 +104,7 @@ cat > "$F/ps" <<'FAKE'
 #   FAKE_PS_ADD_ROW      extra row printed once the call count exceeds FAKE_PS_ADD_AFTER
 #   FAKE_PS_MAKE_HALT    HALT path touched from call FAKE_PS_MAKE_HALT_ON (default 1) onward
 n=$(cat "$FAKE_PS_COUNT" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$FAKE_PS_COUNT"
+echo "ps $*" >> "$FAKE_TMUX_STATE/invocations.log"   # shared log: adjacency assertions read the ORDER
 [ -n "${FAKE_PS_MAKE_HALT:-}" ] && [ "${FAKE_PS_MAKE_HALT_ON:-1}" -le "$n" ] && touch "$FAKE_PS_MAKE_HALT"
 [ -n "${FAKE_PS_FAIL:-}" ] && exit 3
 [ "$*" = "-eo pid=,ppid=,comm=" ] || exit 1
@@ -135,6 +136,16 @@ invoked() { # count of a given tmux subcommand; a missing log means zero calls, 
   grep -c "^tmux $1" "$TS/invocations.log" || true
 }
 dead_pane() { echo bash > "$TS/sessions/orch-auto.cmd"; }
+bind_session() { # record the ownership binding a real launch would have written ($0:100:500 is the
+  # fake tmux's constant pane triple) — hand-built sessions need it now that every action verifies it
+  mkdir -p "$WDIR"
+  printf '$0:100:500\n' > "$TS/sessions/orch-auto.pane"
+  printf '$0:100:500\n' > "$WDIR/pane"
+}
+adjacent() { # $1 action regex: the invocation logged immediately before the LAST such action must
+  # be the barrier's process-table read — proof that nothing external runs between check and action
+  awk -v act="$1" '{l[NR]=$0} END{for(i=NR;i>1;i--) if (l[i] ~ act) { exit (l[i-1] ~ /^ps / ? 0 : 1) }; exit 1}' "$TS/invocations.log"
+}
 alert_env() { # configure a complete owner alert channel
   mkdir -p "$WDIR"
   printf 'ALERT_URL=https://alerts.invalid/topic\nALERT_TOKEN=drill-token\n' >> "$WDIR/env"
@@ -165,8 +176,8 @@ echo "== W2: no pending work -> no launch; a dead idle pane is ROTATED (torn dow
 reset
 run_wd
 [ "$(invoked new-session)" = "0" ] && [ -z "$(keys)" ] && ok "idle: no session, no keys" || bad "idle run acted"
-mkdir -p "$TS/sessions"; touch "$TS/sessions/orch-auto"; dead_pane
-mkdir -p "$WDIR"; printf '00000000-0000-4000-8000-000000000099\n' > "$WDIR/session-id"; printf '00000000-0000-4000-8000-000000000099\n' > "$WDIR/launched"
+mkdir -p "$TS/sessions"; touch "$TS/sessions/orch-auto"; dead_pane; bind_session
+printf '00000000-0000-4000-8000-000000000099\n' > "$WDIR/session-id"; printf '00000000-0000-4000-8000-000000000099\n' > "$WDIR/launched"
 run_wd
 [ -z "$(keys)" ] && ok "rotation typed nothing" || bad "rotation sent input"
 [ ! -e "$TS/sessions/orch-auto" ] && ok "dead idle session torn down" || bad "dead idle session survived rotation"
@@ -178,8 +189,8 @@ grep -q -- '--resume' <(keys) && bad "post-rotation wake resumed a retired conve
 
 echo "== W2b: rotation respects a LIVE idle session and survives a failed kill"
 reset
-mkdir -p "$TS/sessions"; touch "$TS/sessions/orch-auto"; echo claude > "$TS/sessions/orch-auto.cmd"
-printf '00000000-0000-4000-8000-000000000099\n' > "$WDIR/session-id" 2>/dev/null || { mkdir -p "$WDIR"; printf '00000000-0000-4000-8000-000000000099\n' > "$WDIR/session-id"; }
+mkdir -p "$TS/sessions"; touch "$TS/sessions/orch-auto"; echo claude > "$TS/sessions/orch-auto.cmd"; bind_session
+printf '00000000-0000-4000-8000-000000000099\n' > "$WDIR/session-id"
 run_wd
 [ -e "$TS/sessions/orch-auto" ] && ok "live idle session left alone (rotation is session-initiated)" || bad "rotation killed a LIVE session"
 dead_pane
@@ -680,8 +691,7 @@ run_wd
 
 echo "== W18j: idle rotation is deferred during standby, never a teardown over a user's head"
 reset                                               # no open row: IDLE state
-mkdir -p "$TS/sessions"; touch "$TS/sessions/orch-auto"; dead_pane
-mkdir -p "$WDIR"
+mkdir -p "$TS/sessions"; touch "$TS/sessions/orch-auto"; dead_pane; bind_session
 printf '00000000-0000-4000-8000-000000000099\n' > "$WDIR/session-id"
 printf '00000000-0000-4000-8000-000000000099\n' > "$WDIR/launched"
 ps_table "4242 1 claude"
@@ -721,8 +731,7 @@ run_wd
 
 echo "== W18m: a claude appearing before an idle ROTATION is caught at the kill gate"
 reset                                               # no open row: IDLE
-mkdir -p "$TS/sessions"; touch "$TS/sessions/orch-auto"; dead_pane
-mkdir -p "$WDIR"
+mkdir -p "$TS/sessions"; touch "$TS/sessions/orch-auto"; dead_pane; bind_session
 printf '00000000-0000-4000-8000-000000000099\n' > "$WDIR/session-id"
 rm -f "$FAKE_PS_COUNT"
 export FAKE_PS_ADD_ROW="7777 1 claude" FAKE_PS_ADD_AFTER=1
@@ -754,6 +763,108 @@ n_before=$(keys | wc -l)
 run_wd
 unset FAKE_PS_MAKE_HALT FAKE_PS_MAKE_HALT_ON
 [ "$(keys | wc -l)" = "$n_before" ] && ok "HALT during the respawn barrier: no --resume sent" || bad "input sent despite mid-barrier HALT"
+rm -f "$R/.orchestrator/HALT"
+
+echo "== W19: a foreign same-name session is never typed into — respawn refuses VISIBLY"
+# The shape round 3 found: NO claude runs anywhere (standby never triggers), the session name
+# exists, but it is not the session this watchdog created.
+reset; open_row
+run_wd                                              # launch; binding '$0:100:500' recorded
+dead_pane
+printf '$7:900:800\n' > "$TS/sessions/orch-auto.pane"   # owner recreated the session: new identity
+n_before=$(keys | wc -l)
+run_wd                                              # PENDING + dead pane -> respawn path
+[ "$(keys | wc -l)" = "$n_before" ] && ok "respawn refused: nothing typed into the foreign session" || bad "respawn typed into a foreign session"
+[ -e "$TS/sessions/orch-auto" ] && ok "foreign session left alive" || bad "foreign session killed"
+[ -e "$WDIR/ALERT-foreign-session" ] && ok "refusal is visible (foreign-session alert)" || bad "refusal silent"
+
+echo "== W19b: incomplete-launch teardown refuses a foreign session"
+reset; open_row
+export FAKE_TMUX_FAIL=send-keys
+run_wd                                              # incomplete launch: binding recorded, no launched marker
+unset FAKE_TMUX_FAIL
+printf '$7:900:800\n' > "$TS/sessions/orch-auto.pane"
+run_wd                                              # teardown path
+[ -e "$TS/sessions/orch-auto" ] && ok "teardown refused: foreign session survives" || bad "teardown killed a foreign session"
+[ -e "$WDIR/session-id" ] && ok "our state kept (nothing laundered)" || bad "state erased on a refusal"
+[ -e "$WDIR/ALERT-foreign-session" ] && ok "teardown refusal visible" || bad "teardown refusal silent"
+
+echo "== W19c: idle rotation refuses a foreign session"
+reset                                               # no open row: IDLE
+mkdir -p "$TS/sessions"; touch "$TS/sessions/orch-auto"; dead_pane; bind_session
+printf '00000000-0000-4000-8000-000000000099\n' > "$WDIR/session-id"
+printf '00000000-0000-4000-8000-000000000099\n' > "$WDIR/launched"
+printf '$7:900:800\n' > "$TS/sessions/orch-auto.pane"
+run_wd
+[ -e "$TS/sessions/orch-auto" ] && [ -e "$WDIR/session-id" ] && ok "rotation refused: session and state kept" || bad "rotation acted on a foreign session"
+[ -e "$WDIR/ALERT-foreign-session" ] && ok "rotation refusal visible" || bad "rotation refusal silent"
+
+echo "== W19d: an armed ACTIVE retry refuses a foreign session, and the wait stays armed"
+reset; open_row
+run_wd
+printf 'USAGE_RETRY_MODE=active\n' > "$WDIR/env"; chmod 600 "$WDIR/env"
+gen=$(cat "$WDIR/generation")
+echo "$(( $(date +%s) - 60 )) $gen drill.sed" > "$WDIR/usage-wait"
+printf '$7:900:800\n' > "$TS/sessions/orch-auto.pane"
+n_before=$(keys | wc -l)
+run_wd
+[ "$(keys | wc -l)" = "$n_before" ] && ok "retry refused: nothing typed" || bad "retry typed into a foreign session"
+[ -e "$WDIR/usage-wait" ] && ok "the wait stays armed" || bad "wait consumed on a refusal"
+[ -e "$WDIR/ALERT-foreign-session" ] && ok "retry refusal visible" || bad "retry refusal silent"
+
+echo "== W19e: a missing binding record refuses the action — nothing ever acts on the bare name"
+reset; open_row
+run_wd
+dead_pane
+rm -f "$WDIR/pane"
+n_before=$(keys | wc -l)
+run_wd
+[ "$(keys | wc -l)" = "$n_before" ] && [ -e "$TS/sessions/orch-auto" ] && ok "no binding record: respawn refused, session untouched" || bad "action ran without a binding record"
+[ -e "$WDIR/ALERT-foreign-session" ] && ok "missing-record refusal visible" || bad "missing-record refusal silent"
+
+echo "== W19f: a send failure keeps the retry armed instead of silently spending it"
+reset; open_row
+run_wd
+printf 'USAGE_RETRY_MODE=active\n' > "$WDIR/env"; chmod 600 "$WDIR/env"
+gen=$(cat "$WDIR/generation")
+echo "$(( $(date +%s) - 60 )) $gen drill.sed" > "$WDIR/usage-wait"
+export FAKE_TMUX_FAIL=send-keys
+run_wd
+unset FAKE_TMUX_FAIL
+[ -e "$WDIR/usage-wait" ] && ok "failed send: wait stays armed for the next tick" || bad "failed send consumed the wait"
+run_wd
+keys | tail -1 | grep -q "usage window has reset" && [ ! -e "$WDIR/usage-wait" ] \
+  && ok "retry delivered next tick and the wait was consumed" || bad "armed wait never delivered"
+
+echo "== W20: barrier adjacency — the process-table read is the LAST external call before each action"
+reset; open_row
+run_wd                                              # (a) initial send
+adjacent 'tmux send-keys' && ok "launch: presence read immediately precedes the send" || bad "launch: something external runs between the barrier and the send"
+dead_pane
+run_wd                                              # (b) respawn send
+adjacent 'tmux send-keys' && ok "respawn: presence read immediately precedes the send" || bad "respawn: barrier not adjacent to the send"
+printf 'USAGE_RETRY_MODE=active\n' > "$WDIR/env"; chmod 600 "$WDIR/env"
+gen=$(cat "$WDIR/generation")
+echo "$(( $(date +%s) - 60 )) $gen drill.sed" > "$WDIR/usage-wait"
+run_wd                                              # (c) retry send
+adjacent 'tmux send-keys' && ok "retry: presence read immediately precedes the send" || bad "retry: barrier not adjacent to the send"
+reset
+mkdir -p "$TS/sessions"; touch "$TS/sessions/orch-auto"; dead_pane; bind_session
+printf '00000000-0000-4000-8000-000000000099\n' > "$WDIR/session-id"
+printf '00000000-0000-4000-8000-000000000099\n' > "$WDIR/launched"
+run_wd                                              # idle rotation kill
+adjacent 'tmux kill-session' && ok "rotation: presence read immediately precedes the kill" || bad "rotation: barrier not adjacent to the kill"
+
+echo "== W21: HALT landing during the idle-alert barrier detection — no record touched, no raise"
+reset; open_row
+run_wd                                              # launch
+echo "$(( $(date +%s) - 30000 ))" > "$WDIR/last-run"
+printf 'ts=1\ntype=idle\nmsg=old\nsent=1\n' > "$WDIR/ALERT-idle"   # expired: the dedup decision says delete
+rm -f "$FAKE_PS_COUNT"
+export FAKE_PS_MAKE_HALT="$R/.orchestrator/HALT" FAKE_PS_MAKE_HALT_ON=2
+run_wd                                              # entry detection clean; the idle barrier read injects HALT
+unset FAKE_PS_MAKE_HALT FAKE_PS_MAKE_HALT_ON
+grep -q '^sent=1' "$WDIR/ALERT-idle" && ok "mid-barrier HALT: expired idle record neither deleted nor re-raised" || bad "idle record touched despite HALT"
 rm -f "$R/.orchestrator/HALT"
 
 if [ "$fails" -eq 0 ]; then echo "PASS auto_resume_watchdog.sh"; else echo "FAIL auto_resume_watchdog.sh"; exit 1; fi
