@@ -32,8 +32,8 @@ untouched → in scope → tests actually ran → cross-vendor review), and open
 
 - Specs: `specs/SPEC-NNN.yaml`, schema `specs/spec.schema.json`. Immutable once approved; never
   regex-parsed. Approval files in `.orchestrator/approvals/<digest>.json`.
-- Branches: worker branches `codex/SPEC-NNN-<attempt>`; PRs target `ready-for-main`; only the owner
-  promotes `ready-for-main` → `main`. Both protected by ruleset.
+- Branches: worker branches `codex/SPEC-NNN-<attempt>`; PRs target `ready-for-main`; promotion to
+  `main` is the owner's, or the orchestrator's under the CLAUDE.md grant. Both protected by ruleset.
 - Worker isolation: the worker and the gate tests run as the `codex-worker` user in hardened systemd
   services; worktrees under `/srv/codexwork/worktrees`. Setup: `scripts/setup-worker-user.sh`.
   Proof: `tests/worker_isolation.sh`, `tests/worker_userns.sh`.
@@ -56,5 +56,5 @@ untouched → in scope → tests actually ran → cross-vendor review), and open
   `--author`, refuses Codex-authored artifacts, counts rounds, refuses a fourth). Codex-authored work
   is reviewed by Claude — worker diffs by the bound reviewer in the dispatcher, plans in-session —
   under the same three-round cap.
-- Plans go through `scripts/codex-plan`: `--small` (cap 40), default (cap 250), `--brief` (cap 400,
-  and it refuses a brief missing any required section). Tiers and triggers: CLAUDE.md rule 5.
+- Plans go through `scripts/codex-plan --brief` (cap 400; refuses a brief missing any required
+  section); `--small` and the no-flag standard tier remain usable. Trigger: CLAUDE.md rule 5.
