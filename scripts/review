@@ -103,8 +103,9 @@ classify_model() {
 # skip the fail-closed refusal in the caller. On any problem it prints 'error<TAB>reason' instead;
 # the caller (main shell) is the one that turns that into a refusal.
 derive_one() {
-  # Emits one TAB-separated line: <vendor-or-'error'>\t<plan_id-or-empty>\t<note>. plan_id is the
-  # bare PLAN digits for a codex-plan artifact (used to bind the round dir), empty otherwise. Runs
+  # Emits one TAB-separated line: <vendor-or-'error'>\t<plan_id-or-'-'>\t<note>. plan_id is the bare
+  # PLAN digits for a codex-plan artifact (used to bind the round dir), the sentinel '-' otherwise
+  # (a non-empty field so a two-consecutive-tab collapse under IFS can never shift the columns). Runs
   # inside a command substitution, so EVERY failure path prints 'error\t...' and returns 0 — an
   # `exit` here would be swallowed by the subshell and skip the caller's fail-closed refusal.
   local f="$1" real
@@ -112,6 +113,154 @@ derive_one() {
     printf 'error\t-\tcannot resolve context path: %s\n' "$f"
     return 0
   fi
+
+  # STEP 1 — PLAN IDENTITY, from content, independent of location. A codex-plan artifact's identity
+  #   is a top-level `id: PLAN-NNN` in its YAML frontmatter; `author_model:` (also top-level) is the
+  #   provenance beside it. This is extracted BEFORE the location cascade so a PLAN file binds to its
+  #   id no matter WHERE it sits — including inside a dispatch attempt, where a round-3 review found
+  #   the id was dropped (plan_id='-'), letting a Claude attempt re-review one plan under fresh topics
+  #   and a Codex attempt exit 4 instead of the required topic-mismatch/multiple-plan refusal. Keying
+  #   on the NAME alone was a laundering hole: `ln PLAN-001.md note.md` gave a Sol plan a non-reserved
+  #   name and derived it 'claude'. Content cannot be renamed away, so the frontmatter PLAN id is the
+  #   signal; the reserved PLAN-NNN.{md,stdout,stderr} name is kept only so (a) a broken/absent
+  #   frontmatter under that name still refuses, (b) a .stdout/.stderr (no frontmatter of its own)
+  #   finds its sibling .md, and (c) a reserved name whose frontmatter id DISAGREES with the name
+  #   refuses — a mismatched or symlinked sibling must never move a stream artifact to a fresh round
+  #   dir. author_model alone is NOT the signature: an ordinary doc that merely carries an
+  #   `author_model:` key but no PLAN id is not a plan and keeps its caller-chosen topic. The
+  #   frontmatter is parsed by a REAL YAML parser (PyYAML safe_load with a duplicate-key-rejecting
+  #   loader): a regex approximation missed valid-YAML spellings — `author_model :`, `"author_model":`,
+  #   `id: PLAN-401 # comment` — that a round-3 review showed could hide a conflicting key or drop a
+  #   plan id, laundering provenance. The author VENDOR is the frontmatter author_model via
+  #   models.json's vendor_map — spec_author is a role, not a vendor, so an unconditional 'codex'
+  #   would misclassify the instant the owner flips that role. Every failure refuses (fail closed): a
+  #   reserved name that lacks or disagrees with its frontmatter, a missing sibling .md, a duplicate
+  #   key, a malformed or unmapped author_model, PyYAML absent, a parser exiting nonzero, or an
+  #   unrecognized status — at worst a broken-provenance artifact is refused (safe), never 'claude'.
+  local base="${real##*/}" md_file="" named_plan=0 expect_pid=""
+  if [[ "$base" =~ ^PLAN-([0-9]+)\.(stdout|stderr)$ ]]; then
+    named_plan=1
+    expect_pid="${BASH_REMATCH[1]}"
+    md_file="${real%.*}.md"
+    if [[ ! -f "$md_file" ]]; then
+      printf 'error\t-\t%s carries codex-plan .%s naming but its sibling %s is missing; provenance cannot be read\n' "$f" "${base##*.}" "$md_file"
+      return 0
+    fi
+  elif [[ "$base" =~ ^PLAN-([0-9]+)\.md$ ]]; then
+    named_plan=1
+    expect_pid="${BASH_REMATCH[1]}"
+    md_file="$real"
+  elif [[ "$base" == *.md ]]; then
+    md_file="$real"   # inspect content; may or may not carry codex-plan frontmatter
+  fi
+  local plan_id="-" plan_vendor="" plan_model=""
+  if [[ -n "$md_file" ]]; then
+    local parsed prc pstatus pid pmodel vendor
+    parsed=$(python3 - "$md_file" <<'PYEOF'
+import re, sys
+try:
+    content = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+except Exception:
+    print("readfail"); sys.exit(0)
+try:
+    import yaml
+except Exception:
+    # No YAML parser to read provenance from — refuse rather than guess. Fail-closed: a legitimate
+    # plan is (safely) blocked, never laundered into 'claude'.
+    print("noyaml"); sys.exit(0)
+
+m = re.match(r"^---\r?\n(.*?)\r?\n---\r?\n", content, re.DOTALL)
+if not m:
+    print("notplan"); sys.exit(0)
+block = m.group(1)
+
+# A duplicate top-level key is ambiguous provenance; PyYAML's default silently keeps the last, so
+# reject it explicitly. This also catches the valid-YAML spellings a regex missed — `author_model :`,
+# `"author_model":` — because they construct the SAME mapping key as a plain `author_model:` and so
+# collide here. An indented would-be duplicate is not valid YAML under a scalar and raises on parse.
+class DupKey(Exception):
+    pass
+class StrictLoader(yaml.SafeLoader):
+    pass
+def _no_dup(loader, node, deep=False):
+    mapping = {}
+    for k_node, v_node in node.value:
+        k = loader.construct_object(k_node, deep=deep)
+        if k in mapping:
+            raise DupKey(k)
+        mapping[k] = loader.construct_object(v_node, deep=deep)
+    return mapping
+StrictLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _no_dup)
+
+try:
+    data = yaml.load(block, Loader=StrictLoader)
+except DupKey as e:
+    print("broken\tduplicate '%s' key in frontmatter — ambiguous provenance" % (e.args[0],)); sys.exit(0)
+except Exception:
+    print("broken\tunparseable YAML frontmatter — refuse rather than guess"); sys.exit(0)
+
+if not isinstance(data, dict):
+    print("notplan"); sys.exit(0)
+
+# IDENTITY: a top-level PLAN id. No PLAN id -> not a codex-plan artifact, keep the caller topic. An
+# `author_model:` key on its own does NOT make an ordinary doc a plan.
+idv = data.get("id")
+if not (isinstance(idv, str) and re.fullmatch(r'PLAN-[0-9]+', idv)):
+    print("notplan"); sys.exit(0)
+
+# From here the file claims codex-plan identity; missing or malformed provenance must refuse.
+amv = data.get("author_model")
+if amv is None:
+    print("broken\tplan id present but no 'author_model:' — no provenance"); sys.exit(0)
+if not (isinstance(amv, str) and re.fullmatch(r'[A-Za-z0-9._-]+', amv)):
+    print("broken\tmalformed author_model value %r" % (amv,)); sys.exit(0)
+
+print("ok\t%s\t%s" % (idv.split("-", 1)[1], amv))
+PYEOF
+    )
+    prc=$?
+    if (( prc != 0 )); then
+      printf 'error\t-\t%s: frontmatter parser exited nonzero (%d); refuse rather than guess\n' "$md_file" "$prc"
+      return 0
+    fi
+    IFS=$'\t' read -r pstatus pid pmodel <<<"$parsed"
+    case "$pstatus" in
+      readfail)
+        printf 'error\t-\t%s: cannot read for the codex-plan frontmatter check\n' "$md_file"
+        return 0 ;;
+      noyaml)
+        printf 'error\t-\t%s: no YAML parser available to read plan frontmatter; refuse rather than guess\n' "$md_file"
+        return 0 ;;
+      broken)
+        printf 'error\t-\t%s: %s (fail closed)\n' "$md_file" "$pid"
+        return 0 ;;
+      ok)
+        if (( named_plan )) && [[ "$pid" != "$expect_pid" ]]; then
+          printf 'error\t-\t%s uses codex-plan reserved name PLAN-%s but its frontmatter id is PLAN-%s; provenance mismatch, refuse rather than bind the wrong artifact\n' "$f" "$expect_pid" "$pid"
+          return 0
+        fi
+        vendor=$(classify_model "$pmodel")
+        if [[ "$vendor" != "claude" && "$vendor" != "codex" ]]; then
+          printf 'error\t-\t%s frontmatter author_model %s does not match a known vendor; refuse rather than guess\n' "$md_file" "$pmodel"
+          return 0
+        fi
+        plan_id="$pid"; plan_vendor="$vendor"; plan_model="$pmodel" ;;
+      notplan)
+        if (( named_plan )); then
+          printf 'error\t-\t%s uses codex-plan reserved name PLAN-NNN but lacks its frontmatter (top-level id: PLAN-NNN + author_model); provenance cannot be read\n' "$md_file"
+          return 0
+        fi
+        ;;  # a non-reserved .md with no plan frontmatter — not a plan; plan_id stays '-'
+      *)
+        printf 'error\t-\t%s: unrecognized frontmatter parser status; refuse rather than guess\n' "$md_file"
+        return 0 ;;
+    esac
+  fi
+
+  # STEP 2 — VENDOR BY LOCATION. Every branch emits $plan_id, so a PLAN artifact stays bound to its
+  #   id wherever it lives; for a non-plan context plan_id is '-'. A plan resolved in STEP 1 leaves
+  #   here through branch 1 (inside an attempt) or branch 2 (outside one); branches 3–5 are reached
+  #   only by non-plan contexts, where plan_id is '-'.
 
   # 1. Inside a recorded dispatch attempt: derive from THAT attempt's own launch.json, written by
   #    scripts/dispatch.py before this script could ever be invoked on it — never from the flag.
@@ -144,148 +293,27 @@ print(d.get('worker_model') or '')
       printf 'error\t-\t%s worker_model %s does not match a known vendor; refuse rather than guess\n' "$lc" "$wm"
       return 0
     fi
-    printf '%s\t-\tattempt %s/%s launch.json worker_model=%s\n' "$vendor" "$spec" "$n" "$wm"
+    # A PLAN file inside an attempt has two independent provenance records: the attempt's launch.json
+    # worker_model and the plan's own frontmatter author_model. They must AGREE — a conflict is
+    # ambiguous provenance and refuses, so a Claude attempt cannot host a Sol-authored plan (or vice
+    # versa) to launder its vendor.
+    if [[ -n "$plan_vendor" && "$plan_vendor" != "$vendor" ]]; then
+      printf 'error\t-\t%s is PLAN-%s (frontmatter author_model=%s -> %s) inside attempt %s/%s whose launch.json worker_model=%s -> %s; provenance conflict, refuse rather than guess\n' "$f" "$plan_id" "$plan_model" "$plan_vendor" "$spec" "$n" "$wm" "$vendor"
+      return 0
+    fi
+    printf '%s\t%s\tattempt %s/%s launch.json worker_model=%s\n' "$vendor" "$plan_id" "$spec" "$n" "$wm"
     return 0
   fi
 
-  # 2. A codex-plan artifact. IDENTITY is a top-level `id: PLAN-NNN` line in the file's YAML
-  #    frontmatter, written by codex-plan at allocation time; `author_model:` (also top-level) is the
-  #    provenance beside it. Keying on the NAME alone was a laundering hole: `ln PLAN-001.md note.md`
-  #    (or any rename) gave a Sol plan a non-reserved name and derived it 'claude'. Content cannot be
-  #    renamed away, so the frontmatter PLAN id is the signal; the reserved PLAN-NNN.{md,stdout,stderr}
-  #    name is kept only so (a) a broken/absent frontmatter under that name still refuses, (b) a
-  #    .stdout/.stderr (which has no frontmatter of its own) can find its sibling .md, and (c) a
-  #    reserved name whose frontmatter id DISAGREES with the name refuses — a mismatched or symlinked
-  #    sibling must never move a stream artifact to a fresh round dir. author_model alone is NOT the
-  #    signature: an ordinary doc that merely carries an `author_model:` key but no PLAN id is not a
-  #    plan and keeps its caller-chosen topic. This runs AFTER the attempt check, so a PLAN file
-  #    inside an attempt still derives from launch.json. The author VENDOR is the frontmatter
-  #    author_model via models.json's vendor_map — spec_author is a role, not a vendor, so an
-  #    unconditional 'codex' would misclassify the instant the owner flips that role. Every failure
-  #    refuses (fail closed): a reserved name that lacks or disagrees with its frontmatter, a missing
-  #    sibling .md, duplicate or indented keys, an unbalanced-quoted or unmapped author_model, a
-  #    parser that exits nonzero, or an unrecognized parser status — at worst a broken-provenance
-  #    artifact is refused (safe), never laundered into 'claude'.
-  local base="${real##*/}" md_file="" named_plan=0 expect_pid=""
-  if [[ "$base" =~ ^PLAN-([0-9]+)\.(stdout|stderr)$ ]]; then
-    named_plan=1
-    expect_pid="${BASH_REMATCH[1]}"
-    md_file="${real%.*}.md"
-    if [[ ! -f "$md_file" ]]; then
-      printf 'error\t-\t%s carries codex-plan .%s naming but its sibling %s is missing; provenance cannot be read\n' "$f" "${base##*.}" "$md_file"
-      return 0
-    fi
-  elif [[ "$base" =~ ^PLAN-([0-9]+)\.md$ ]]; then
-    named_plan=1
-    expect_pid="${BASH_REMATCH[1]}"
-    md_file="$real"
-  elif [[ "$base" == *.md ]]; then
-    md_file="$real"   # inspect content; may or may not carry codex-plan frontmatter
-  fi
-  if [[ -n "$md_file" ]]; then
-    local parsed prc pstatus pid pmodel vendor
-    parsed=$(python3 - "$md_file" <<'PYEOF'
-import re, sys
-try:
-    content = open(sys.argv[1], encoding="utf-8", errors="replace").read()
-except Exception:
-    print("readfail"); sys.exit(0)
-m = re.match(r"^---\r?\n(.*?)\r?\n---\r?\n", content, re.DOTALL)
-if not m:
-    print("notplan"); sys.exit(0)
-body = m.group(1)
-
-def occurrences(key):
-    # Every frontmatter line whose first token is `key:`, whether or not it is indented. The
-    # indent is captured so an indented duplicate (nested mapping, block scalar) still counts
-    # toward ambiguity — it must not be silently ignored.
-    out = []
-    for line in body.splitlines():
-        mm = re.match(r'^([ \t]*)([A-Za-z0-9_]+):[ \t]*(.*?)[ \t]*$', line)
-        if mm and mm.group(2) == key:
-            out.append((mm.group(1), mm.group(3)))
-    return out
-
-def unquote(v):
-    if len(v) >= 2 and v[0] in "\"'" and v[-1] == v[0]:
-        return v[1:-1], True
-    if v[:1] in ("\"", "'") or v[-1:] in ("\"", "'"):
-        return "", False          # unbalanced quote -> malformed, refuse
-    return v, True
-
-id_occ = occurrences("id")
-am_occ = occurrences("author_model")
-
-# IDENTITY: a top-level (unindented) PLAN id. No PLAN id -> not a codex-plan artifact, keep the
-# caller-chosen topic. An `author_model:` key on its own does NOT make an ordinary doc a plan.
-def is_plan_id(raw):
-    v, ok = unquote(raw)
-    return bool(ok and re.fullmatch(r'PLAN-[0-9]+', v))
-if not any(ind == "" and is_plan_id(v) for (ind, v) in id_occ):
-    print("notplan"); sys.exit(0)
-
-# From here the file claims codex-plan identity; any ambiguity or missing provenance must refuse.
-if len(id_occ) > 1:
-    print("broken\tduplicate 'id:' keys in frontmatter — ambiguous plan identity"); sys.exit(0)
-if len(am_occ) > 1:
-    print("broken\tduplicate 'author_model:' keys in frontmatter — ambiguous provenance"); sys.exit(0)
-if not am_occ:
-    print("broken\tplan id present but no 'author_model:' line — no provenance"); sys.exit(0)
-
-id_ind, id_raw = id_occ[0]
-am_ind, am_raw = am_occ[0]
-if id_ind or am_ind:
-    print("broken\tindented 'id:'/'author_model:' — not a top-level frontmatter key"); sys.exit(0)
-idv, ok_id = unquote(id_raw)
-amv, ok_am = unquote(am_raw)
-if not (ok_id and re.fullmatch(r'PLAN-[0-9]+', idv)):
-    print("broken\tmalformed plan id %r" % (id_raw,)); sys.exit(0)
-if not (ok_am and re.fullmatch(r'[A-Za-z0-9._-]+', amv)):
-    print("broken\tmalformed author_model value %r" % (am_raw,)); sys.exit(0)
-
-print("ok\t%s\t%s" % (idv.split("-", 1)[1], amv))
-PYEOF
-    )
-    prc=$?
-    if (( prc != 0 )); then
-      printf 'error\t-\t%s: frontmatter parser exited nonzero (%d); refuse rather than guess\n' "$md_file" "$prc"
-      return 0
-    fi
-    IFS=$'\t' read -r pstatus pid pmodel <<<"$parsed"
-    case "$pstatus" in
-      readfail)
-        printf 'error\t-\t%s: cannot read for the codex-plan frontmatter check\n' "$md_file"
-        return 0 ;;
-      broken)
-        printf 'error\t-\t%s: %s (fail closed)\n' "$md_file" "$pid"
-        return 0 ;;
-      ok)
-        if (( named_plan )) && [[ "$pid" != "$expect_pid" ]]; then
-          printf 'error\t-\t%s uses codex-plan reserved name PLAN-%s but its frontmatter id is PLAN-%s; provenance mismatch, refuse rather than bind the wrong artifact\n' "$f" "$expect_pid" "$pid"
-          return 0
-        fi
-        vendor=$(classify_model "$pmodel")
-        if [[ "$vendor" != "claude" && "$vendor" != "codex" ]]; then
-          printf 'error\t-\t%s frontmatter author_model %s does not match a known vendor; refuse rather than guess\n' "$md_file" "$pmodel"
-          return 0
-        fi
-        printf '%s\t%s\tcodex-plan artifact (PLAN-%s) frontmatter author_model=%s\n' "$vendor" "$pid" "$pid" "$pmodel"
-        return 0 ;;
-      notplan)
-        if (( named_plan )); then
-          printf 'error\t-\t%s uses codex-plan reserved name PLAN-NNN but lacks its frontmatter (top-level id: PLAN-NNN + author_model); provenance cannot be read\n' "$md_file"
-          return 0
-        fi
-        ;;  # a non-reserved .md with no plan frontmatter — fall through to the remaining rules
-      *)
-        printf 'error\t-\t%s: unrecognized frontmatter parser status; refuse rather than guess\n' "$md_file"
-        return 0 ;;
-    esac
+  # 2. A codex-plan artifact outside any attempt: bind to its frontmatter identity (STEP 1).
+  if [[ -n "$plan_vendor" ]]; then
+    printf '%s\t%s\tcodex-plan artifact (PLAN-%s) frontmatter author_model=%s\n' "$plan_vendor" "$plan_id" "$plan_id" "$plan_model"
+    return 0
   fi
 
   # 3. Either root dispatch.py ever hands to a worker (isolated or not).
   if [[ "$real" == "$iso_worktrees"/* || "$real" == "$local_worktrees"/* ]]; then
-    printf 'codex\t-\tworker worktree path %s\n' "$real"
+    printf 'codex\t%s\tworker worktree path %s\n' "$plan_id" "$real"
     return 0
   fi
 
@@ -306,7 +334,7 @@ print(d.get('worktree') or '')
       [[ -n "$wt" ]] || continue
       wt=$(realpath -m -- "$wt")
       if [[ "$real" == "$wt" || "$real" == "$wt"/* ]]; then
-        printf 'codex\t-\trecorded worktree in %s\n' "$lc"
+        printf 'codex\t%s\trecorded worktree in %s\n' "$plan_id" "$lc"
         return 0
       fi
     done < <(find "$attempts_root" -mindepth 3 -maxdepth 3 -name launch.json 2>/dev/null)
@@ -315,7 +343,7 @@ print(d.get('worktree') or '')
   # 5. Nothing ties this file to a Codex-marked path. This system has exactly two producers
   #    (AGENTS.md role table) and every Codex-authored path is one of the above, so the absence of
   #    a Codex marker is the signal for Claude/operator authorship (see LIMITATION note at top).
-  printf 'claude\t-\tno Codex provenance marker found for %s\n' "$real"
+  printf 'claude\t%s\tno Codex provenance marker found for %s\n' "$plan_id" "$real"
 }
 
 ((${#contexts[@]})) || die "REFUSED — no --context evidence supplied; authorship cannot be derived without it (fail closed, B18). Pass --context FILE pointing at the artifact under review."

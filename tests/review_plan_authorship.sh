@@ -78,6 +78,28 @@ printf -- '---\nid: PLAN-302\nauthor_model: claude-opus-4-8\n author_model: gpt-
 # R2-finding-4: an ORDINARY doc that merely carries an author_model key but no PLAN id is NOT a plan.
 # It must keep its caller-chosen topic (behavior unchanged), not be refused as broken provenance.
 printf -- '---\ntitle: design note\nauthor_model: claude-opus-4-8\n---\n# an ordinary claude doc with an author_model field\n' > doc-with-author.md
+# Round-3 finding-1 fixtures: a PLAN file INSIDE a dispatch attempt. Its identity (and the round
+# binding, name/id agreement, multiple-plan and topic checks) must still apply — a plan does not
+# lose its id by sitting in an attempt dir. Each attempt records launch.json exactly as dispatch.py
+# would; the plan's frontmatter author_model must AGREE with that worker_model's vendor or refuse.
+mk_attempt_plan() { # $1 spec, $2 attempt-n, $3 worker_model, $4 plan-basename, $5 author_model
+  local d=".orchestrator/attempts/$1/$2"
+  mkdir -p "$d"
+  printf '{"worker_model": "%s", "spec_id": "%s", "attempt": %s}\n' "$3" "$1" "$2" > "$d/launch.json"
+  mk_plan "$d/$4.md" "$5"
+}
+mk_attempt_plan SPEC-401 1 claude-opus-4-8 PLAN-401 claude-opus-4-8   # claude attempt, claude plan (agree)
+mk_attempt_plan SPEC-402 1 gpt-5.6-sol     PLAN-402 gpt-5.6-sol       # codex  attempt, sol   plan (agree)
+mk_attempt_plan SPEC-403 1 claude-opus-4-8 PLAN-403 gpt-5.6-sol       # claude attempt, sol   plan (CONFLICT)
+# Round-3 finding-2 fixtures: valid-YAML spellings a regex parser missed. A duplicate author_model
+# written `author_model :` (space before colon) or `"author_model":` (quoted key) constructs the
+# SAME mapping key as a plain one, so a real YAML parser sees the collision and refuses — the regex
+# saw one occurrence and derived the first (claude) value, laundering a Sol plan. And a valid inline
+# comment on the id (`id: PLAN-406 # comment`) must still be recognized as that PLAN, not dropped to
+# a free topic — the comment is not part of the value.
+printf -- '---\nid: PLAN-404\nauthor_model: claude-opus-4-8\nauthor_model : gpt-5.6-sol\nstatus: draft\n---\n# body\n' > space-colon-dup.md
+printf -- '---\nid: PLAN-405\nauthor_model: claude-opus-4-8\n"author_model": gpt-5.6-sol\nstatus: draft\n---\n# body\n' > quoted-key-dup.md
+printf -- '---\nid: PLAN-406 # allocation note\ncreated: 2026-07-16T00:00:00Z\nauthor_model: claude-opus-4-8\nstatus: draft\n---\n# body\n' > inline-comment.md
 
 # 1. A Claude-authored plan (frontmatter author_model -> vendor claude) proceeds to Codex review
 #    under its bound topic, and the round is recorded.
@@ -225,6 +247,67 @@ rc=$?
 scripts/review --topic any-free-doc --author claude --context doc-with-author.md "review" >/dev/null 2>&1 \
   && ok "doc with author_model but no PLAN id keeps its free topic" \
   || bad "doc with author_model but no PLAN id was refused"
+
+# 16. ROUND-3 FINDING 1 — a PLAN file INSIDE a dispatch attempt keeps its identity: the round
+#     binding, name/id checks, and vendor gates all still run. Previously derive_one returned from
+#     the attempt branch with plan_id='-', so a Codex attempt exited 4 (self-review) without ever
+#     binding the topic, and the same plan could be re-reviewed under fresh slugs.
+#   (a) A Claude attempt hosting a Claude plan (frontmatter agrees) reviews under its bound topic...
+scripts/review --topic plan-401 --author claude --context .orchestrator/attempts/SPEC-401/1/PLAN-401.md "review" >/dev/null 2>&1 \
+  && ok "plan inside a claude attempt reviews under its bound topic" \
+  || bad "plan inside a claude attempt refused under its bound topic"
+[ -f .orchestrator/reviews/plan-401/round-1.md ] \
+  && ok "round 1 recorded for the in-attempt claude plan" || bad "no round-1.md for the in-attempt claude plan"
+#       ...and a renamed topic is refused (exit 6): the in-attempt plan is bound to its id.
+scripts/review --topic attempt-plan-reslug --author claude --context .orchestrator/attempts/SPEC-401/1/PLAN-401.md "review" >/dev/null 2>&1
+rc=$?
+[ "$rc" = 6 ] && ok "in-attempt plan under a renamed topic refused (exit 6)" \
+  || bad "in-attempt plan renamed topic gave exit $rc, expected 6"
+#   (b) A Codex attempt hosting a Sol plan under a WRONG topic hits the binding gate (exit 6) BEFORE
+#       the self-review gate — the round-3 finding: binding now runs inside the attempt branch.
+scripts/review --topic codex-attempt-reslug --author codex --context .orchestrator/attempts/SPEC-402/1/PLAN-402.md "review" >/dev/null 2>&1
+rc=$?
+[ "$rc" = 6 ] && ok "in-attempt codex plan under a renamed topic refuses via binding (exit 6, not 4)" \
+  || bad "in-attempt codex plan renamed topic gave exit $rc, expected 6"
+#       ...and under its CORRECT bound topic it is the self-review gate (exit 4): derivation held.
+scripts/review --topic plan-402 --author codex --context .orchestrator/attempts/SPEC-402/1/PLAN-402.md "review" >/dev/null 2>&1
+rc=$?
+[ "$rc" = 4 ] && ok "in-attempt codex plan under its bound topic is self-review (exit 4)" \
+  || bad "in-attempt codex plan bound topic gave exit $rc, expected 4"
+#   (c) CONFLICT: a Claude attempt hosting a Sol-authored plan — the attempt's worker_model vendor and
+#       the plan's frontmatter author_model vendor disagree. Ambiguous provenance refuses (exit 2),
+#       so an attempt cannot host a foreign-vendor plan to launder its authorship.
+scripts/review --topic plan-403 --author claude --context .orchestrator/attempts/SPEC-403/1/PLAN-403.md "review" >/dev/null 2>&1
+rc=$?
+[ "$rc" = 2 ] && ok "in-attempt plan whose frontmatter vendor conflicts with the attempt refused (exit 2)" \
+  || bad "in-attempt vendor conflict gave exit $rc, expected 2"
+[ -e .orchestrator/reviews/plan-403 ] && bad "in-attempt conflict refusal still created review state" \
+  || ok "in-attempt conflict refusal writes nothing"
+
+# 17. ROUND-3 FINDING 2 — valid-YAML duplicate spellings a regex missed. `author_model :` (space
+#     before colon) and `"author_model":` (quoted key) each construct the SAME mapping key as the
+#     plain one, so a real parser sees the collision and refuses (exit 2) — never derives the first
+#     (claude) value from a frontmatter that also carries a Sol author_model.
+scripts/review --topic plan-404 --author claude --context space-colon-dup.md "review" >/dev/null 2>&1
+rc=$?
+[ "$rc" = 2 ] && ok "space-before-colon duplicate author_model refused (exit 2)" \
+  || bad "space-colon duplicate author_model gave exit $rc, expected 2"
+scripts/review --topic plan-405 --author claude --context quoted-key-dup.md "review" >/dev/null 2>&1
+rc=$?
+[ "$rc" = 2 ] && ok "quoted-key duplicate author_model refused (exit 2)" \
+  || bad "quoted-key duplicate author_model gave exit $rc, expected 2"
+
+# 18. ROUND-3 FINDING 2 (cont.) — a valid inline comment on the id (`id: PLAN-406 # note`) is still
+#     recognized as PLAN-406 and bound, not dropped to a free topic. A non-reserved filename is used
+#     so the recognition comes purely from the frontmatter: a wrong topic is refused (exit 6, bound),
+#     and the correct plan-406 topic reviews.
+scripts/review --topic free-not-bound --author claude --context inline-comment.md "review" >/dev/null 2>&1
+rc=$?
+[ "$rc" = 6 ] && ok "id with an inline comment is still recognized and bound (wrong topic exit 6)" \
+  || bad "id with inline comment gave exit $rc under a wrong topic, expected 6"
+scripts/review --topic plan-406 --author claude --context inline-comment.md "review" >/dev/null 2>&1 \
+  && ok "id with an inline comment reviews under its bound topic plan-406" \
+  || bad "id with inline comment refused under its bound topic"
 
 [ "$fails" -eq 0 ] && echo "PASS review_plan_authorship.sh" || echo "FAIL review_plan_authorship.sh"
 exit "$fails"
