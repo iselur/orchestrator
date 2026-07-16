@@ -230,8 +230,11 @@ evil_oid = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=str(rr),
                           input="#!/bin/sh\necho EVIL\nexit 0\n",
                           capture_output=True, text=True).stdout.strip()
 sh("git", "replace", orig_oid, evil_oid, cwd=rr)
+# The attack-precondition probes must see DEFAULT git behavior even when the harness itself
+# runs with GIT_NO_REPLACE_OBJECTS=1 exported (the dispatcher's grader env does, round-3).
+_replace_on = {k: v for k, v in os.environ.items() if k != "GIT_NO_REPLACE_OBJECTS"}
 plain = subprocess.run(["git", "show", f"{rc}:tests/a.sh"], cwd=str(rr),
-                       capture_output=True, text=True).stdout
+                       capture_output=True, text=True, env=_replace_on).stdout
 check("replace-object is actually active (plain git show returns the replacement)",
       "EVIL" in plain)
 check("git_show_bytes ignores the replacement (GIT_NO_REPLACE_OBJECTS)",
@@ -368,7 +371,7 @@ swc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(sr),
                      capture_output=True, text=True).stdout.strip()
 sh("git", "replace", sbase, swc, cwd=sr)   # base now resolves to the candidate commit
 replaced_diff = subprocess.run(["git", "diff", "--name-only", f"{sbase}..{swc}"], cwd=str(sr),
-                               capture_output=True, text=True).stdout.strip()
+                               capture_output=True, text=True, env=_replace_on).stdout.strip()
 check("refs/replace really neutralizes a plain diff (empty base..wc)", replaced_diff == "")
 sc = d.scope_check(sr, sbase, swc, ["in/**"])
 check("scope_check ignores the replacement and still catches the out-of-scope change",
