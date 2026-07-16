@@ -1,33 +1,37 @@
 #!/usr/bin/env bash
-# THROWAWAY lifecycle prototype (R77 / PLAN-007, earliest falsifiable proof) — round-3 revision.
+# THROWAWAY lifecycle prototype (R77 / PLAN-007, earliest falsifiable proof) — round-4 revision.
 # Disposable design under test; operates ONLY under a caller-owned temporary root (LF_ROOT);
 # touches no production state; nothing outside tests/ may source it.
 #
 # Design rules (each falsifier-enforced):
-# - IDENTIFIERS: every externally supplied id (row/session/job/identity/class/tick) is
-#   [A-Za-z0-9._-]+ — no path escapes, no multiline field injection. Public read APIs
-#   (lf_recover, lf_jobs_of_lease) sanitize too.
+# - AUTHORITY = CAS + LIVE: every owner operation requires (session, generation) to match AND
+#   the lease to be strictly live (numeric expiry in the future on a readable, monotonic
+#   clock). An expired, malformed, or clock-broken lease grants NOTHING to anyone: the old
+#   owner loses authority the instant expiry passes, and takeover is the only path forward.
+# - IDENTIFIERS: [A-Za-z0-9._-]+ everywhere, public read APIs included; ids are regex-escaped
+#   before any grep (a '.' in an id never wildcards).
 # - LOCKING: one flock ($LF_ROOT/.lock) serializes every mutation.
-# - HALT: checked at entry AND at the COMMIT INSTANT of every durable transition (the last
-#   action before mv/ln/rm). LF_HALT_AT=commit is a test hook that raises HALT after staging,
-#   proving the boundary check. HALT outranks everything.
-# - CLOCK: mutators use _lf_checked_now (fails closed on unreadable/backward time and advances
-#   the monotonic floor); read-only paths use _lf_now_ro (never mutates; backward time reads as
-#   unreadable and the caller fails toward the SAFE side — a lease reads as live).
-# - DURABILITY: records are staged then atomically PUBLISHED (mv/ln). This gives atomic
-#   visibility — one reader never sees a partial record; crash-durability across host power
-#   loss is explicitly out of the prototype's scope and stated here, not claimed.
-# - CAS: every row mutation by a session requires (session, generation) to match. Supervisor
-#   ops (respawn) require the supervisor token. Dead-letters fence EVERY row operation,
-#   including safety re-flags, observations, and kills.
-# - HANDOFF: ledger-derived; exactly ONE handoff may exist per row; consumption validates row,
-#   generation, predecessor, and job fields, refuses while the from-lease is live, refuses a
-#   compacted successor (N=1), clears any rotation marker, records the successor durably BEFORE
-#   minting its lease; an interrupted consumption fences bare acquisition until recovery mints
-#   the RECORDED successor.
-# - OBSERVATIONS: server-assigned monotonic sequence numbers order them (caller tick ids are
-#   data, not order); class is enum-validated.
-# - CRASH INJECTION: LF_CRASH_POINT=<name> exits 97 at the named point.
+# - HALT: checked at entry AND at the COMMIT INSTANT of every durable publish — including the
+#   clock floor, which publishes only AFTER the primary record (skipping it on HALT is safe:
+#   the floor is a lower bound). A staged temp file is removed when HALT stops the publish.
+#   LF_HALT_AT=commit is the test hook that raises HALT after staging.
+# - CLOCK: mutators read a validated monotonic 'now' (fail closed on unreadable/backward) and
+#   bump the floor only after their record publishes; read paths never mutate the floor.
+# - DURABILITY: stage + atomic publish (mv/ln) = atomic VISIBILITY. Crash-durability across
+#   host power loss is explicitly out of the prototype's scope.
+# - DEAD-LETTER: fences EVERY row operation — mutations, observations, kills, prompts,
+#   recovery — and lf_recover reports it instead of naming an owner.
+# - HANDOFF: exactly ONE per row; consumption verifies row, from_generation == current
+#   generation, a well-formed single predecessor, field uniqueness, AND that the jobs field
+#   equals the ledger's recomputed reverse trace; refuses while the from-lease is live; refuses
+#   a compacted successor (N=1); the successor is recorded IN CONTENT (dot-safe) durably before
+#   the handoff is retired and the lease minted; an interrupted consumption fences bare
+#   acquisition and recovery mints exactly the recorded successor.
+# - ROTATION: a pending rotate marker forbids ordinary release — the boundary handoff is the
+#   only exit, so a row can never be stranded released-but-unacquirable.
+# - OBSERVATIONS: server-assigned sequence order; enum-validated class; single-token fields.
+# - CRASH INJECTION: LF_CRASH_POINT=<name> exits 97 at the named point (the falsifier asserts
+#   the 97, proving each injection actually fired).
 # Return codes: 0 ok; 1 refused; 3 dead-lettered; 9 HALT.
 
 set -u
@@ -40,34 +44,22 @@ lf_init() {  # $1 root, $2 supervisor-token
     printf '0' > "$LF_ROOT/.obs_seq"
 }
 
-_lf_id() {  # every argument must be a safe single-token identifier
+_lf_id() {
     local a
     for a in "$@"; do
         case "$a" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
     done
 }
 
+_lf_re() {  # regex-escape an id ('.' is the only metachar the id alphabet admits)
+    printf '%s' "$1" | sed 's/\./\\./g'
+}
+
 _lf_crash() { [ "${LF_CRASH_POINT:-}" = "$1" ] && exit 97; return 0; }
 _lf_halt()  { [ -e "$LF_ROOT/HALT" ] && return 9; return 0; }
 _lf_dead()  { [ -e "$LF_ROOT/deadletters/$1" ] && return 3; return 0; }
 
-_lf_commit_gate() {  # the COMMIT-INSTANT gate: runs the test hook, then re-checks HALT
-    [ "${LF_HALT_AT:-}" = "commit" ] && : > "$LF_ROOT/HALT"
-    _lf_halt || exit 9
-}
-
-_lf_checked_now() {  # MUTATOR clock: fail-closed monotonic floor, advances it
-    local now last
-    now=$(date +%s 2>/dev/null) || return 1
-    [[ "$now" =~ ^[0-9]+$ ]] || return 1
-    last=$(cat "$LF_ROOT/.last_now" 2>/dev/null || echo 0)
-    [[ "$last" =~ ^[0-9]+$ ]] || return 1
-    [ "$now" -lt "$last" ] && return 1
-    printf '%s' "$now" > "$LF_ROOT/.last_now.tmp" && mv "$LF_ROOT/.last_now.tmp" "$LF_ROOT/.last_now"
-    echo "$now"
-}
-
-_lf_now_ro() {  # READ-ONLY clock: never mutates; backward/unreadable time returns failure
+_lf_now_ro() {  # validated monotonic 'now'; NEVER mutates the floor; fails closed
     local now last
     now=$(date +%s 2>/dev/null) || return 1
     [[ "$now" =~ ^[0-9]+$ ]] || return 1
@@ -77,32 +69,37 @@ _lf_now_ro() {  # READ-ONLY clock: never mutates; backward/unreadable time retur
     echo "$now"
 }
 
-_lf_write() {  # $1 path, stdin content — stage, then gate, then publish (mv)
+_lf_bump_floor() {  # publish the floor AFTER the primary record; skipping on HALT is safe
+    _lf_halt || return 0
+    printf '%s' "$1" > "$LF_ROOT/.last_now.tmp" && mv "$LF_ROOT/.last_now.tmp" "$LF_ROOT/.last_now"
+}
+
+_lf_commit_gate() {  # $1 staged-tmp (removed if HALT stops the publish)
+    if [ "${LF_HALT_AT:-}" = "commit" ]; then : > "$LF_ROOT/HALT"; fi
+    if [ -e "$LF_ROOT/HALT" ]; then rm -f "${1:-}"; exit 9; fi
+}
+
+_lf_write() {  # $1 path, stdin content
     _lf_halt || exit 9
     local tmp
     tmp="$(mktemp "$(dirname "$1")/.tmp.XXXXXX")"
     cat > "$tmp"
-    _lf_commit_gate
+    _lf_commit_gate "$tmp"
     mv "$tmp" "$1"
 }
 
-_lf_create() {  # $1 path, stdin content — stage, gate, publish exactly-once (ln); rc 1 if exists
+_lf_create() {  # exactly-once publish
     _lf_halt || exit 9
     local tmp
     tmp="$(mktemp "$(dirname "$1")/.tmp.XXXXXX")"
     cat > "$tmp"
-    _lf_commit_gate
+    _lf_commit_gate "$tmp"
     if ln "$tmp" "$1" 2>/dev/null; then rm -f "$tmp"; return 0; fi
     rm -f "$tmp"; return 1
 }
 
-_lf_move() {  # $1 src, $2 dst — a raw durable transition gets the same commit gate
-    _lf_commit_gate
-    mv "$1" "$2"
-}
-
-_lf_remove() {  # $1 path — gated removal
-    _lf_commit_gate
+_lf_remove() {  # gated removal
+    _lf_commit_gate ""
     rm -f "$1"
 }
 
@@ -115,8 +112,8 @@ _lf_cas() {
     [ "$(_lf_lease_field "$1" session)" = "$2" ] && [ "$(_lf_lease_field "$1" generation)" = "$3" ]
 }
 
-_lf_lease_live() {  # rc 0 when owned and not provably expired: malformed expiry OR an
-    local sess exp now  # unreadable/backward clock reads as LIVE (fences, never grants)
+_lf_lease_live() {  # FENCING liveness: malformed expiry or unreadable clock counts as live
+    local sess exp now
     sess=$(_lf_lease_field "$1" session)
     [ -n "$sess" ] || return 1
     exp=$(_lf_lease_field "$1" expiry)
@@ -125,13 +122,22 @@ _lf_lease_live() {  # rc 0 when owned and not provably expired: malformed expiry
     [ "$exp" -gt "$now" ]
 }
 
-_lf_pending_consumption() {  # $1 row — an interrupted consumption at the CURRENT generation
-    local gen
-    gen=$(_lf_lease_field "$1" generation); gen=${gen:-0}
-    ls "$LF_ROOT/consumed/$1.gen$gen".* >/dev/null 2>&1
+_lf_auth() {  # AUTHORITY: CAS + STRICTLY live (numeric future expiry on a readable clock).
+    local row=$1 session=$2 gen=$3 exp now   # expired/malformed/clock-broken grants nothing.
+    _lf_cas "$row" "$session" "$gen" || return 1
+    exp=$(_lf_lease_field "$row" expiry)
+    [[ "$exp" =~ ^[0-9]+$ ]] || return 1
+    now=$(_lf_now_ro) || return 1
+    [ "$exp" -gt "$now" ]
 }
 
-# ---- lease --------------------------------------------------------------------------------------
+_lf_pending_consumption() {  # an interrupted consumption at the CURRENT generation
+    local gen
+    gen=$(_lf_lease_field "$1" generation); gen=${gen:-0}
+    [ -f "$LF_ROOT/consumed/$1.gen$gen" ]
+}
+
+# ---- lease ----------------------------------------------------------------------------------------
 lf_acquire() {  # $1 row, $2 session, $3 ttl -> stdout: generation
     _lf_id "$1" "$2" || return 1
     _lf_halt || return 9
@@ -140,15 +146,14 @@ lf_acquire() {  # $1 row, $2 session, $3 ttl -> stdout: generation
         _lf_halt || exit 9
         _lf_dead "$1" || exit 3
         local now gen
-        now=$(_lf_checked_now) || exit 1
-        [ -e "$LF_ROOT/compacted.$2" ] && exit 1        # N=1: no further acquisition
-        [ -e "$LF_ROOT/rows/$1.rotate" ] && exit 1      # rotation pending
-        ls "$LF_ROOT/handoffs/$1."gen* >/dev/null 2>&1 && exit 1  # unconsumed handoff pending
-        _lf_pending_consumption "$1" && exit 1          # interrupted consumption: the recorded
-        # successor owns recovery (lf_recover_finish); a bare grab would orphan it
+        now=$(_lf_now_ro) || exit 1
+        [ -e "$LF_ROOT/compacted.$2" ] && exit 1
+        [ -e "$LF_ROOT/rows/$1.rotate" ] && exit 1
+        ls "$LF_ROOT/handoffs/$1."gen* >/dev/null 2>&1 && exit 1
+        _lf_pending_consumption "$1" && exit 1
         gen=$(_lf_lease_field "$1" generation); gen=${gen:-0}
         [[ "$gen" =~ ^[0-9]+$ ]] || exit 1
-        _lf_lease_live "$1" && exit 1                   # live lease: the owner renews
+        _lf_lease_live "$1" && exit 1
         _lf_crash before-lease-write
         _lf_write "$LF_ROOT/rows/$1.lease" <<EOF
 row=$1
@@ -156,37 +161,40 @@ generation=$((gen + 1))
 session=$2
 expiry=$((now + $3))
 EOF
+        _lf_bump_floor "$now"
         _lf_crash after-lease-write
         echo $((gen + 1))
     ) 9>>"$LF_ROOT/.lock"
 }
 
-lf_renew() {  # $1 row, $2 session, $3 gen, $4 ttl
+lf_renew() {  # $1 row, $2 session, $3 gen, $4 ttl — authority required (an expired owner re-acquires)
     _lf_id "$1" "$2" || return 1
     _lf_halt || return 9
     (
         flock -x 9
         _lf_halt || exit 9
         _lf_dead "$1" || exit 3
-        _lf_cas "$1" "$2" "$3" || exit 1
-        local now; now=$(_lf_checked_now) || exit 1
+        _lf_auth "$1" "$2" "$3" || exit 1
+        local now; now=$(_lf_now_ro) || exit 1
         _lf_write "$LF_ROOT/rows/$1.lease" <<EOF
 row=$1
 generation=$3
 session=$2
 expiry=$((now + $4))
 EOF
+        _lf_bump_floor "$now"
     ) 9>>"$LF_ROOT/.lock"
 }
 
-lf_release() {  # $1 row, $2 session, $3 gen
+lf_release() {  # $1 row, $2 session, $3 gen — refused while a rotation is pending (hand off!)
     _lf_id "$1" "$2" || return 1
     _lf_halt || return 9
     (
         flock -x 9
         _lf_halt || exit 9
         _lf_dead "$1" || exit 3
-        _lf_cas "$1" "$2" "$3" || exit 1
+        _lf_auth "$1" "$2" "$3" || exit 1
+        [ -e "$LF_ROOT/rows/$1.rotate" ] && exit 1   # the boundary handoff is the only exit
         _lf_crash before-release
         _lf_write "$LF_ROOT/rows/$1.lease" <<EOF
 row=$1
@@ -198,7 +206,7 @@ EOF
     ) 9>>"$LF_ROOT/.lock"
 }
 
-# ---- session <-> job mapping ----------------------------------------------------------------------
+# ---- session <-> job mapping -------------------------------------------------------------------------
 lf_start_job() {  # $1 row, $2 session, $3 gen, $4 job
     _lf_id "$1" "$2" "$4" || return 1
     _lf_halt || return 9
@@ -206,7 +214,7 @@ lf_start_job() {  # $1 row, $2 session, $3 gen, $4 job
         flock -x 9
         _lf_halt || exit 9
         _lf_dead "$1" || exit 3
-        _lf_cas "$1" "$2" "$3" || exit 1
+        _lf_auth "$1" "$2" "$3" || exit 1
         [ -e "$LF_ROOT/rows/$1.rotate" ] && exit 1
         [ -e "$LF_ROOT/compacted.$2" ] && exit 1
         _lf_crash before-job-write
@@ -219,13 +227,15 @@ EOF
     ) 9>>"$LF_ROOT/.lock"
 }
 
-lf_jobs_of_lease() {  # $1 row, $2 gen — reverse trace
+lf_jobs_of_lease() {  # $1 row, $2 gen — reverse trace, regex-escaped ids
     _lf_id "$1" "$2" || return 1
-    grep -l "^row=$1\$" "$LF_ROOT/jobs/"* 2>/dev/null \
+    local rr
+    rr=$(_lf_re "$1")
+    grep -l "^row=$rr\$" "$LF_ROOT/jobs/"* 2>/dev/null \
         | xargs -r grep -l "^generation=$2\$" | xargs -rn1 basename
 }
 
-# ---- rotation signals -------------------------------------------------------------------------------
+# ---- rotation signals -----------------------------------------------------------------------------------
 lf_soft_trip() {  # $1 row, $2 session, $3 gen
     _lf_id "$1" "$2" || return 1
     _lf_halt || return 9
@@ -233,7 +243,7 @@ lf_soft_trip() {  # $1 row, $2 session, $3 gen
         flock -x 9
         _lf_halt || exit 9
         _lf_dead "$1" || exit 3
-        _lf_cas "$1" "$2" "$3" || exit 1
+        _lf_auth "$1" "$2" "$3" || exit 1
         _lf_write "$LF_ROOT/rows/$1.rotate" <<EOF
 row=$1
 requested_by=$2
@@ -248,7 +258,7 @@ lf_compaction() {  # $1 session
     ( flock -x 9; _lf_halt || exit 9; _lf_write "$LF_ROOT/compacted.$1" <<< "1" ) 9>>"$LF_ROOT/.lock"
 }
 
-# ---- safe boundary ----------------------------------------------------------------------------------
+# ---- safe boundary ---------------------------------------------------------------------------------------
 lf_commit_boundary() {  # $1 row, $2 session, $3 gen
     _lf_id "$1" "$2" || return 1
     _lf_halt || return 9
@@ -256,7 +266,7 @@ lf_commit_boundary() {  # $1 row, $2 session, $3 gen
         flock -x 9
         _lf_halt || exit 9
         _lf_dead "$1" || exit 3
-        _lf_cas "$1" "$2" "$3" || exit 1
+        _lf_auth "$1" "$2" "$3" || exit 1
         local jobs
         jobs=$(lf_jobs_of_lease "$1" "$3" | paste -sd, -)
         _lf_crash before-handoff-write
@@ -275,14 +285,32 @@ session=
 expiry=0
 EOF
         _lf_crash after-boundary-release
-        # the rotation request is fulfilled by the handoff; consumption clears it too, so a
-        # crash HERE cannot strand the successor behind a stale marker
         [ -e "$LF_ROOT/rows/$1.rotate" ] && _lf_remove "$LF_ROOT/rows/$1.rotate"
         true
     ) 9>>"$LF_ROOT/.lock"
 }
 
-lf_consume_handoff() {  # $1 row, $2 successor — one locked transaction, fully validated
+_lf_handoff_valid() {  # $1 handoff-path, $2 row, $3 expected-generation — EXACT validation
+    local h=$1 row=$2 gen=$3 rr fs jobs ledger_jobs
+    rr=$(_lf_re "$row")
+    # exactly one of each required field, no contradictory duplicates
+    [ "$(grep -c '^row=' "$h")" = 1 ] || return 1
+    [ "$(grep -c '^from_generation=' "$h")" = 1 ] || return 1
+    [ "$(grep -c '^from_session=' "$h")" = 1 ] || return 1
+    [ "$(grep -c '^jobs=' "$h")" = 1 ] || return 1
+    [ "$(grep -c '^source=' "$h")" = 1 ] || return 1
+    grep -q "^row=$rr\$" "$h" || return 1
+    grep -q "^from_generation=$gen\$" "$h" || return 1
+    fs=$(sed -n 's/^from_session=//p' "$h")
+    _lf_id "$fs" || return 1
+    grep -q '^source=ledger$' "$h" || return 1
+    # the jobs field must EQUAL the ledger's recomputed reverse trace — self-assertion refused
+    jobs=$(sed -n 's/^jobs=//p' "$h")
+    ledger_jobs=$(lf_jobs_of_lease "$row" "$gen" | paste -sd, -)
+    [ "$jobs" = "$ledger_jobs" ]
+}
+
+lf_consume_handoff() {  # $1 row, $2 successor — one locked transaction; successor IN CONTENT
     _lf_id "$1" "$2" || return 1
     _lf_halt || return 9
     (
@@ -290,37 +318,37 @@ lf_consume_handoff() {  # $1 row, $2 successor — one locked transaction, fully
         _lf_halt || exit 9
         _lf_dead "$1" || exit 3
         _lf_lease_live "$1" && exit 1
-        [ -e "$LF_ROOT/compacted.$2" ] && exit 1        # N=1 binds the CONSUME path too
+        [ -e "$LF_ROOT/compacted.$2" ] && exit 1
         local n h now gen
         n=$(ls -1 "$LF_ROOT/handoffs/$1."gen* 2>/dev/null | wc -l)
-        [ "$n" -eq 1 ] || exit 1                        # exactly one handoff, else fail closed
+        [ "$n" -eq 1 ] || exit 1
         h=$(ls -1 "$LF_ROOT/handoffs/$1."gen*)
-        now=$(_lf_checked_now) || exit 1
+        now=$(_lf_now_ro) || exit 1
         gen=$(_lf_lease_field "$1" generation); gen=${gen:-0}
         [[ "$gen" =~ ^[0-9]+$ ]] || exit 1
-        # full validation: the handoff must be THIS row's, at THIS generation, ledger-derived,
-        # from a named predecessor, carrying its job map field
-        grep -q "^row=$1\$" "$h" || exit 1
-        grep -q "^from_generation=$gen\$" "$h" || exit 1
-        grep -q '^from_session=..*$' "$h" || exit 1
-        grep -q '^jobs=' "$h" || exit 1
-        grep -q '^source=ledger$' "$h" || exit 1
+        _lf_handoff_valid "$h" "$1" "$gen" || exit 1
         _lf_crash before-consume
-        _lf_move "$h" "$LF_ROOT/consumed/$(basename "$h").$2" || exit 1
-        _lf_crash after-consume
+        # 1) durable consumption record: successor named IN CONTENT (dot-safe), fixed filename
+        { echo "successor=$2"; cat "$h"; } | _lf_write "$LF_ROOT/consumed/$1.gen$gen"
+        _lf_crash after-consume-record
+        # 2) retire the handoff
+        _lf_remove "$h"
+        _lf_crash after-handoff-retire
+        # 3) mint the successor lease
         _lf_write "$LF_ROOT/rows/$1.lease" <<EOF
 row=$1
 generation=$((gen + 1))
 session=$2
 expiry=$((now + 300))
 EOF
+        _lf_bump_floor "$now"
         _lf_crash after-successor-lease
         [ -e "$LF_ROOT/rows/$1.rotate" ] && _lf_remove "$LF_ROOT/rows/$1.rotate"
         echo $((gen + 1))
     ) 9>>"$LF_ROOT/.lock"
 }
 
-# ---- respawn / dead-letter ----------------------------------------------------------------------------
+# ---- respawn / dead-letter ---------------------------------------------------------------------------------
 lf_respawn() {  # $1 row, $2 supervisor-token
     _lf_id "$1" || return 1
     _lf_halt || return 9
@@ -351,20 +379,20 @@ lf_activity() {  # $1 row, $2 session, $3 gen
         flock -x 9
         _lf_halt || exit 9
         _lf_dead "$1" || exit 3
-        _lf_cas "$1" "$2" "$3" || exit 1
+        _lf_auth "$1" "$2" "$3" || exit 1
         [ -e "$LF_ROOT/respawns/$1" ] && _lf_remove "$LF_ROOT/respawns/$1"
         true
     ) 9>>"$LF_ROOT/.lock"
 }
 
-lf_safety_flag() {  # $1 row, $2 session, $3 gen — immediate dead-letter; never rewrites one
+lf_safety_flag() {  # $1 row, $2 session, $3 gen
     _lf_id "$1" "$2" || return 1
     _lf_halt || return 9
     (
         flock -x 9
         _lf_halt || exit 9
         _lf_dead "$1" || exit 3
-        _lf_cas "$1" "$2" "$3" || exit 1
+        _lf_auth "$1" "$2" "$3" || exit 1
         _lf_write "$LF_ROOT/deadletters/$1" <<EOF
 row=$1
 generation=$3
@@ -373,10 +401,10 @@ EOF
     ) 9>>"$LF_ROOT/.lock"
 }
 
-# ---- classified liveness -> kill --------------------------------------------------------------------
+# ---- classified liveness -> kill / prompt ------------------------------------------------------------------
 lf_observe() {  # $1 session, $2 class, $3 identity, $4 row, $5 gen, $6 tick-label
     _lf_id "$1" "$3" "$4" "$5" "$6" || return 1
-    case "$2" in stale|unknown) ;; *) return 1 ;; esac   # enum-validated class
+    case "$2" in stale|unknown) ;; *) return 1 ;; esac
     _lf_halt || return 9
     (
         flock -x 9
@@ -385,8 +413,6 @@ lf_observe() {  # $1 session, $2 class, $3 identity, $4 row, $5 gen, $6 tick-lab
         local seq
         seq=$(cat "$LF_ROOT/.obs_seq"); seq=$((seq + 1))
         _lf_write "$LF_ROOT/.obs_seq" <<< "$seq"
-        # server-assigned zero-padded sequence orders observations; the caller's tick label is
-        # DATA (used only for the distinct-tick rule), never ordering
         _lf_write "$LF_ROOT/observations/$1.$(printf '%08d' "$seq")" <<EOF
 class=$2
 identity=$3
@@ -397,10 +423,10 @@ EOF
     ) 9>>"$LF_ROOT/.lock"
 }
 
-_lf_kill_ok() {  # $1 session, $2 identity, $3 row, $4 gen — inside-lock eligibility
+_lf_kill_ok() {
     local session=$1 identity=$2 row=$3 gen=$4 last2 f t1 t2
     [ -e "$LF_ROOT/foreign-claude" ] && return 1
-    _lf_dead "$row" && :; [ -e "$LF_ROOT/deadletters/$row" ] && return 1
+    [ -e "$LF_ROOT/deadletters/$row" ] && return 1
     last2=$(ls -1 "$LF_ROOT/observations/$session."* 2>/dev/null | sort | tail -2)
     [ "$(printf '%s\n' "$last2" | grep -c .)" -eq 2 ] || return 1
     t1=$(sed -n 's/^tick=//p' "$(printf '%s\n' "$last2" | head -1)")
@@ -415,13 +441,13 @@ _lf_kill_ok() {  # $1 session, $2 identity, $3 row, $4 gen — inside-lock eligi
     _lf_cas "$row" "$session" "$gen"
 }
 
-lf_kill_eligible() {  # advisory probe
+lf_kill_eligible() {
     _lf_id "$1" "$2" "$3" || return 1
     _lf_halt || return 9
     ( flock -x 9; _lf_halt || exit 9; _lf_kill_ok "$1" "$2" "$3" "$4" ) 9>>"$LF_ROOT/.lock"
 }
 
-lf_kill() {  # the ACTION revalidates HALT, standby, dead-letter, evidence, identity, generation
+lf_kill() {
     _lf_id "$1" "$2" "$3" || return 1
     _lf_halt || return 9
     (
@@ -432,38 +458,46 @@ lf_kill() {  # the ACTION revalidates HALT, standby, dead-letter, evidence, iden
     ) 9>>"$LF_ROOT/.lock"
 }
 
-lf_type() {  # $1 session, $2 text — prompt/keystroke op, gated like a kill
-    _lf_id "$1" || return 1
-    _lf_halt || return 9
+lf_type() {  # $1 session, $2 row, $3 gen, $4 text — a prompt reaches ONLY the row's live
+    _lf_id "$1" "$2" || return 1        # authority holder, never a dead-lettered row, never
+    _lf_halt || return 9                # during standby, never under HALT.
     (
         flock -x 9
         _lf_halt || exit 9
+        _lf_dead "$2" || exit 3
         [ -e "$LF_ROOT/foreign-claude" ] && exit 1
-        _lf_write "$LF_ROOT/typed.$1" <<< "$2"
+        _lf_auth "$2" "$1" "$3" || exit 1
+        _lf_write "$LF_ROOT/typed.$1" <<< "$4"
     ) 9>>"$LF_ROOT/.lock"
 }
 
-# ---- crash recovery -----------------------------------------------------------------------------------
-lf_recover() {  # $1 row -> ONE answer; read-only (never advances the clock floor)
+# ---- crash recovery -----------------------------------------------------------------------------------------
+lf_recover() {  # $1 row -> ONE answer; read-only; dead-letters outrank everything but HALT
     _lf_id "$1" || return 1
     (
         flock -x 9
         local sess gen c
+        if [ -e "$LF_ROOT/deadletters/$1" ]; then
+            echo "dead-lettered"
+            exit 0
+        fi
         sess=$(_lf_lease_field "$1" session)
         gen=$(_lf_lease_field "$1" generation); gen=${gen:-0}
         if [ -n "$sess" ] && _lf_lease_live "$1"; then
             echo "owner $sess"
+        elif [ -f "$LF_ROOT/consumed/$1.gen$gen" ]; then
+            # a consumption committed at the CURRENT generation outranks a lingering handoff:
+            # the successor is already durably recorded (content field, dot-safe)
+            echo "consumed-by $(sed -n 's/^successor=//p' "$LF_ROOT/consumed/$1.gen$gen")"
         elif ls "$LF_ROOT/handoffs/$1."gen* >/dev/null 2>&1; then
             echo "handoff-ready"
-        elif c=$(ls -1 "$LF_ROOT/consumed/$1.gen$gen".* 2>/dev/null | tail -1); [ -n "$c" ]; then
-            echo "consumed-by ${c##*.}"
         else
             echo "released"
         fi
     ) 9>>"$LF_ROOT/.lock"
 }
 
-lf_recover_finish() {  # $1 row — mint the lease for the RECORDED successor, nobody else
+lf_recover_finish() {  # $1 row — retire any leftover handoff, mint the RECORDED successor
     _lf_id "$1" || return 1
     _lf_halt || return 9
     (
@@ -471,17 +505,21 @@ lf_recover_finish() {  # $1 row — mint the lease for the RECORDED successor, n
         _lf_halt || exit 9
         _lf_dead "$1" || exit 3
         _lf_lease_live "$1" && exit 1
-        local c now gen
+        local now gen succ h
         gen=$(_lf_lease_field "$1" generation); gen=${gen:-0}
-        c=$(ls -1 "$LF_ROOT/consumed/$1.gen$gen".* 2>/dev/null | tail -1)
-        [ -n "$c" ] || exit 1
-        now=$(_lf_checked_now) || exit 1
+        [ -f "$LF_ROOT/consumed/$1.gen$gen" ] || exit 1
+        succ=$(sed -n 's/^successor=//p' "$LF_ROOT/consumed/$1.gen$gen")
+        _lf_id "$succ" || exit 1
+        now=$(_lf_now_ro) || exit 1
+        h=$(ls -1 "$LF_ROOT/handoffs/$1."gen* 2>/dev/null | head -1)
+        [ -n "$h" ] && _lf_remove "$h"
         _lf_write "$LF_ROOT/rows/$1.lease" <<EOF
 row=$1
 generation=$((gen + 1))
-session=${c##*.}
+session=$succ
 expiry=$((now + 300))
 EOF
-        echo "${c##*.}"
+        _lf_bump_floor "$now"
+        echo "$succ"
     ) 9>>"$LF_ROOT/.lock"
 }
