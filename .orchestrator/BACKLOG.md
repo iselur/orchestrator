@@ -16,9 +16,12 @@ against this description: what matches, what doesn't, what is missing.
 
 1. **Codex priority tier fast → standard** (cost lever from the 2026-07-15 token findings; owner
    2026-07-16): flip worker/reviewer/spec-author Codex calls to standard processing; watch dispatch ceilings.
-2. **Auto-resume after a usage window** — long-lived session plus a watchdog that restarts it and
-   alerts when work is pending but nothing has run (operator-approved 2026-07-14). Needs a plan,
-   then finish: fold in the user-presence standby rework now under owner-granted extra review rounds.
+2. **Auto-resume after a usage window (descoped 2026-07-16, R87)** — the long-lived session, the
+   watchdog restart/alert, session rotation, and user-presence standby already shipped (R39/R43/R72).
+   Remaining piece only: when a usage limit is hit, retry on a blind fixed timer (no reset-time
+   parsing — a retry into a still-closed window is harmless and re-arms) until the window reopens,
+   and stand down on a dirty or off-branch checkout so automation never fights the owner's own work
+   or another branch. Off by default (observe mode); the owner flips `USAGE_RETRY_MODE=active`.
 3. **Program B (rev 4)** — rotation, task leases, watchdog, compaction lifecycle; falsifier first.
 4. **Program C (rev 4, after B)** — thin orchestrator, specialists, authoring flip, unpin `CLAUDE_CODE_SUBAGENT_MODEL`.
 5. **Ship a real product, end to end** — top idea from `~/orchestrator-private/IDEAS-shortlist/`,

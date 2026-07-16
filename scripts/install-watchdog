@@ -37,9 +37,15 @@ case "${1:-install}" in
       cat > "$WD/env" <<'EOF'
 # Local watchdog config (mode 600, never tracked). Sourced by scripts/watchdog.
 IDLE_ALERT_SECONDS=21600
-# observe: never send post-reset input (required until the natural-limit follow-up row closes
-# and the owner approves 'active' — R39 brief, gate 9).
+# observe: record that a usage limit was seen, send NOTHING. 'active' sends one continue nudge
+# after each retry cadence (or respawns a dead pane). observe is the required default; the owner
+# flips to active only deliberately, after installing this change (see ORCH_ALLOW_ACTIVE_RETRY).
 USAGE_RETRY_MODE=observe
+# Blind retry cadence: how long to wait after a usage limit before retrying. The reset time is not
+# parsed — a retry into a still-closed window is harmless and simply re-arms. Cap bounds how many
+# consecutive retries pass before one ALERT-usage-stuck is raised (a heartbeat resets the count).
+USAGE_RETRY_INTERVAL=1800
+USAGE_RETRY_CAP=12
 # External alert delivery (owner-approved channel, alert-channel gate). Local ALERT records and
 # journal lines happen regardless; leave these unset until the owner picks the channel.
 #ALERT_URL=
@@ -50,10 +56,10 @@ EOF
     fi
     [ "$(stat -c %a "$WD/env")" = "600" ] || die "$WD/env must be mode 600"
     if ! grep -q '^USAGE_RETRY_MODE=observe' "$WD/env"; then
-      # R39 requires observe at installation; 'active' is the follow-up gate's owner decision
-      # (brief gate 9). The override exists solely for that later, owner-approved install.
+      # observe is required at installation; 'active' (auto-sending retries) is a deliberate,
+      # separate owner decision made when installing this safety-machinery change, never a default.
       [ "${ORCH_ALLOW_ACTIVE_RETRY:-}" = "1" ] \
-        || die "USAGE_RETRY_MODE is not 'observe'; refusing (owner override after gate 9: ORCH_ALLOW_ACTIVE_RETRY=1)"
+        || die "USAGE_RETRY_MODE is not 'observe'; refusing (owner override for active retry: ORCH_ALLOW_ACTIVE_RETRY=1)"
     fi
 
     render orchestrator-watchdog.service "$MARK

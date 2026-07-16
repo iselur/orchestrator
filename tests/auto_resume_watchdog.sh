@@ -17,7 +17,7 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 
 # ---- scratch repo root ---------------------------------------------------------------------------
 R="$tmp/root"
-mkdir -p "$R/scripts/lib/usage-framings" "$R/.orchestrator/state"
+mkdir -p "$R/scripts/lib" "$R/.orchestrator/state"
 cp -p scripts/watchdog scripts/intake scripts/install-watchdog "$R/scripts/"
 cp -p scripts/lib/watchdog-resume-prompt.txt "$R/scripts/lib/"
 LEDGER="$R/.orchestrator/REQUEST-LEDGER.md"
@@ -137,6 +137,23 @@ echo "ps $*" >> "$FAKE_TMUX_STATE/invocations.log"   # shared log: adjacency ass
 [ -n "${FAKE_PS_ADD_ROW:-}" ] && [ "$n" -gt "${FAKE_PS_ADD_AFTER:-0}" ] && printf '%s\n' "$FAKE_PS_ADD_ROW"
 exit 0
 FAKE
+
+cat > "$F/git" <<'FAKE'
+#!/usr/bin/env bash
+# Fake git for the checkout guard. The scratch root is NOT a real repository, so a real git would
+# make checkout_clean() park every scenario as dirty. This answers only the two read-only queries
+# checkout_clean() makes: which branch HEAD is on, and whether the tree is dirty. Defaults are a
+# clean tree on 'main'. FAKE_GIT_BRANCH sets the branch; FAKE_GIT_DIRTY non-empty makes the tree
+# dirty (its value is the porcelain line); FAKE_GIT_FAIL makes git unable to answer at all
+# (missing repo / broken git), exactly the "any doubt -> stand down" case.
+[ -n "${FAKE_GIT_FAIL:-}" ] && exit 128
+[ "${1:-}" = "-C" ] && shift 2      # ignore the '-C <dir>' the watchdog always passes
+case "${1:-}" in
+  symbolic-ref) printf '%s\n' "${FAKE_GIT_BRANCH:-main}" ;;
+  status)       [ -n "${FAKE_GIT_DIRTY:-}" ] && printf '%s\n' "$FAKE_GIT_DIRTY" ;;
+esac
+exit 0
+FAKE
 chmod +x "$F"/*
 
 export FAKE_TMUX_STATE="$TS" FAKE_ACTIVE_UNITS="$tmp/active-units" FAKE_CURL_LOG="$tmp/curl.log" FAKE_UUID_COUNT="$tmp/uuid-count" FAKE_PS_COUNT="$tmp/ps-count"
@@ -147,13 +164,14 @@ run_wd() { # run one watchdog invocation in the sandbox
     bash "$R/scripts/watchdog" "${@:-check}" >> "$tmp/wd.log" 2>&1
 }
 reset() { # fresh state between scenarios
-  rm -rf "$WDIR" "$TS" "$R/.orchestrator/HALT" "$R/.orchestrator/state" "$R/scripts/lib/usage-framings"
-  mkdir -p "$TS/sessions" "$R/.orchestrator/state" "$R/scripts/lib/usage-framings"
+  rm -rf "$WDIR" "$TS" "$R/.orchestrator/HALT" "$R/.orchestrator/state"
+  mkdir -p "$TS/sessions" "$R/.orchestrator/state"
   rm -f "$FAKE_CURL_LOG" "$FAKE_ACTIVE_UNITS" "$FAKE_UUID_COUNT" "$FAKE_PS_COUNT" "$LEDGER.lock"
   printf '%s\n' "$HEADER" > "$LEDGER"
   unset FAKE_CURL_EXIT FAKE_TMUX_FAIL FAKE_CLAUDE_VERSION FAKE_PS_TABLE FAKE_PS_FAIL \
         FAKE_PS_MAKE_HALT FAKE_PS_MAKE_HALT_ON FAKE_PS_ADD_ROW FAKE_PS_ADD_AFTER \
-        FAKE_PS_SWAP_PANE FAKE_PS_SWAP_ON FAKE_TMUX_SWAP_AFTER_NEW FAKE_TMUX_SWAP_LP_ON FAKE_TMUX_SWAP_PANE_LP_ON 2>/dev/null || true
+        FAKE_PS_SWAP_PANE FAKE_PS_SWAP_ON FAKE_TMUX_SWAP_AFTER_NEW FAKE_TMUX_SWAP_LP_ON FAKE_TMUX_SWAP_PANE_LP_ON \
+        FAKE_GIT_BRANCH FAKE_GIT_DIRTY FAKE_GIT_FAIL 2>/dev/null || true
 }
 open_row() { (cd "$R" && scripts/intake -g "${1:-drill goal}" -d "done when the drill criterion holds" >/dev/null); }
 keys() { cat "$TS/sessions/orch-auto.keys" 2>/dev/null || true; }
@@ -162,6 +180,7 @@ invoked() { # count of a given tmux subcommand; a missing log means zero calls, 
   grep -c "^tmux $1" "$TS/invocations.log" || true
 }
 dead_pane() { echo bash > "$TS/sessions/orch-auto.cmd"; }
+ps_table() { printf '%s\n' "$@" > "$tmp/ps-table"; export FAKE_PS_TABLE="$tmp/ps-table"; }
 bind_session() { # record the ownership binding a real launch would have written ($0:100:500:%5 is
   # the fake tmux's constant identity) — hand-built sessions need it now that every action verifies it
   mkdir -p "$WDIR"
@@ -284,34 +303,36 @@ run_wd
 [ -e "$WDIR/ALERT-corrupt-session-id" ] && ok "lost id raised the visible alert" || bad "lost id failed silently"
 grep -q -- 'claude --continue' "$R/scripts/watchdog" && bad "a claude --continue invocation still exists in the watchdog" || ok "no claude --continue invocation anywhere in the program"
 
-echo "== W5 (c): approved framing arms a wait; no input before the deadline; observe mode after it"
+echo "== W5 (c): a usage limit arms a timed retry; no input before the cadence; observe records after"
 reset; open_row
-printf 's/.*DRILL-LIMIT-RESET-EPOCH ([0-9]+).*/\\1/p\n' > "$R/scripts/lib/usage-framings/drill.sed"
-run_wd
-future=$(( $(date +%s) + 3600 ))
-printf 'DRILL-LIMIT-RESET-EPOCH %s\n' "$future" >> "$WDIR/transcript.log"
+run_wd                                              # launch, gen=1
+gen=$(cat "$WDIR/generation")
+now=$(date +%s)
+printf 'Claude usage limit reached; please try again later.\n' >> "$WDIR/transcript.log"
 n_before=$(keys | wc -l)
 run_wd
-read -r wait_epoch wait_gen wait_fr wait_range < "$WDIR/usage-wait" 2>/dev/null || wait_epoch=""
-[ "$wait_epoch" = "$future" ] && [ "$wait_fr" = "drill.sed" ] && [ -n "${wait_range:-}" ] \
-  && ok "wait recorded with epoch, framing identity, and transcript range" || bad "usage-wait missing/wrong"
-[ "$(keys | wc -l)" = "$n_before" ] && ok "no input sent before the deadline" || bad "input sent during the wait"
-echo "$(( $(date +%s) - 60 )) $wait_gen drill.sed" > "$WDIR/usage-wait"
+read -r wait_epoch wait_gen _ < "$WDIR/usage-wait" 2>/dev/null || wait_epoch=""
+[ "${wait_gen:-}" = "$gen" ] && [ -n "${wait_epoch:-}" ] && [ "$wait_epoch" -gt "$now" ] \
+  && ok "limit text armed a wait for a future retry epoch in the current generation" || bad "usage-wait missing/wrong: $(cat "$WDIR/usage-wait" 2>/dev/null)"
+[ "$(keys | wc -l)" = "$n_before" ] && ok "no input sent before the cadence elapses" || bad "input sent during the wait"
+echo "$(( now - 60 )) $gen" > "$WDIR/usage-wait"    # force the cadence to have elapsed
 run_wd
 [ -e "$WDIR/ALERT-usage-would-retry" ] && ok "observe mode recorded a would-retry" || bad "no would-retry record"
 [ "$(keys | wc -l)" = "$n_before" ] && ok "observe mode sent nothing" || bad "observe mode sent input"
-[ ! -e "$WDIR/usage-wait" ] && ok "expired wait cleared" || bad "wait not cleared"
+[ ! -e "$WDIR/usage-wait" ] && ok "expired wait consumed" || bad "wait not cleared"
 
-echo "== W6 (c): active mode sends exactly one retry after the deadline"
+echo "== W6 (c): active mode sends exactly one continue nudge after the cadence, and counts it"
 printf 'USAGE_RETRY_MODE=active\n' > "$WDIR/env"; chmod 600 "$WDIR/env"
 gen=$(cat "$WDIR/generation")
-echo "$(( $(date +%s) - 60 )) $gen drill.sed" > "$WDIR/usage-wait"
+echo "$(( $(date +%s) - 60 )) $gen" > "$WDIR/usage-wait"
 n_before=$(keys | wc -l)
 run_wd
 [ "$(keys | wc -l)" = "$((n_before + 1))" ] && ok "exactly one retry sent" || bad "retry count wrong"
-keys | tail -1 | grep -q "usage window has reset" && ok "retry is the reset prompt" || bad "unexpected retry content"
+keys | tail -1 | grep -qi "usage limit may have cleared" && ok "retry is the continue nudge" || bad "unexpected retry content: $(keys | tail -1)"
+[ ! -e "$WDIR/usage-wait" ] && ok "wait consumed on the successful send" || bad "wait not consumed"
+[ "$(cat "$WDIR/usage-retries" 2>/dev/null)" = "1" ] && ok "the retry counts toward the stuck cap" || bad "retry not counted"
 run_wd
-[ "$(keys | wc -l)" = "$((n_before + 1))" ] && ok "retry not repeated" || bad "retry repeated"
+[ "$(keys | wc -l)" = "$((n_before + 1))" ] && ok "retry not repeated (no wait armed)" || bad "retry repeated"
 
 echo "== W6b (c): corrupt usage-wait state is discarded, never obeyed, even in active mode"
 echo "garbage not-a-number x" > "$WDIR/usage-wait"
@@ -319,54 +340,100 @@ n_before=$(keys | wc -l)
 run_wd
 [ "$(keys | wc -l)" = "$n_before" ] && ok "corrupt wait sent nothing" || bad "corrupt wait reached the send branch"
 [ ! -e "$WDIR/usage-wait" ] && ok "corrupt wait discarded" || bad "corrupt wait kept"
-[ -e "$WDIR/ALERT-usage-unknown" ] && ok "corrupt wait raised an incident" || bad "corrupt wait silent"
+[ -e "$WDIR/ALERT-usage-corrupt" ] && ok "corrupt wait raised an incident" || bad "corrupt wait silent"
 
 echo "== W7 (c): a stale wait from an older pane generation is discarded, not obeyed"
 gen=$(cat "$WDIR/generation")
-echo "$(( $(date +%s) - 60 )) $(( gen - 1 )) drill.sed" > "$WDIR/usage-wait"
+echo "$(( $(date +%s) - 60 )) $(( gen - 1 ))" > "$WDIR/usage-wait"
 n_before=$(keys | wc -l)
 run_wd
 [ ! -e "$WDIR/usage-wait" ] && [ "$(keys | wc -l)" = "$n_before" ] && ok "old-generation wait dropped silently" || bad "old-generation wait acted on"
 
-echo "== W8 (c): spoof text without an approved framing -> one incident, retry disabled, recovery unaffected"
+echo "== W8 (c): limit text then pane exit -> respawn DEFERRED while the cadence is armed (design-bug fix)"
 reset; open_row
+run_wd                                              # launch, gen=1
+gen=$(cat "$WDIR/generation")
+resumes_before=$(grep -c -- '--resume' <(keys) || true)
+printf 'Approaching the limit... usage limit reached.\n' >> "$WDIR/transcript.log"
+dead_pane                                           # claude printed the banner, then exited
 run_wd
-printf 'The model says: usage limit reached, resets at 5pm somehow\n' >> "$WDIR/transcript.log"
+read -r w_epoch w_gen _ < "$WDIR/usage-wait" 2>/dev/null || w_epoch=""
+[ -n "${w_epoch:-}" ] && [ "$w_epoch" -gt "$(date +%s)" ] && ok "limit-then-exit armed a timed wait" || bad "no wait armed on limit-then-exit"
+[ "$(grep -c -- '--resume' <(keys) || true)" = "$resumes_before" ] && ok "respawn deferred while the cadence is armed" || bad "respawned into a still-closed window"
+echo "$(( $(date +%s) - 60 )) $gen" > "$WDIR/usage-wait"   # cadence elapses
 run_wd
-[ ! -e "$WDIR/usage-wait" ] && ok "spoof did not arm a wait" || bad "spoof armed a wait"
-[ -e "$WDIR/ALERT-usage-unknown" ] && ok "unknown-framing incident raised" || bad "no incident for limit-like text"
-run_wd
-[ "$(grep -c '^ts=' "$WDIR/ALERT-usage-unknown")" = "1" ] && ok "one incident per generation" || bad "incident duplicated"
-dead_pane
-run_wd
-grep -q -- '--resume' <(keys) && ok "dead-pane recovery survived the classifier failure" || bad "classifier failure blocked recovery"
+[ "$(grep -c -- '--resume' <(keys) || true)" = "$((resumes_before + 1))" ] && ok "one --resume after the cadence elapses" || bad "post-cadence recovery wrong"
+[ ! -e "$WDIR/usage-wait" ] && ok "the dead-pane resume consumed the wait" || bad "wait survived the resume"
 
-echo "== W8b (c): CLI version change with fixtures present -> one re-verification incident, nothing stops"
+echo "== W8b (c): blind retrying is bounded — past the cap ONE usage-stuck alert, supervision never stops"
 reset; open_row
-printf 's/.*DRILL-LIMIT-RESET-EPOCH ([0-9]+).*/\\1/p\n' > "$R/scripts/lib/usage-framings/drill.sed"
-run_wd
-export FAKE_CLAUDE_VERSION="1.0.0 (Fake)"
-printf 'some output\n' >> "$WDIR/transcript.log"; run_wd
-export FAKE_CLAUDE_VERSION="2.0.0 (Fake)"
-printf 'more output\n' >> "$WDIR/transcript.log"; run_wd
-[ -e "$WDIR/ALERT-cli-version" ] && ok "version change raised a re-verification incident" || bad "version change unnoticed"
-dead_pane; run_wd
-grep -q -- '--resume' <(keys) && ok "supervision unaffected by the version incident" || bad "version incident froze recovery"
-unset FAKE_CLAUDE_VERSION
+run_wd                                              # launch, gen=1
+gen=$(cat "$WDIR/generation")
+printf 'USAGE_RETRY_MODE=active\nUSAGE_RETRY_CAP=3\n' > "$WDIR/env"; chmod 600 "$WDIR/env"
+for i in 1 2 3; do
+  echo "$(( $(date +%s) - 60 )) $gen" > "$WDIR/usage-wait"
+  run_wd
+done
+[ "$(cat "$WDIR/usage-retries" 2>/dev/null)" = "3" ] && ok "each elapsed cadence counted one retry" || bad "retry counter wrong: $(cat "$WDIR/usage-retries" 2>/dev/null)"
+[ ! -e "$WDIR/ALERT-usage-stuck" ] && ok "at the cap, no stuck alert yet" || bad "stuck alert raised early"
+echo "$(( $(date +%s) - 60 )) $gen" > "$WDIR/usage-wait"
+run_wd                                              # 4th retry: past the cap
+[ -e "$WDIR/ALERT-usage-stuck" ] && ok "past the cap, one usage-stuck alert" || bad "no stuck alert past the cap"
+[ "$(grep -c '^ts=' "$WDIR/ALERT-usage-stuck")" = "1" ] && ok "stuck alert raised once, not per tick" || bad "stuck alert duplicated"
+run_wd heartbeat
+[ "$(cat "$WDIR/usage-retries" 2>/dev/null)" = "0" ] && ok "a heartbeat resets the retry counter (retries worked)" || bad "counter not reset by heartbeat"
 
-echo "== W9: replay resistance — consumed bytes and external truncation never re-arm anything"
+echo "== W9: replay resistance — consumed bytes and external truncation never re-arm a wait"
 reset; open_row
-printf 's/.*DRILL-LIMIT-RESET-EPOCH ([0-9]+).*/\\1/p\n' > "$R/scripts/lib/usage-framings/drill.sed"
+run_wd                                              # launch, gen=1
+printf 'usage limit reached\n' >> "$WDIR/transcript.log"
+run_wd                                              # new bytes -> wait armed
+[ -e "$WDIR/usage-wait" ] && ok "limit text armed a wait" || bad "limit text did not arm a wait"
+rm -f "$WDIR/usage-wait"                            # consume it
+run_wd                                              # same bytes already consumed -> must NOT re-arm
+[ ! -e "$WDIR/usage-wait" ] && ok "already-consumed limit text did not re-arm the wait" || bad "replay re-armed the wait"
+size=$(stat -c %s "$WDIR/transcript.log")
+echo "999999999" > "$WDIR/transcript.offset"        # offset beyond file size = external truncation
 run_wd
-printf 'DRILL-LIMIT-RESET-EPOCH %s\n' "$(( $(date +%s) + 3600 ))" >> "$WDIR/transcript.log"
+[ ! -e "$WDIR/usage-wait" ] && ok "external truncation armed nothing" || bad "truncation armed a wait"
+[ "$(cat "$WDIR/transcript.offset")" = "$size" ] && ok "the offset was reset to the file size after truncation" || bad "offset not reset to size"
+
+echo "== W9b (b): a dirty or off-branch shared checkout parks supervision, like a live owner session"
+reset; open_row
+export FAKE_GIT_DIRTY=" M scripts/watchdog"
 run_wd
-rm -f "$WDIR/usage-wait"
+[ "$(invoked new-session)" = "0" ] && ok "dirty tree: nothing launched" || bad "launched on a dirty checkout"
+[ -e "$WDIR/standdown-dirty" ] && ok "dirty tree: stand-down marker set" || bad "no stand-down marker"
+[ -e "$WDIR/ALERT-checkout-dirty" ] && ok "dirty tree: visible alert" || bad "dirty stand-down silent"
+unset FAKE_GIT_DIRTY
+export FAKE_GIT_BRANCH=codex/SPEC-9
 run_wd
-[ ! -e "$WDIR/usage-wait" ] && ok "already-consumed framing did not re-arm the wait" || bad "replay re-armed the wait"
-echo "999999999" > "$WDIR/transcript.offset"      # offset beyond file size = external truncation
+[ "$(invoked new-session)" = "0" ] && ok "off-branch HEAD: still parked" || bad "launched off the expected branch"
+unset FAKE_GIT_BRANCH
+export FAKE_GIT_FAIL=1
 run_wd
-grep -q 'shrank' "$WDIR/ALERT-usage-unknown" 2>/dev/null && ok "external truncation raised an incident" || bad "truncation silent"
-[ ! -e "$WDIR/usage-wait" ] && ok "truncation armed nothing" || bad "truncation armed a wait"
+[ "$(invoked new-session)" = "0" ] && ok "git cannot answer: still parked (any doubt stands down)" || bad "launched when git could not answer"
+unset FAKE_GIT_FAIL
+run_wd
+[ ! -e "$WDIR/standdown-dirty" ] && [ "$(invoked new-session)" = "1" ] && ok "clean tree on main: marker cleared, launch resumed" || bad "no resume after the checkout went clean"
+
+echo "== W9c: standby and HALT outrank an expired usage wait — presence and HALT win, the wait stays armed"
+reset; open_row
+run_wd                                              # launch, gen=1
+printf 'USAGE_RETRY_MODE=active\n' > "$WDIR/env"; chmod 600 "$WDIR/env"
+gen=$(cat "$WDIR/generation")
+echo "$(( $(date +%s) - 60 )) $gen" > "$WDIR/usage-wait"
+touch "$R/.orchestrator/HALT"
+n_before=$(keys | wc -l)
+run_wd
+[ "$(keys | wc -l)" = "$n_before" ] && [ -e "$WDIR/usage-wait" ] && ok "HALT: expired wait not acted on, still armed" || bad "HALT let the retry through"
+rm -f "$R/.orchestrator/HALT"
+ps_table "4242 1 claude"
+run_wd
+[ "$(keys | wc -l)" = "$n_before" ] && [ -e "$WDIR/usage-wait" ] && ok "standby: expired wait deferred, still armed" || bad "standby let the retry through"
+unset FAKE_PS_TABLE
+run_wd
+[ "$(keys | wc -l)" = "$((n_before + 1))" ] && ok "once HALT and the user are gone, the retry fires" || bad "retry never fired after the guards cleared"
 
 echo "== W10 (d): idle alert — local record first, delivery, dedup, retry-on-failure"
 reset; open_row
@@ -575,8 +642,6 @@ run_wd
 [ "$(invoked new-session)" = "2" ] && [ -e "$WDIR/last-run" ] && ok "launch retried and succeeded next tick" || bad "no retry after failure"
 [ ! -e "$TS/breach.log" ] && ok "claude was never executed beyond --version" || bad "HERMETIC BREACH: $(cat "$TS/breach.log")"
 
-ps_table() { printf '%s\n' "$@" > "$tmp/ps-table"; export FAKE_PS_TABLE="$tmp/ps-table"; }
-
 echo "== W18: user-presence standby — a foreign claude parks the watchdog, resumes when it exits"
 reset; open_row
 ps_table "4242 1 claude"                           # a claude the watchdog does not supervise
@@ -709,7 +774,7 @@ reset; open_row
 run_wd                                              # launch
 printf 'USAGE_RETRY_MODE=active\n' > "$WDIR/env"; chmod 600 "$WDIR/env"
 gen=$(cat "$WDIR/generation")
-echo "$(( $(date +%s) - 60 )) $gen drill.sed" > "$WDIR/usage-wait"
+echo "$(( $(date +%s) - 60 )) $gen" > "$WDIR/usage-wait"
 ps_table "4242 1 claude"
 n_before=$(keys | wc -l)
 run_wd
@@ -717,7 +782,7 @@ run_wd
 [ -e "$WDIR/usage-wait" ] && ok "standby: the armed wait stays armed" || bad "standby consumed the wait"
 unset FAKE_PS_TABLE
 run_wd
-[ "$(keys | wc -l)" = "$((n_before + 1))" ] && keys | tail -1 | grep -q "usage window has reset" \
+[ "$(keys | wc -l)" = "$((n_before + 1))" ] && keys | tail -1 | grep -qi "usage limit may have cleared" \
   && ok "deferred retry fired once the user left" || bad "deferred retry lost"
 
 echo "== W18j: idle rotation is deferred during standby, never a teardown over a user's head"
@@ -750,7 +815,7 @@ reset; open_row
 run_wd
 printf 'USAGE_RETRY_MODE=active\n' > "$WDIR/env"; chmod 600 "$WDIR/env"
 gen=$(cat "$WDIR/generation")
-echo "$(( $(date +%s) - 60 )) $gen drill.sed" > "$WDIR/usage-wait"
+echo "$(( $(date +%s) - 60 )) $gen" > "$WDIR/usage-wait"
 rm -f "$FAKE_PS_COUNT"
 export FAKE_PS_ADD_ROW="7777 1 claude" FAKE_PS_ADD_AFTER=1
 n_before=$(keys | wc -l)
@@ -835,7 +900,7 @@ reset; open_row
 run_wd
 printf 'USAGE_RETRY_MODE=active\n' > "$WDIR/env"; chmod 600 "$WDIR/env"
 gen=$(cat "$WDIR/generation")
-echo "$(( $(date +%s) - 60 )) $gen drill.sed" > "$WDIR/usage-wait"
+echo "$(( $(date +%s) - 60 )) $gen" > "$WDIR/usage-wait"
 printf '$7:900:800:%%9\n' > "$TS/sessions/orch-auto.pane"
 n_before=$(keys | wc -l)
 run_wd
@@ -858,13 +923,13 @@ reset; open_row
 run_wd
 printf 'USAGE_RETRY_MODE=active\n' > "$WDIR/env"; chmod 600 "$WDIR/env"
 gen=$(cat "$WDIR/generation")
-echo "$(( $(date +%s) - 60 )) $gen drill.sed" > "$WDIR/usage-wait"
+echo "$(( $(date +%s) - 60 )) $gen" > "$WDIR/usage-wait"
 export FAKE_TMUX_FAIL=send-keys
 run_wd
 unset FAKE_TMUX_FAIL
 [ -e "$WDIR/usage-wait" ] && ok "failed send: wait stays armed for the next tick" || bad "failed send consumed the wait"
 run_wd
-keys | tail -1 | grep -q "usage window has reset" && [ ! -e "$WDIR/usage-wait" ] \
+keys | tail -1 | grep -qi "usage limit may have cleared" && [ ! -e "$WDIR/usage-wait" ] \
   && ok "retry delivered next tick and the wait was consumed" || bad "armed wait never delivered"
 
 echo "== W20: gate adjacency — presence read, then identity verification, then the action, nothing between"
@@ -876,7 +941,7 @@ run_wd                                              # (b) respawn send
 adjacent 'tmux send-keys' && ok "respawn: identity is the final read before the send" || bad "respawn: gates not adjacent to the send"
 printf 'USAGE_RETRY_MODE=active\n' > "$WDIR/env"; chmod 600 "$WDIR/env"
 gen=$(cat "$WDIR/generation")
-echo "$(( $(date +%s) - 60 )) $gen drill.sed" > "$WDIR/usage-wait"
+echo "$(( $(date +%s) - 60 )) $gen" > "$WDIR/usage-wait"
 run_wd                                              # (c) retry send
 adjacent 'tmux send-keys' && ok "retry: identity is the final read before the send" || bad "retry: gates not adjacent to the send"
 reset
