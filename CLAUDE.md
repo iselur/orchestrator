@@ -2,7 +2,7 @@
 
 This file is the whole rulebook; CI caps its size. A new rule requires a real failure in shipped
 work and REPLACES a line, never stacks. Roles, not model names: **owner** (the human),
-**orchestrator**, **worker**, **reviewer** — AGENTS.md maps roles to today's models and commands.
+**orchestrator**, **worker**, **reviewer** — scripts/models.json maps roles to today's models; AGENTS.md holds the commands.
 
 ## Session start
 
@@ -42,8 +42,8 @@ Prefer a fresh session per workstream.
 ## Safety invariants (never violate)
 
 - `main` changes only by the owner, or by the orchestrator merging a `ready-for-main` PR into `main` whose own `ci` check is green and whose exact diff holds a binding PASS (owner grant 2026-07-15). `ready-for-main` changes only through a pull request with `ci` green.
-- External-CLI workers run as a separate identity; no isolation means no launch, and
-  `ORCH_ALLOW_UNISOLATED=1` overrides that only on the owner's explicit, recorded instruction.
+- External-CLI workers run as a separate identity; no isolation means no launch.
+  `ORCH_ALLOW_UNISOLATED=1` needs the owner's explicit instruction, and its use is recorded.
   Subagent workers run inside the orchestrator's own session and trust domain.
 - A test that did not run did not pass; a worker's prose is never a grade.
 - Every high-risk dispatch needs an approval file from the owner, which the orchestrator never
