@@ -155,10 +155,11 @@ def run_die(fn, *a):
     except SystemExit as e:
         return e.code, ""
 
-def write_receipt(model="claude-sonnet-4-6"):
-    (attd / "raw" / "subagent-receipt.json").write_text(
-        json.dumps({"model": model, "harness_pin": "claude-sonnet-4-6",
-                    "launched": "2026-07-16T12:00:00Z"}))
+def write_receipt(model="claude-sonnet-4-6", **over):
+    body = {"model": model, "harness_pin": "claude-sonnet-4-6",
+            "launched": "2026-07-16T12:00:00Z"}
+    body.update(over)
+    (attd / "raw" / "subagent-receipt.json").write_text(json.dumps(body))
 
 def clear_raw():
     for f in ("worker-last-message.txt", "subagent-receipt.json"):
@@ -194,6 +195,12 @@ write_receipt(model="claude-opus-4-8")
 rc, _ = run_die(d.cmd_continue, AID)
 check("continue refuses a receipt naming a model other than the frozen worker_model (exit 6)",
       rc == 6)
+write_receipt(harness_pin=None)
+rc, _ = run_die(d.cmd_continue, AID)
+check("continue refuses a receipt without the harness_pin string (exit 6)", rc == 6)
+write_receipt(harness_pin="")
+rc, _ = run_die(d.cmd_continue, AID)
+check("continue refuses an empty harness_pin — record the pin or 'none' (exit 6)", rc == 6)
 write_receipt()
 
 # continue: refuses when state is not awaiting_build (cancel/reconcile won, or double continue)
@@ -354,6 +361,12 @@ check("the orchestrator-packaged commit is authored Worker <frozen model>",
 check("PR provenance names the orchestrator trust domain, not a sandbox that never ran",
       "orchestrator trust domain" in prbody.get("body", "")
       and "workspace-write" not in prbody.get("body", ""))
+check("break-glass PR provenance admits the unisolated test phase, never claims network=off",
+      "network=off" not in prbody.get("body", "")
+      and "UNISOLATED" in prbody.get("body", ""))
+check("an isolated record still claims network=off for tests (and only then)",
+      "network=off for tests" in d.pr_body(SID, {**json.loads((attd / 'launch.json').read_text()),
+                                                 "isolation": True}, "c" * 40))
 
 # ---- launch: awaiting_build with NO unit, honest provenance ----------------------------------
 lwork = pathlib.Path(tempfile.mkdtemp())
@@ -423,14 +436,68 @@ try:
     check("reconcile keeps a fresh awaiting_build pending (no unit by design)",
           row.get("status") == "awaiting_build"
           and json.loads((d.STATE / f"{LSID}.json").read_text())["status"] == "awaiting_build")
+    # deterministic interleavings (round-2 blocking 1): the locked CAS must SKIP, never
+    # overwrite, when another lifecycle operation moved the state between the unlocked scan
+    # and the lock — simulated by flipping the state from inside the locked re-read.
     llc["deadline_ts"] = time.time() - 5
     (d.ATTEMPTS / LSID / "1" / "launch.json").write_text(json.dumps(llc))
+    _orig_read = d.read_state
+    def _cancel_wins(spec_id):
+        st = _orig_read(spec_id)
+        if spec_id == LSID and st and st.get("status") == "awaiting_build":
+            return {**st, "status": "interrupted", "error_class": "cancelled"}
+        return st
+    d.read_state = _cancel_wins
+    try:
+        rc, out = run_die(d.cmd_reconcile)
+    finally:
+        d.read_state = _orig_read
+    rep = json.loads(out)
+    row = [r for r in rep["reconciled"] if r.get("attempt_id") == f"{LSID}-1"][0]
+    check("reconcile SKIPS an expired awaiting_build when a cancel won the lock first",
+          "skipped" in row.get("note", "")
+          and json.loads((d.STATE / f"{LSID}.json").read_text())["status"] == "awaiting_build")
     rc, out = run_die(d.cmd_reconcile)
     rep = json.loads(out)
     row = [r for r in rep["reconciled"] if r.get("attempt_id") == f"{LSID}-1"][0]
     check("reconcile expires awaiting_build to TERMINAL error_timeout at the frozen deadline",
           row.get("to") == "error_timeout"
           and json.loads((d.STATE / f"{LSID}.json").read_text())["status"] == "error_timeout")
+    # dead-unit relabel: a continue whose unit becomes visible between the unlocked scan and
+    # the locked recheck is a LIVE attempt — reconcile must skip it and leave 'running' alone.
+    d.write_state(LSID, {"attempt_id": f"{LSID}-1", "spec_id": LSID, "attempt": 1,
+                         "spec_digest": ldigest, "status": "running",
+                         "unit": d.unit_name(LSID, 1)})
+    flips = {"n": 0}
+    _orig_active = d.unit_active
+    def _appears_late(unit):
+        flips["n"] += 1
+        return flips["n"] > 1   # first (unlocked) check: gone; locked recheck: active
+    d.unit_active = _appears_late
+    try:
+        rc, out = run_die(d.cmd_reconcile)
+    finally:
+        d.unit_active = _orig_active
+    rep = json.loads(out)
+    row = [r for r in rep["reconciled"] if r.get("attempt_id") == f"{LSID}-1"][0]
+    check("reconcile skips a running claim whose unit appeared between scan and locked recheck",
+          "skipped" in row.get("note", "")
+          and json.loads((d.STATE / f"{LSID}.json").read_text())["status"] == "running")
+    # and a unit that is STILL gone under the lock is relabeled + torn down as before
+    _orig_teardown = d.teardown_attempt
+    d.unit_active = lambda unit: False
+    d.teardown_attempt = lambda aid, outer, **k: {"slice": "s", "outer_stop_rc": 0,
+                                                  "slice_stop_rc": 0, "remaining_units": [],
+                                                  "query_ok": True, "verified": True}
+    try:
+        rc, out = run_die(d.cmd_reconcile)
+    finally:
+        d.unit_active = _orig_active; d.teardown_attempt = _orig_teardown
+    rep = json.loads(out)
+    row = [r for r in rep["reconciled"] if r.get("attempt_id") == f"{LSID}-1"][0]
+    check("reconcile still relabels+tears down a confirmed-dead unit (interrupted, verified)",
+          row.get("to") == "interrupted" and row.get("teardown_verified") is True
+          and json.loads((d.STATE / f"{LSID}.json").read_text())["status"] == "interrupted")
 finally:
     d._list_codex_units = _orig_units2
 

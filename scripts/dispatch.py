@@ -2387,6 +2387,14 @@ def cmd_continue(attempt_id: str) -> None:
             f"{receipt.get('model') if isinstance(receipt, dict) else receipt!r} does not match "
             f"the launch-frozen worker_model {lc.get('worker_model')!r} — the BUILD that ran is "
             f"not the BUILD this attempt froze.", 6)
+    # Round-2 major 1: the receipt's REQUIRED shape is the addendum's — the launched model AND
+    # the harness model pin in effect ('none' when no pin was set). A receipt that omits the pin
+    # hides exactly the landmine the receipt exists to record (a harness env pin silently
+    # overriding the launched model), so it refuses.
+    pin = receipt.get("harness_pin")
+    if not isinstance(pin, str) or not pin:
+        die("refusing to grade: subagent receipt lacks a harness_pin string — record the "
+            "CLAUDE_CODE_SUBAGENT_MODEL pin in effect at BUILD time, or 'none'.", 6)
     deadline_ts = lc.get("deadline_ts")
     if deadline_ts is None:
         die(f"{attempt_id} launch record lacks deadline_ts (corrupt); refuse.", 6)
@@ -3541,9 +3549,14 @@ def pr_body(spec_id: str, lc: dict, wc: str) -> str:
         f"| base_sha | `{lc['base_sha']}` |\n"
         f"| worker_commit | `{wc}` |\n"
         f"| worker | `{lc['worker_model']}` (reasoning={lc['worker_effort']}), "
-        + ("subagent BUILD in the orchestrator trust domain (SECURITY.md), network=off for tests"
+        + ("subagent BUILD in the orchestrator trust domain (SECURITY.md)"
            if lc.get("worker_mode") == "subagent" else
-           "sandbox=workspace-write, network=off for tests (build phase is networked, see SECURITY.md)")
+           "sandbox=workspace-write (build phase is networked, see SECURITY.md)")
+        # Round-2 major 2: the test-phase network claim must match the FROZEN isolation
+        # decision — under break-glass (isolation:false, exposure recorded) the spec test runs
+        # as the operator with no private-network service, and provenance must say so.
+        + (", network=off for tests" if lc.get("isolation") else
+           ", tests ran UNISOLATED as the operator (break-glass, recorded in launch.json)")
         + " |\n"
         f"| reviewer | `{lc['reviewer_model']}` → PASS (bound) |\n\n"
         f"Integrity/scope/test/review all PASS. Provenance under "
@@ -3906,6 +3919,30 @@ def cmd_health(attempt_id: str, inactivity_min: int = HEALTH_INACTIVITY_MIN) -> 
 
 
 # ============================================================= reconcile ======
+def _locked_relabel(spec_id: str, snapshot: dict, new_fields: dict, recheck=None) -> bool:
+    """Reconcile's terminal relabel as a locked CAS (R73 Job 3 round-2 blocking 1): re-read the
+    canonical state under the ONE state lock, confirm it is still exactly the lifecycle situation
+    the unlocked scan diagnosed (same attempt, same status), run any extra in-lock recheck (e.g.
+    the unit is STILL gone), and only then write. `dispatch continue` holds this same lock across
+    its claim-and-unit-start and cancel labels under it — so a reconcile relabel can no longer
+    land on top of a claim or a cancellation it never saw; it skips and reports instead."""
+    STATE.mkdir(parents=True, exist_ok=True)
+    with open(STATE / ".lock", "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            cur = read_state(spec_id) or {}
+            if (cur.get("attempt_id") != snapshot.get("attempt_id")
+                    or cur.get("status") != snapshot.get("status")):
+                return False
+            if recheck is not None and not recheck():
+                return False
+            atomic_write(STATE / f"{spec_id}.json",
+                         json.dumps({**cur, **new_fields, "updated": now()}, indent=2))
+            return True
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
+
+
 def cmd_reconcile() -> None:
     """Session-start ritual (Gate 3 / CLAUDE.md): read state, inspect real units, mark drift.
 
@@ -3934,12 +3971,18 @@ def cmd_reconcile() -> None:
             except Exception as e:
                 expired, why = True, f"launch record unreadable for awaiting_build state ({e})"
             if expired:
-                write_state(spec_id, {**st, "status": "error_timeout",
-                                      "error_class": ERR_TIMEOUT,
-                                      "detail": f"reconcile: {why}; resumable as a fresh attempt"})
-                reconciled.append({"attempt_id": aid, "from": "awaiting_build",
-                                   "to": "error_timeout", "unit_active": False,
-                                   "remaining_units": [], "teardown_verified": True})
+                # Locked CAS (round-2 blocking 1): a cancel or continue that got the lock first
+                # already changed the status; skip and report rather than overwrite it.
+                if _locked_relabel(spec_id, st,
+                                   {"status": "error_timeout", "error_class": ERR_TIMEOUT,
+                                    "detail": f"reconcile: {why}; resumable as a fresh attempt"}):
+                    reconciled.append({"attempt_id": aid, "from": "awaiting_build",
+                                       "to": "error_timeout", "unit_active": False,
+                                       "remaining_units": [], "teardown_verified": True})
+                else:
+                    reconciled.append({"attempt_id": aid, "status": "awaiting_build",
+                                       "note": "state changed mid-reconcile (another lifecycle "
+                                               "operation owns this attempt); skipped"})
             else:
                 reconciled.append({"attempt_id": aid, "status": "awaiting_build",
                                    "unit_active": False,
@@ -3949,15 +3992,33 @@ def cmd_reconcile() -> None:
         unit = st.get("unit") or (unit_name(*parse_attempt_id(aid)) if aid else None)
         active = unit_active(unit) if unit else False
         if not active:
+            # Locked CAS BEFORE any teardown or relabel (round-2 blocking 1): re-read the state
+            # and RE-CHECK the unit under the same lock `dispatch continue` holds across its
+            # claim-and-unit-start — a claim whose unit became visible after our unlocked scan
+            # is a live attempt, not a crash; skip it. Only a confirmed still-gone unit on the
+            # still-identical state is relabeled, and only then is the slice torn down (the
+            # terminal label makes any racing lifecycle operation refuse from here).
+            def _still_gone():
+                return not (unit_active(unit) if unit else False)
+            if not _locked_relabel(
+                    spec_id, st,
+                    {"status": "interrupted", "error_class": "interrupted",
+                     "detail": "reconcile: state was LIVE but unit is gone (orchestrator/box "
+                               "restart or attempt deadline); resumable as a fresh attempt"},
+                    recheck=_still_gone):
+                reconciled.append({"attempt_id": aid, "status": st.get("status"),
+                                   "note": "state or unit changed mid-reconcile (another "
+                                           "lifecycle operation owns this attempt); skipped"})
+                continue
             td = {"remaining_units": [], "verified": True, "query_ok": True}
             if aid:
                 # Full teardown, not a bare slice stop: producer-first (a no-op if truly gone),
                 # then slice, then verify fail-closed — same path as cancel/timeout (B6).
                 td = teardown_attempt(aid, unit)
-            detail = ("reconcile: state was LIVE but unit is gone (orchestrator/box restart or "
-                      "attempt deadline); resumable as a fresh attempt") + _teardown_detail(td)
-            write_state(spec_id, {**st, "status": "interrupted", "error_class": "interrupted",
-                                  "detail": detail})
+            cur = read_state(spec_id) or {}
+            if cur.get("attempt_id") == aid and cur.get("status") == "interrupted":
+                write_state(spec_id, {**cur, "detail": (cur.get("detail", "")
+                                                        + _teardown_detail(td))})
             if aid and not td["verified"]:
                 escalate(spec_id, "reconcile teardown could not be verified clean (B6)",
                          {"attempt_id": aid, **td})
