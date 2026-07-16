@@ -18,7 +18,7 @@ proves them), **configured assumptions** (set up outside this repo, verified man
 | Worker changes outside the spec's declared scope are rejected | `tests/dispatch_gate4.sh`, `tests/scope_glob.sh` |
 | A verdict is bound to the exact diff and base; a stale base is refused | `tests/dispatch_gate4.sh` |
 | The rulebook and repo prose cannot silently grow back | `tests/rulebook_cap.sh`, `tests/prose_cap.sh`, `tests/plain_language.sh` |
-| Review rounds are capped at three per topic, in code (and only round-N.md files count as rounds), and the Codex-run reviewer refuses Codex-authored artifacts | `tests/review_cap.sh` |
+| Review rounds are capped at five per topic, in code (and only round-N.md files count as rounds), and the Codex-run reviewer refuses Codex-authored artifacts | `tests/review_cap.sh` |
 
 ## Configured assumptions (outside this repo; verify during bootstrap and after any GitHub change)
 

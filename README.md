@@ -11,7 +11,7 @@ orchestrator's under your recorded grant.
 ## How it works
 
 Give Claude (Orchestrator) a task and it turns the request into a checked spec, then delegates the
-build to Workers (Codex). Claude and Codex inspect and challenge the results for up to three review
+build to Workers (Codex). Claude and Codex inspect and challenge the results for up to five review
 rounds.
 
 Once started, the system can continue autonomously while you are away. A watchdog checks the
