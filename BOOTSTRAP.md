@@ -57,6 +57,13 @@ instance), then `./scripts/dispatch launch <SPEC-ID>` and `./scripts/dispatch aw
 Confirm it runs the worker in isolation, passes the gates + review, and opens a draft PR. **You**
 merge it.
 
+> **Don't dispatch the shipped sample specs (SPEC-001–017) for this check.** They are fixtures
+> and leftovers from this repo's own history, not a curated first exercise: some ship already
+> implemented in `scripts/lib/` (those no-op with `failed_worker_error: worker produced no
+> changes`), some deliberately probe failure and refusal paths, and the rest are obsolete
+> historical specs. For a dependable end-to-end run, write a fresh spec (a new small helper
+> + test is the fastest way).
+
 ## 7. Optional: plan-scoped autonomy
 
 Autonomy ships **disabled**. If (and only if) you want the orchestrator to merge in-scope PRs to
