@@ -66,6 +66,18 @@ printf -- '---\nid: PLAN-204\nauthor_model: gpt-5.6-sol\nauthor_model: claude-op
 # Finding-3 fixtures: two distinct Sol plans (ordering — multiple-plan refusal must precede the
 # codex self-review refusal), reusing PLAN-001 (sol) plus a second sol plan.
 mk_plan .orchestrator/plans/PLAN-205.md gpt-5.6-sol
+# Round-2 finding fixtures ----------------------------------------------------------------------
+# R2-finding-3: a reserved PLAN-NNN name whose frontmatter id DISAGREES. A mismatched (or symlinked)
+# sibling must never bind a stream artifact to the id its content claims — the reserved name and the
+# content id must agree or refuse. PLAN-301.md declares id: PLAN-999; PLAN-301.stdout is its sibling.
+printf -- '---\nid: PLAN-999\ncreated: 2026-07-16T00:00:00Z\nauthor_model: claude-opus-4-8\nstatus: draft\n---\n# mismatched-id body\n' > .orchestrator/plans/PLAN-301.md
+printf 'stdout whose sibling .md lies about its id\n' > .orchestrator/plans/PLAN-301.stdout
+# R2-finding-2: an INDENTED duplicate author_model. The col-0 key says claude; an indented second
+# key says sol. The indented line must still count toward ambiguity — refuse, never take the first.
+printf -- '---\nid: PLAN-302\nauthor_model: claude-opus-4-8\n author_model: gpt-5.6-sol\nstatus: draft\n---\n# body\n' > indented-dup.md
+# R2-finding-4: an ORDINARY doc that merely carries an author_model key but no PLAN id is NOT a plan.
+# It must keep its caller-chosen topic (behavior unchanged), not be refused as broken provenance.
+printf -- '---\ntitle: design note\nauthor_model: claude-opus-4-8\n---\n# an ordinary claude doc with an author_model field\n' > doc-with-author.md
 
 # 1. A Claude-authored plan (frontmatter author_model -> vendor claude) proceeds to Codex review
 #    under its bound topic, and the round is recorded.
@@ -188,6 +200,31 @@ scripts/review --topic wrong-topic --author codex --context .orchestrator/plans/
 rc=$?
 [ "$rc" = 6 ] && ok "single Sol plan under a renamed topic refuses via binding (exit 6, not 4)" \
   || bad "single Sol plan renamed topic gave exit $rc, expected 6"
+
+# 13. ROUND-2 FINDING 3 — a reserved PLAN-NNN name whose frontmatter id disagrees is refused
+#     (exit 2): the name and the content id must agree, so a mismatched/symlinked sibling can never
+#     move a stream artifact to a fresh round dir. Both the reserved .md and its .stdout refuse.
+scripts/review --topic plan-301 --author claude --context .orchestrator/plans/PLAN-301.md "review" >/dev/null 2>&1
+rc=$?
+[ "$rc" = 2 ] && ok "reserved .md whose frontmatter id disagrees refused (exit 2)" \
+  || bad "reserved-name/id mismatch (.md) gave exit $rc, expected 2"
+scripts/review --topic plan-301 --author claude --context .orchestrator/plans/PLAN-301.stdout "review" >/dev/null 2>&1
+rc=$?
+[ "$rc" = 2 ] && ok "reserved .stdout whose sibling id disagrees refused (exit 2)" \
+  || bad "reserved-name/id mismatch (.stdout) gave exit $rc, expected 2"
+
+# 14. ROUND-2 FINDING 2 — an INDENTED duplicate author_model must not be ignored: it is ambiguous
+#     provenance and refuses (exit 2), never taking the first (claude) value over the second (sol).
+scripts/review --topic plan-302 --author claude --context indented-dup.md "review" >/dev/null 2>&1
+rc=$?
+[ "$rc" = 2 ] && ok "indented duplicate author_model refused (exit 2)" \
+  || bad "indented duplicate author_model gave exit $rc, expected 2"
+
+# 15. ROUND-2 FINDING 4 — an ordinary doc carrying an author_model key but NO PLAN id is not a plan:
+#     it keeps its caller-chosen topic (behavior unchanged), rather than being refused as broken.
+scripts/review --topic any-free-doc --author claude --context doc-with-author.md "review" >/dev/null 2>&1 \
+  && ok "doc with author_model but no PLAN id keeps its free topic" \
+  || bad "doc with author_model but no PLAN id was refused"
 
 [ "$fails" -eq 0 ] && echo "PASS review_plan_authorship.sh" || echo "FAIL review_plan_authorship.sh"
 exit "$fails"
