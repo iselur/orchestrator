@@ -44,6 +44,18 @@ while (($#)); do
     *) args+=("$1"); shift ;;
   esac
 done
+# A '$N' target is a SESSION ID: resolve it to the session currently holding that id, exactly like
+# real tmux — ids are never reused, so a stale id resolves to nothing and the command fails. This
+# is what lets the drill prove actions bound to a verified id cannot reach a replacement.
+case "$name" in
+  '$'*) resolved=""
+        for p in "$S/sessions/"*.pane; do
+          [ -e "$p" ] || continue
+          if [ "$(head -1 "$p" | cut -d: -f1)" = "$name" ]; then resolved="${p%.pane}"; resolved="${resolved##*/}"; break; fi
+        done
+        [ -n "$resolved" ] || exit 1
+        name=$resolved ;;
+esac
 case "$cmd" in
   has-session)    [ -e "$S/sessions/$name" ] ;;
   new-session)    touch "$S/sessions/$name"; echo bash > "$S/sessions/$name.cmd"
@@ -54,7 +66,11 @@ case "$cmd" in
   send-keys)      printf '%s\n' "${args[*]}" >> "$S/sessions/$name.keys"
                   echo claude > "$S/sessions/$name.cmd" ;;
   display-message) cat "$S/sessions/$name.cmd" 2>/dev/null || echo bash ;;
-  list-panes)     cat "$S/sessions/$name.pane" 2>/dev/null || exit 1 ;;
+  list-panes)     m=$(cat "$S/lp-count" 2>/dev/null || echo 0); m=$((m+1)); echo "$m" > "$S/lp-count"
+                  cat "$S/sessions/$name.pane" 2>/dev/null || exit 1
+                  # replacement hook: the session is swapped immediately AFTER this read — the
+                  # window between verification and the action
+                  if [ -n "${FAKE_TMUX_SWAP_LP_ON:-}" ] && [ "$FAKE_TMUX_SWAP_LP_ON" -le "$m" ]; then printf '$7:900:800\n' > "$S/sessions/$name.pane"; fi ;;
   pipe-pane)      : ;;
   kill-session)   rm -f "$S/sessions/$name" "$S/sessions/$name."* ;;
   *) exit 0 ;;
@@ -134,7 +150,7 @@ reset() { # fresh state between scenarios
   printf '%s\n' "$HEADER" > "$LEDGER"
   unset FAKE_CURL_EXIT FAKE_TMUX_FAIL FAKE_CLAUDE_VERSION FAKE_PS_TABLE FAKE_PS_FAIL \
         FAKE_PS_MAKE_HALT FAKE_PS_MAKE_HALT_ON FAKE_PS_ADD_ROW FAKE_PS_ADD_AFTER \
-        FAKE_PS_SWAP_PANE FAKE_PS_SWAP_ON FAKE_TMUX_SWAP_AFTER_NEW 2>/dev/null || true
+        FAKE_PS_SWAP_PANE FAKE_PS_SWAP_ON FAKE_TMUX_SWAP_AFTER_NEW FAKE_TMUX_SWAP_LP_ON 2>/dev/null || true
 }
 open_row() { (cd "$R" && scripts/intake -g "${1:-drill goal}" -d "done when the drill criterion holds" >/dev/null); }
 keys() { cat "$TS/sessions/orch-auto.keys" 2>/dev/null || true; }
@@ -153,6 +169,10 @@ adjacent() { # $1 action regex: the LAST such action must be immediately precede
   # verification (list-panes) with the presence read (ps) right before that — proof that the
   # authorization is the final external read, and nothing else runs between the barrier and the action
   awk -v act="$1" '{l[NR]=$0} END{for(i=NR;i>2;i--) if (l[i] ~ act) { exit ((l[i-1] ~ /^tmux list-panes/ && l[i-2] ~ /^ps /) ? 0 : 1) }; exit 1}' "$TS/invocations.log"
+}
+adjacent_after_pipe() { # launch variant: pipe-pane (itself bound to the verified id) sits between
+  # the verification and the send — still nothing unaudited in the window
+  awk -v act="$1" '{l[NR]=$0} END{for(i=NR;i>3;i--) if (l[i] ~ act) { exit ((l[i-1] ~ /^tmux pipe-pane/ && l[i-2] ~ /^tmux list-panes/ && l[i-3] ~ /^ps /) ? 0 : 1) }; exit 1}' "$TS/invocations.log"
 }
 alert_env() { # configure a complete owner alert channel
   mkdir -p "$WDIR"
@@ -847,7 +867,7 @@ keys | tail -1 | grep -q "usage window has reset" && [ ! -e "$WDIR/usage-wait" ]
 echo "== W20: gate adjacency — presence read, then identity verification, then the action, nothing between"
 reset; open_row
 run_wd                                              # (a) initial send
-adjacent 'tmux send-keys' && ok "launch: identity is the final read before the send, presence right before it" || bad "launch: something external runs between the gates and the send"
+adjacent_after_pipe 'tmux send-keys' && ok "launch: gates, then only id-bound actions until the send" || bad "launch: something unaudited runs between the gates and the send"
 dead_pane
 run_wd                                              # (b) respawn send
 adjacent 'tmux send-keys' && ok "respawn: identity is the final read before the send" || bad "respawn: gates not adjacent to the send"
@@ -884,6 +904,7 @@ unset FAKE_TMUX_SWAP_AFTER_NEW
 [ ! -e "$WDIR/launched" ] && ok "replacement never marked launched" || bad "launched marker written for a replacement"
 [ -e "$WDIR/ALERT-foreign-session" ] && ok "replacement refusal visible" || bad "replacement refusal silent"
 [ "$(cat "$WDIR/pane")" = '$0:100:500' ] && ok "binding records what creation printed, never a name lookup" || bad "binding captured the replacement's identity"
+[ "$(invoked pipe-pane)" = "0" ] && ok "no transcript pipe ever attached to the replacement" || bad "pipe-pane ran against the replacement session"
 
 echo "== W22c: a refused respawn advances neither the storm counter nor the generation"
 reset; open_row
@@ -898,6 +919,31 @@ printf '$0:100:500\n' > "$TS/sessions/orch-auto.pane"
 run_wd                                              # genuine respawn
 [ "$(cat "$WDIR/respawns")" = "1" ] && ok "a real respawn counts toward the storm alert" || bad "real respawn not counted"
 [ "$(cat "$WDIR/generation")" != "$gen_before" ] && ok "a real respawn bumps the generation" || bad "generation not bumped by a real respawn"
+
+echo "== W23: identity replaced right AFTER verification — the id-bound action fails instead of landing"
+reset; open_row
+run_wd                                              # launch
+dead_pane
+rm -f "$TS/lp-count"
+export FAKE_TMUX_SWAP_LP_ON=3                       # entry lp, barrier lp, then the VERIFY read swaps after printing
+n_before=$(keys | wc -l)
+run_wd                                              # respawn: verify passes on the old triple, send targets the stale id
+unset FAKE_TMUX_SWAP_LP_ON
+[ "$(keys | wc -l)" = "$n_before" ] && ok "respawn: the send could not reach the replacement (stale id)" || bad "send landed on a session replaced after verification"
+[ -e "$TS/sessions/orch-auto" ] && ok "replacement session untouched" || bad "replacement session killed or modified"
+[ -e "$WDIR/session-id" ] && ok "state kept: the failed send retries next tick" || bad "state erased on a failed id-bound send"
+
+echo "== W23b: rotation kill after a post-verification replacement fails and keeps state"
+reset                                               # no open row: IDLE
+mkdir -p "$TS/sessions"; touch "$TS/sessions/orch-auto"; dead_pane; bind_session
+printf '00000000-0000-4000-8000-000000000099\n' > "$WDIR/session-id"
+printf '00000000-0000-4000-8000-000000000099\n' > "$WDIR/launched"
+rm -f "$TS/lp-count"
+export FAKE_TMUX_SWAP_LP_ON=3                       # the rotation verify read swaps after printing
+run_wd
+unset FAKE_TMUX_SWAP_LP_ON
+[ -e "$TS/sessions/orch-auto" ] && ok "rotation: the kill could not reach the replacement" || bad "kill landed on a replacement session"
+[ -e "$WDIR/session-id" ] && ok "rotation: state kept after the failed id-bound kill" || bad "ownership state erased after a failed kill"
 
 echo "== W21: HALT landing during the idle-alert barrier detection — no record touched, no raise"
 reset; open_row
