@@ -308,6 +308,10 @@ repo.parent.mkdir(parents=True, exist_ok=True)
 sh("git", "init", "--bare", "-b", "ready-for-main", str(repo))
 wt = work / "wt"
 sh("git", "clone", str(repo), str(wt))
+# repo-local identity: the dispatcher's own commit (cwd=wt) inherits committer identity from
+# config, and a bare CI box has none — without this the E2E case fails only off-box.
+sh("git", "config", "user.name", "t", cwd=str(wt))
+sh("git", "config", "user.email", "t@t", cwd=str(wt))
 genv = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
         "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
 (wt / "seed.txt").write_text("seed\n")
