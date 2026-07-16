@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # R73 Job 3: subagent worker mode (owner simplification 2026-07-16). Claude-vendor workers BUILD
 # inside the orchestrator session; `dispatch continue` runs the ONE shared grading half. This
-# proves: the registry/mode surface; mode freezing at resolution; the external-CLI pipeline
-# refusing subagent records and _grade refusing external-CLI records (both TERMINAL); continue's
-# fail-closed preconditions and its atomic awaiting_build->running claim; the deadline expiry
-# paths (continue and reconcile); await/health treating awaiting_build as pending-by-design; and
-# the codex worker prompt surviving the worker_prompt_text factoring byte-identically.
+# proves: the registry/mode surface; mode freezing at resolution; mode↔vendor consistency
+# refusals; launch reaching awaiting_build with NO unit and honest trust_domain provenance; the
+# receipt-gated continue and its lock-spanning claim (cancel/reconcile cannot interleave); the
+# error_timeout deadline contract (continue and reconcile); ordinary cancellation of a pending
+# BUILD; _grade's never-overwrite state guard; the shared grading half from SPEC_BLOCKED through
+# no-changes to a synthetic passed_pr_opened; await/health treating awaiting_build as
+# pending-by-design; and the codex worker prompt surviving the factoring byte-identically.
 # Same box-only skip contract as tests/dispatch_fail_closed.sh (venv-needing self-test).
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -17,7 +19,7 @@ if [ ! -x "$PY" ] || ! "$PY" -c 'import yaml, jsonschema' 2>/dev/null; then
 fi
 
 "$PY" - <<'PY'
-import contextlib, hashlib, importlib.util, io, json, pathlib, sys, tempfile, time
+import contextlib, hashlib, importlib.util, io, json, os, pathlib, subprocess, sys, tempfile, time
 
 def load(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
@@ -78,33 +80,42 @@ try:
 except SystemExit:
     check("claude worker == reviewer model still refuses (self-review)", True)
 
-# ---- awaiting_build is LIVE ------------------------------------------------------------------
+# ---- status vocabulary -----------------------------------------------------------------------
 check("awaiting_build counts as a LIVE status (claim_slot concurrency, reconcile)",
       "awaiting_build" in d.LIVE and "awaiting_build" not in d.TERMINAL)
+check("error_timeout is TERMINAL (await resolves an expired BUILD immediately)",
+      "error_timeout" in d.TERMINAL)
 
-# ---- external-CLI pipeline refuses a subagent record (TERMINAL) ------------------------------
+# ---- external-CLI pipeline refuses subagent + mismatched records (TERMINAL) -------------------
 snap = b"id: SPEC-000\n"
 att = pathlib.Path(tempfile.mkdtemp()); (att / "raw").mkdir()
 (att / "spec-snapshot.yaml").write_bytes(snap)
 digest = hashlib.sha256(snap).hexdigest()
-lc_sub = {"spec_digest": digest, "isolation": True, "deadline_ts": time.time() + 3600,
-          "worker_vendor": "claude", "reviewer_vendor": "codex", "worker_mode": "subagent"}
 recorded = {}
 class _Stop(Exception): pass
 def _finish(status, error_class, **kw):
+    recorded.clear()
     recorded["status"], recorded["error_class"] = status, error_class
     recorded["detail"] = kw.get("detail", "")
     raise _Stop()
-try:
-    d._run_pipeline("SPEC-000-1", "SPEC-000", 1, att, lc_sub,
-                    pathlib.Path("/nonexistent-wt"), att / "raw", _finish)
-except _Stop:
-    pass
+def drive_pipeline(lc):
+    try:
+        d._run_pipeline("SPEC-000-1", "SPEC-000", 1, att, dict(lc),
+                        pathlib.Path("/nonexistent-wt"), att / "raw", _finish)
+    except _Stop:
+        pass
+base_lc = {"spec_digest": digest, "isolation": True, "deadline_ts": time.time() + 3600}
+drive_pipeline({**base_lc, "worker_vendor": "claude", "reviewer_vendor": "codex",
+                "worker_mode": "subagent"})
 check("external-CLI pipeline refuses a frozen subagent record as error_launch (TERMINAL)",
       recorded.get("status") == "error_launch" and recorded["status"] in d.TERMINAL
       and "continue" in recorded.get("detail", ""))
+drive_pipeline({**base_lc, "worker_vendor": "claude", "reviewer_vendor": "codex",
+                "worker_mode": "external-cli"})
+check("claude vendor + external-cli mode is corrupt: error_launch, no worker invoked",
+      recorded.get("status") == "error_launch" and "corrupt" in recorded.get("detail", ""))
 
-# ---- _grade / cmd_continue against patched state roots ---------------------------------------
+# ---- patched state/attempt roots for lifecycle tests ------------------------------------------
 work = pathlib.Path(tempfile.mkdtemp())
 d.ATTEMPTS, d.STATE = work / "attempts", work / "state"
 AID, SID, N = "SPEC-900-1", "SPEC-900", 1
@@ -131,8 +142,12 @@ def write_lc(**over):
 def state_now():
     return json.loads((d.STATE / f"{SID}.json").read_text())
 
+def set_state(status, **extra):
+    d.write_state(SID, {"attempt_id": AID, "spec_id": SID, "attempt": N,
+                        "spec_digest": digest, "status": status, **extra})
+
 def run_die(fn, *a):
-    """Call a dispatcher command, capturing die()'s SystemExit code."""
+    """Call a dispatcher command, capturing die()/finish()'s SystemExit code and stdout."""
     try:
         with contextlib.redirect_stdout(io.StringIO()) as out:
             fn(*a)
@@ -140,39 +155,74 @@ def run_die(fn, *a):
     except SystemExit as e:
         return e.code, ""
 
+def write_receipt(model="claude-sonnet-4-6"):
+    (attd / "raw" / "subagent-receipt.json").write_text(
+        json.dumps({"model": model, "harness_pin": "claude-sonnet-4-6",
+                    "launched": "2026-07-16T12:00:00Z"}))
+
+def clear_raw():
+    for f in ("worker-last-message.txt", "subagent-receipt.json"):
+        p = attd / "raw" / f
+        if p.exists(): p.unlink()
+
 # continue: refuses an external-CLI record
 write_lc(worker_mode="external-cli", worker_vendor="codex")
 rc, _ = run_die(d.cmd_continue, AID)
 check("continue refuses an external-CLI attempt (exit 6)", rc == 6)
 
+# continue: refuses a codex-vendor record that claims subagent mode (corrupt)
+write_lc(worker_vendor="codex")
+rc, _ = run_die(d.cmd_continue, AID)
+check("continue refuses codex vendor + subagent mode as corrupt (exit 6)", rc == 6)
+
 # continue: refuses a missing last message
 write_lc()
+clear_raw()
+write_receipt()
 rc, _ = run_die(d.cmd_continue, AID)
 check("continue refuses when raw/worker-last-message.txt is absent (exit 6)", rc == 6)
 
-# continue: refuses when state is not awaiting_build
+# continue: refuses a missing, malformed, or launch-mismatched receipt
 (attd / "raw" / "worker-last-message.txt").write_text("built")
-d.write_state(SID, {"attempt_id": AID, "spec_id": SID, "attempt": N,
-                    "spec_digest": digest, "status": "running"})
+(attd / "raw" / "subagent-receipt.json").unlink()
+rc, _ = run_die(d.cmd_continue, AID)
+check("continue refuses when raw/subagent-receipt.json is absent (exit 6)", rc == 6)
+(attd / "raw" / "subagent-receipt.json").write_text("not json")
+rc, _ = run_die(d.cmd_continue, AID)
+check("continue refuses a malformed receipt (exit 6)", rc == 6)
+write_receipt(model="claude-opus-4-8")
+rc, _ = run_die(d.cmd_continue, AID)
+check("continue refuses a receipt naming a model other than the frozen worker_model (exit 6)",
+      rc == 6)
+write_receipt()
+
+# continue: refuses when state is not awaiting_build (cancel/reconcile won, or double continue)
+set_state("running")
 rc, _ = run_die(d.cmd_continue, AID)
 check("continue refuses unless the attempt awaits its BUILD (exit 8)", rc == 8)
-
-# continue: exhausted deadline is a durable terminal interrupt, no unit started
-write_lc(deadline_ts=time.time() - 5)
-d.write_state(SID, {"attempt_id": AID, "spec_id": SID, "attempt": N,
-                    "spec_digest": digest, "status": "awaiting_build"})
+set_state("interrupted", error_class="cancelled")
 rc, _ = run_die(d.cmd_continue, AID)
-check("continue on an exhausted deadline exits 10 and records interrupted",
-      rc == 10 and state_now()["status"] == "interrupted")
+check("continue refuses a cancelled attempt — terminal labels are never overwritten (exit 8)",
+      rc == 8)
 
-# continue: happy path claims the slot atomically and starts the grading unit
+# continue: exhausted deadline is the addendum's terminal error_timeout, no unit started
+write_lc(deadline_ts=time.time() - 5)
+set_state("awaiting_build")
+rc, _ = run_die(d.cmd_continue, AID)
+check("continue on an exhausted deadline exits 10 and records TERMINAL error_timeout",
+      rc == 10 and state_now()["status"] == "error_timeout"
+      and state_now()["error_class"] == d.ERR_TIMEOUT)
+
+# continue: happy path claims the slot and starts the grading unit under ONE lock hold
 write_lc()
-d.write_state(SID, {"attempt_id": AID, "spec_id": SID, "attempt": N,
-                    "spec_digest": digest, "status": "awaiting_build"})
+set_state("awaiting_build")
 captured = {}
 _orig_run = d.run
 def _fake_run(cmd, **kw):
     captured["cmd"] = cmd
+    # the state file must ALREADY say running when the unit starts (the started _grade
+    # reads its own claim; writing after would race it)
+    captured["state_at_start"] = state_now()["status"]
     class R: returncode = 0; stderr = ""
     return R()
 d.run = _fake_run
@@ -180,17 +230,50 @@ try:
     rc, out = run_die(d.cmd_continue, AID)
 finally:
     d.run = _orig_run
-check("continue flips awaiting_build->running under the state lock and prints the attempt id",
+check("continue flips awaiting_build->running and prints the attempt id",
       rc == 0 and state_now()["status"] == "running" and AID in out)
+check("the claim is durable BEFORE the grading unit starts (no read-back race)",
+      captured.get("state_at_start") == "running")
 check("continue starts `dispatch _grade <attempt>` in the attempt's own unit",
       captured["cmd"][-2:] == ["_grade", AID]
       and any(a == f"--unit={d.unit_name(SID, N)}" for a in captured["cmd"]))
-# a second continue must lose the claim (no double grading unit)
 rc, _ = run_die(d.cmd_continue, AID)
 check("a second continue is refused after the claim (exit 8)", rc == 8)
 
+# cancel: ordinary cancellation of a pending BUILD — no outer-unit stop, verified teardown
+write_lc()
+set_state("awaiting_build")
+calls = []
+def _fake_run2(cmd, **kw):
+    calls.append(list(cmd))
+    class R: returncode = 0; stderr = ""
+    return R()
+_orig_run = d.run; _orig_units = d.attempt_units_remaining
+d.run = _fake_run2
+d.attempt_units_remaining = lambda aid, outer=None: ([], True)
+try:
+    rc, out = run_die(d.cmd_cancel, AID)
+finally:
+    d.run = _orig_run; d.attempt_units_remaining = _orig_units
+outer_stops = [c for c in calls if c[:3] == ["systemctl", "--user", "stop"]]
+check("cancel of awaiting_build verifies clean (exit 0) and labels cancelled",
+      rc == 0 and state_now()["status"] == "interrupted"
+      and state_now()["error_class"] == "cancelled")
+check("cancel of awaiting_build never stops the nonexistent outer unit", not outer_stops)
+
+# _grade: never overwrites a state another lifecycle operation owns
+write_lc()
+(attd / "raw" / "worker-last-message.txt").write_text("built")
+set_state("interrupted", error_class="cancelled")
+res_path = attd / "result.json"
+if res_path.exists(): res_path.unlink()
+rc, _ = run_die(d._grade, AID)
+check("_grade refuses a non-running state without writing anything (exit 8)",
+      rc == 8 and state_now()["status"] == "interrupted" and not res_path.exists())
+
 # _grade: refuses an external-CLI record with a TERMINAL result
 write_lc(worker_mode="external-cli", worker_vendor="codex")
+set_state("running")
 rc, _ = run_die(d._grade, AID)
 res = json.loads((attd / "result.json").read_text())
 check("_grade refuses an external-CLI record as error_launch (TERMINAL result on disk)",
@@ -198,6 +281,7 @@ check("_grade refuses an external-CLI record as error_launch (TERMINAL result on
 
 # _grade: honors SPEC_BLOCKED through the shared grading half
 write_lc()
+set_state("running")
 (attd / "raw" / "worker-last-message.txt").write_text("SPEC_BLOCKED\nimpossible criteria")
 rc, _ = run_die(d._grade, AID)
 res = json.loads((attd / "result.json").read_text())
@@ -205,34 +289,150 @@ check("_grade routes the subagent message through the shared half (spec_blocked 
       rc == 1 and res["status"] == "spec_blocked"
       and "orchestrator trust domain" in res["isolation"])
 
-# await: awaiting_build is pending-by-design, never a silent poll or false interrupt
-d.write_state(SID, {"attempt_id": AID, "spec_id": SID, "attempt": N,
-                    "spec_digest": digest, "status": "awaiting_build"})
-rc, out = run_die(d.cmd_await, AID)
+# ---- real-git grading: no-changes, then a synthetic BUILD to passed_pr_opened ----------------
+def sh(*a, cwd=None, env=None):
+    return subprocess.run(a, cwd=cwd, env=env, capture_output=True, text=True)
+
+repo = pathlib.Path(tempfile.mkdtemp()) / "origin.git"
+repo.parent.mkdir(parents=True, exist_ok=True)
+sh("git", "init", "--bare", "-b", "ready-for-main", str(repo))
+wt = work / "wt"
+sh("git", "clone", str(repo), str(wt))
+genv = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+(wt / "seed.txt").write_text("seed\n")
+sh("git", "add", "-A", cwd=str(wt), env=genv)
+sh("git", "commit", "-q", "-m", "seed", cwd=str(wt), env=genv)
+sh("git", "push", "-q", "-u", "origin", "HEAD:ready-for-main", cwd=str(wt), env=genv)
+base_sha = sh("git", "rev-parse", "HEAD", cwd=str(wt)).stdout.strip()
+sh("git", "checkout", "-q", "-b", f"codex/{AID}", cwd=str(wt), env=genv)
+sh("git", "fetch", "-q", "origin", cwd=str(wt), env=genv)
+
+# no-changes: a clean worktree is failed_worker_error through the shared half
+write_lc(base_sha=base_sha, isolation=False, exposure_accepted=True)
+set_state("running")
+(attd / "raw" / "worker-last-message.txt").write_text("nothing to do")
+rc, _ = run_die(d._grade, AID)
+res = json.loads((attd / "result.json").read_text())
+check("no-changes BUILD records failed_worker_error through the shared half",
+      rc == 1 and res["status"] == "failed_worker_error"
+      and "no changes" in res.get("detail", ""))
+
+# synthetic BUILD reaching passed_pr_opened: real git/commit/push, heavy gates stubbed at the
+# same seams the fail-closed suite uses; asserts commit authorship + PR provenance wording.
+(wt / "built.txt").write_text("subagent work\n")
+write_lc(base_sha=base_sha, isolation=False, exposure_accepted=True)
+set_state("running")
+(attd / "raw" / "worker-last-message.txt").write_text("implemented")
+(attd / "test-attestation.json").write_text(json.dumps({"attested": True}))
+_orig = (d.required_tests, d.run_candidate_test_phases, d.review, d.run)
+d.required_tests = lambda: {"required": [], "installed_commit": base_sha}
+d.run_candidate_test_phases = lambda *a, **k: {"attested": True, "detail": ""}
+verdict = {"verdict": "PASS", "criteria": [], "scope_finding": "none",
+           "regression_finding": "none", "security_findings": "none"}
+d.review = lambda *a, **k: (verdict, "raw")
+prbody = {}
+def _run3(cmd, **kw):
+    if cmd and cmd[0] == "gh":
+        prbody["body"] = cmd[cmd.index("--body") + 1]
+        class R: returncode = 0; stdout = "https://github.com/x/pr/1\n"; stderr = ""
+        return R()
+    return subprocess.run(cmd, capture_output=True, text=True, **{k: v for k, v in kw.items()
+                                                                  if k in ("cwd", "env")})
+d.run = _run3
+try:
+    rc, _ = run_die(d._grade, AID)
+finally:
+    d.required_tests, d.run_candidate_test_phases, d.review, d.run = _orig
+res = json.loads((attd / "result.json").read_text())
+author = sh("git", "log", "-1", "--format=%an", cwd=str(wt)).stdout.strip()
+check("synthetic subagent BUILD reaches passed_pr_opened through the unchanged grading half",
+      rc == 0 and res["status"] == "passed_pr_opened"
+      and state_now()["status"] == "passed_pr_opened")
+check("the orchestrator-packaged commit is authored Worker <frozen model>",
+      author == "Worker claude-sonnet-4-6")
+check("PR provenance names the orchestrator trust domain, not a sandbox that never ran",
+      "orchestrator trust domain" in prbody.get("body", "")
+      and "workspace-write" not in prbody.get("body", ""))
+
+# ---- launch: awaiting_build with NO unit, honest provenance ----------------------------------
+lwork = pathlib.Path(tempfile.mkdtemp())
+d.ATTEMPTS, d.STATE = lwork / "attempts", lwork / "state"
+d.ATTEMPTS.mkdir(parents=True); d.STATE.mkdir(parents=True)
+LSID = "SPEC-901"
+spec = {"id": LSID, "title": "t", "risk_class": "low", "test_command": "true",
+        "hard_ceiling_hours": 1, "needs_network": False}
+approval = {"approved_scope": ["**"], "base_branch": "ready-for-main"}
+spec_bytes = json.dumps(spec).encode()
+ldigest = hashlib.sha256(spec_bytes).hexdigest()
+launch_calls = []
+def _run4(cmd, **kw):
+    launch_calls.append(list(cmd))
+    class R: returncode = 0; stderr = ""; stdout = ""
+    return R()
+_saved = (d.isolation_available, d.preflight, d.load_model_config, d.remediation_preflight,
+          d.run_box_preconditions, d.execution_policy, d.grader_drift, d.git, d.worktree_root,
+          d.grant_worker_acl, d.trusted_test_runtime, d.isolated_run, d.run)
+d.isolation_available = lambda: True
+d.preflight = lambda sid: {"spec": spec, "digest": ldigest, "approval": approval,
+                           "spec_bytes": spec_bytes}
+d.load_model_config = lambda: CFG
+d.remediation_preflight = lambda *a: None
+d.run_box_preconditions = lambda att, policy: {}
+d.execution_policy = lambda *a, **k: {"required": [], "modes": {}}
+d.grader_drift = lambda *a, **k: []
+d.git = lambda *a, **k: "e" * 40
+lwt = lwork / "worktrees"
+d.worktree_root = lambda iso=None: lwt
+d.grant_worker_acl = lambda wt: None
+d.trusted_test_runtime = lambda: {"python": "/usr/bin/python3", "root": "/opt/x"}
+def _iso_probe(*a, **k):
+    class R: returncode = 0; stderr = b""
+    return R()
+d.isolated_run = _iso_probe
+d.run = _run4
+try:
+    rc, out = run_die(d.cmd_launch, LSID)
+finally:
+    (d.isolation_available, d.preflight, d.load_model_config, d.remediation_preflight,
+     d.run_box_preconditions, d.execution_policy, d.grader_drift, d.git, d.worktree_root,
+     d.grant_worker_acl, d.trusted_test_runtime, d.isolated_run, d.run) = _saved
+lstate = json.loads((d.STATE / f"{LSID}.json").read_text())
+llc = json.loads((d.ATTEMPTS / LSID / "1" / "launch.json").read_text())
+started_units = [c for c in launch_calls if c and c[0] == "systemd-run"]
+check("claude launch ends awaiting_build and prints the attempt id",
+      rc == 0 and lstate["status"] == "awaiting_build" and f"{LSID}-1" in out)
+check("claude launch starts NO unit", not started_units)
+check("launch freezes subagent mode + orchestrator trust_domain provenance",
+      llc["worker_mode"] == "subagent" and llc["worker_vendor"] == "claude"
+      and llc["trust_domain"] == "orchestrator")
+check("launch writes the BUILD prompt for the orchestrator's subagent",
+      (d.ATTEMPTS / LSID / "1" / "raw" / "worker-prompt.txt").exists())
+
+# await/health/reconcile on the pending BUILD
+rc, out = run_die(d.cmd_await, f"{LSID}-1")
 check("await says awaiting_build and exits 3 (neither pass nor failure)", rc == 3)
-
-# health: not-applicable for a pending BUILD
-rc, out = run_die(d.cmd_health, AID)
+rc, out = run_die(d.cmd_health, f"{LSID}-1")
 check("health reports not-applicable for awaiting_build", rc == 0)
-
-# reconcile: fresh awaiting_build is reported pending, not relabeled
-_orig_units = d._list_codex_units
+_orig_units2 = d._list_codex_units
 d._list_codex_units = lambda: ([], True)
 try:
     rc, out = run_die(d.cmd_reconcile)
     rep = json.loads(out)
-    row = [r for r in rep["reconciled"] if r.get("attempt_id") == AID][0]
+    row = [r for r in rep["reconciled"] if r.get("attempt_id") == f"{LSID}-1"][0]
     check("reconcile keeps a fresh awaiting_build pending (no unit by design)",
-          row.get("status") == "awaiting_build" and state_now()["status"] == "awaiting_build")
-    # expired: reconcile relabels to interrupted (fail closed on the frozen deadline)
-    write_lc(deadline_ts=time.time() - 5)
+          row.get("status") == "awaiting_build"
+          and json.loads((d.STATE / f"{LSID}.json").read_text())["status"] == "awaiting_build")
+    llc["deadline_ts"] = time.time() - 5
+    (d.ATTEMPTS / LSID / "1" / "launch.json").write_text(json.dumps(llc))
     rc, out = run_die(d.cmd_reconcile)
     rep = json.loads(out)
-    row = [r for r in rep["reconciled"] if r.get("attempt_id") == AID][0]
-    check("reconcile expires awaiting_build at the frozen deadline",
-          row.get("to") == "interrupted" and state_now()["status"] == "interrupted")
+    row = [r for r in rep["reconciled"] if r.get("attempt_id") == f"{LSID}-1"][0]
+    check("reconcile expires awaiting_build to TERMINAL error_timeout at the frozen deadline",
+          row.get("to") == "error_timeout"
+          and json.loads((d.STATE / f"{LSID}.json").read_text())["status"] == "error_timeout")
 finally:
-    d._list_codex_units = _orig_units
+    d._list_codex_units = _orig_units2
 
 # ---- codex worker prompt is byte-identical through the factoring -----------------------------
 lc_prompt = {"spec_digest": digest, "spec_snapshot_digest": digest,

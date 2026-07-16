@@ -9,7 +9,7 @@ proves them), **configured assumptions** (set up outside this repo, verified man
 
 | Guarantee | Proof |
 |---|---|
-| Worker commands cannot traverse the owner's home directory, and the credential files the drill checks there (GitHub token, Claude and Codex logins, SSH key) are unreadable — an enforced home boundary, not an enumeration of every possible secret | `tests/worker_isolation.sh` (box-only) |
+| External-CLI worker commands cannot traverse the owner's home directory, and the credential files the drill checks there (GitHub token, Claude and Codex logins, SSH key) are unreadable — an enforced home boundary, not an enumeration of every possible secret. Subagent workers are OUTSIDE this guarantee by design: see the configured assumption below | `tests/worker_isolation.sh` (box-only) |
 | No isolation → no launch; launching unisolated requires an explicit override variable, and its use is recorded in the evidence | `tests/isolation_fail_closed.sh` |
 | Execution modes come from one fail-closed manifest; each required test must literally PASS in its assigned phase with subject, identity, hashes, timestamps, and logs, and a box PASS is never upgraded into candidate evidence | `tests/test_attestation.sh`, `tests/execution-policy.tsv` |
 | A worker holding fake root inside its own user namespace still cannot read or write the owner's home; the userns exception is the packaged capability-stripping AppArmor profile, not the global sysctl | `tests/worker_userns.sh` (box-only) |
@@ -43,6 +43,9 @@ proves them), **configured assumptions** (set up outside this repo, verified man
   orchestrator commit, integrity, scope, the isolated network-off test phase, required-test
   attestation, bound review — plus the resolution-time refusal of same-model self-review.
   Process isolation is claimed for external-CLI workers only (`tests/dispatch_subagent_worker.sh`).
+  BUILD model provenance is an orchestrator-written receipt (`raw/subagent-receipt.json`;
+  `dispatch continue` refuses a missing receipt or one naming a model other than the frozen
+  worker model) — an attestation inside the same trust domain, not third-party proof.
 - Approvals bind to the spec digest and instance identity; a CLAUDE bound reviewer runs with
   all tools denied (a CODEX bound reviewer has no tool-denial flag: its read-only sandbox
   limits only model-spawned shell commands, so as an operator subprocess it keeps codex's own

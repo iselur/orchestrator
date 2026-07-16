@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Vendor CLI mechanics for the bound-reviewer and worker roles (R73 Jobs 1-2). Adapters carry
+"""Vendor CLI mechanics for the bound-reviewer and worker roles (R73 Jobs 1-3). Adapters carry
 NO security or policy decisions: the role envelopes — reviewer: neutral cwd outside the repo,
 per-invocation deadline, nonzero-exit refusal before any parse, spec+diff+evidence-only prompt,
-verdict validation and binding; worker: isolation, runtime vetting/pinning, the single attempt
-deadline, path-safety, commit packaging, and every gate — live in scripts/dispatch.py and are
-identical for every vendor. An adapter only knows how to build its CLI's argv, shape its I/O,
-and read the output back. Stdlib only. The reviewer-retirement failover is NOT adapter surface:
-it is Fable-specific by design and dispatch.py gates it on the frozen reviewer vendor being
-claude.
+verdict validation and binding; worker: runtime vetting/pinning, the single attempt deadline,
+path-safety, commit packaging, and every gate — live in scripts/dispatch.py. The worker
+GRADING half is identical for every vendor; the BUILD envelope differs by the adapter's
+declared mode: external-cli BUILDs run isolated under the worker role envelope, subagent
+BUILDs run inside the orchestrator session's trust domain (SECURITY.md). An adapter only knows
+how to build its CLI's argv, shape its I/O, and read the output back. Stdlib only. The
+reviewer-retirement failover is NOT adapter surface: it is Fable-specific by design and
+dispatch.py gates it on the frozen reviewer vendor being claude.
 
 Verified mechanics (R73 probe evidence, 2026-07-16, .orchestrator/evidence/r73-probes.md):
 - claude: `-p --output-format json` emits ONE JSON envelope; the verdict is a JSON string in
