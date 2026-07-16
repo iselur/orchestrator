@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Bounded adversarial review (CLAUDE.md rule 3): draft → up to three review rounds, each followed
-# by one revision → ship when clean or escalate to the operator. Round 4 does not exist — this
+# Bounded adversarial review (CLAUDE.md rule 3): draft → up to five review rounds, each followed
+# by one revision → ship when clean or escalate to the operator. Round 6 does not exist — this
 # script refuses it. The cap lives in code because a prose cap already lost once to a ten-round
 # loop. Only round-N.md files are rounds: sibling artifacts (dispositions, notes) never count.
 #
@@ -261,9 +261,9 @@ if [ "$named" -ne "$rounds" ]; then
   exit 5
 fi
 round=$((rounds + 1))
-if ((round > 3)); then
-  echo "review: REFUSED — '$topic' has already had 3 review rounds ($dir)." >&2
-  echo "        Ship it or escalate to the owner; a fourth round is not allowed (CLAUDE.md rule 3)." >&2
+if ((round > 5)); then
+  echo "review: REFUSED — '$topic' has already had 5 review rounds ($dir)." >&2
+  echo "        Ship it or escalate to the owner; a sixth round is not allowed (CLAUDE.md rule 3)." >&2
   exit 3
 fi
 
@@ -282,4 +282,4 @@ if ! codex exec \
 fi
 grep -q '[^[:space:]]' "$out.partial" || { printf 'review: empty review output\n' >&2; rm -f "$out.partial"; exit 1; }
 mv "$out.partial" "$out"
-printf 'Review round %d of 3: %s\n' "$round" "$out"
+printf 'Review round %d of 5: %s\n' "$round" "$out"

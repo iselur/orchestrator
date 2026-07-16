@@ -118,7 +118,7 @@ eyes from the other vendor judges it — and nothing lands on <code>main</code> 
   <rect class="node" x="330" y="214" width="180" height="66" fill="var(--review-bg)" stroke="var(--review)"/>
   <text class="label" x="420" y="236" text-anchor="middle">6 · Cross review</text>
   <text class="sub"   x="420" y="254" text-anchor="middle">other vendor judges the exact</text>
-  <text class="sub"   x="420" y="270" text-anchor="middle">diff · max 3 rounds</text>
+  <text class="sub"   x="420" y="270" text-anchor="middle">diff · max 5 rounds</text>
 
   <rect class="node" x="650" y="214" width="180" height="66" fill="var(--check-bg)" stroke="var(--check)"/>
   <text class="label" x="740" y="236" text-anchor="middle">7 · Pull request</text>
@@ -162,7 +162,7 @@ eyes from the other vendor judges it — and nothing lands on <code>main</code> 
       before grading; a skipped, missing, or empty result is a failure. The worker saying "it
       passed" counts for nothing.</li>
   <li><b>Nothing reviews its own work.</b> The reviewer is always from the other vendor, gets no
-      tools, and its verdict holds only for the exact code it saw. Three review rounds maximum,
+      tools, and its verdict holds only for the exact code it saw. Five review rounds maximum,
       then ship or escalate — never loop forever.</li>
   <li><b>You own <code>main</code>.</b> Enforced by your GitHub branch protection, not by trust.</li>
 </ul>
