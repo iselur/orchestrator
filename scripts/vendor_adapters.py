@@ -92,6 +92,8 @@ class CodexWorker:
     the worker path has never alias-translated it and no codex model declares a cli_alias;
     alias handling joins this surface only when a vendor's worker CLI needs it."""
 
+    mode = "external-cli"   # detached CLI process under the worker role envelope (D5)
+
     def build_argv(self, model_id, effort, worktree, prompt, isolated,
                    argv_prefix=None, last_message_path=None):
         args = ["exec", "--cd", str(worktree), "-m", model_id,
@@ -179,8 +181,34 @@ class CodexWorker:
         return None
 
 
+class ClaudeSubagentWorker:
+    """Claude worker mechanics for SUBAGENT mode (R73 Job 3, owner simplification 2026-07-16):
+    there is NO worker CLI. Anthropic's 2026 ToS keeps Claude execution inside the operator
+    context, so the BUILD phase runs as a subagent of the live orchestrator session — the
+    orchestrator launches `dispatch launch`, runs the subagent itself on the launch-written
+    worker prompt inside the attempt worktree, writes the subagent's final message to
+    raw/worker-last-message.txt, then hands grading to `dispatch continue`. This adapter
+    therefore carries only the surface the SHARED grading half consumes; there is no argv,
+    env, or runtime surface to carry. The role envelope for this mode is the orchestrator
+    trust domain itself (SECURITY.md), plus every unchanged grading gate."""
+
+    mode = "subagent"   # BUILD inside the orchestrator session; grading via dispatch continue
+
+    def recover_last_message(self, raw_dir, isolated):
+        """The subagent's final message, written by the orchestrator before continue. Absence
+        refuses upstream (dispatch continue), so this read stays total here."""
+        p = raw_dir / "worker-last-message.txt"
+        return p.read_text() if p.exists() else ""
+
+    def classify_error(self, exit_code, stderr, raw_dir):
+        """Always completion: a subagent BUILD that failed is cancelled by the orchestrator
+        (`dispatch cancel`), never mis-classified into the CLI error vocabulary — there is no
+        CLI exit code or stderr to classify."""
+        return None
+
+
 _REVIEWERS = {"claude": ClaudeReviewer, "codex": CodexReviewer}
-_WORKERS = {"codex": CodexWorker}
+_WORKERS = {"claude": ClaudeSubagentWorker, "codex": CodexWorker}
 
 
 def get_reviewer_adapter(vendor):
@@ -194,8 +222,15 @@ def get_reviewer_adapter(vendor):
 
 def worker_vendors():
     """Vendors with a registered worker adapter — the resolver refuses any other worker vendor
-    at launch, before side effects (claude joins in R73 Job 3 with the subagent runtime)."""
+    at launch, before side effects."""
     return sorted(_WORKERS)
+
+
+def worker_mode(vendor):
+    """The execution mode a vendor's worker runs under: 'external-cli' (detached CLI process in
+    the worker role envelope) or 'subagent' (BUILD inside the orchestrator session, grading via
+    `dispatch continue`). Unknown vendors raise — the caller fails closed."""
+    return get_worker_adapter(vendor).mode
 
 
 def get_worker_adapter(vendor):

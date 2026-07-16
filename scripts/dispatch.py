@@ -256,6 +256,11 @@ def resolve_launch_models(approval: dict, cfg: dict) -> dict:
     # fields and never re-infers from a live config.
     resolved["worker_vendor"] = vm[resolved["worker_model"]]
     resolved["reviewer_vendor"] = vm[resolved["reviewer_model"]]
+    # R73 Job 3: the execution MODE freezes with the vendor (registry-derived, never guessed):
+    # external-cli workers run detached under the worker role envelope; subagent workers BUILD
+    # inside the orchestrator session and are graded by `dispatch continue`. Frozen here so a
+    # later registry or config change cannot re-mode an in-flight attempt.
+    resolved["worker_mode"] = VENDOR_ADAPTERS.worker_mode(resolved["worker_vendor"])
     return resolved
 
 
@@ -292,7 +297,11 @@ TERMINAL = {
     "failed_scope", "failed_test", "failed_review", "interrupted", "error_launch",
     "spec_blocked", "stale_base", "failed_remediation_exhausted", "failed_regression",
 }
-LIVE = {"launching", "running"}
+# awaiting_build is LIVE-without-a-unit (R73 Job 3): a subagent-mode attempt whose worktree and
+# frozen launch record exist while the orchestrator session runs the BUILD. It counts against
+# claim_slot's concurrency guards like any live attempt; reconcile expires it at the frozen
+# deadline instead of treating a missing unit as a crash.
+LIVE = {"launching", "running", "awaiting_build"}
 
 # Structured error classes (Appendix A#7 / Gate 2 requirement).
 ERR_AUTH = "auth"
@@ -1898,13 +1907,46 @@ def cmd_launch(spec_id: str) -> None:
               "!!! its credentials and its network. You asked for this (ORCH_ALLOW_UNISOLATED=1).\n"
               "!!! It is recorded in launch.json and in the reviewer's evidence.", file=sys.stderr)
 
+    # R73 Job 3: the frozen worker MODE decides which runtime this launch must probe, so spec,
+    # approval, and model/vendor/mode resolution move ahead of the runtime checks (all read-only,
+    # all refuse cleanly with no side effects; the isolation gate above deliberately stays first).
+    ctx = preflight(spec_id)
+    spec, digest, approval = ctx["spec"], ctx["digest"], ctx["approval"]
+    # R71: role→model defaults come from scripts/models.json, read once here and frozen into lc
+    # below. An approval that explicitly pins a model still wins (owner decision 2026-07-15).
+    # Resolution (incl. pin revalidation) happens before the attempt claim, branch, or worktree
+    # exist — an invalid pin refuses cleanly with no side effects (owner-extension round 1: a
+    # late die() stranded a claimed 'launching' state).
+    cfg = load_model_config()
+    launch_models = resolve_launch_models(approval, cfg)
+    subagent_mode = launch_models["worker_mode"] == "subagent"
+    spec_bytes = ctx["spec_bytes"]   # the single buffer preflight read/hashed/parsed (B2 round-2)
+
     # Same fail-fast doctrine for the worker's Codex runtime: an isolated launch without one dies
     # in namespace setup AFTER the attempt is claimed — opaquely, identically on every retry.
     # Resolution is vetted, then PROBED under the real service hardening (an ELF-magic check alone
     # accepts wrong-arch/broken binaries — round-1 review), then pinned by hash for _run.
+    # Subagent mode has NO worker CLI: it skips the worker-runtime probe (runtime_record stays
+    # None) but keeps the trusted TEST runtime requirement — the grading half is unchanged.
     runtime_record = None
     test_runtime_record = None
-    if iso:
+    if iso and subagent_mode:
+        test_runtime_record = trusted_test_runtime()
+        if test_runtime_record is None:
+            die("REFUSING to launch: trusted test runtime is missing or writable.\n"
+                "  Run ./scripts/setup-worker-user.sh to provision the root-owned runtime at "
+                f"{TEST_RUNTIME_ROOT}.", 15)
+        probe = isolated_run(
+            f"orch-test-rtprobe-{spec_id}",
+            [test_runtime_record["python"], "-c", "import yaml, jsonschema"], cwd=None,
+            rw_paths=[], private_network=True, ceiling_s=120,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            binds=[(test_runtime_record["root"], test_runtime_record["root"])],
+            env_extra={"ORCH_TEST_PY": test_runtime_record["python"]})
+        if probe.returncode != 0:
+            die("REFUSING to launch: trusted test runtime failed under service hardening "
+                f"(exit {probe.returncode}).", 15)
+    elif iso:
         rt = worker_codex_runtime()
         if rt is None:
             die("REFUSING to launch: no worker-launchable Codex runtime on this box.\n"
@@ -1954,17 +1996,6 @@ def cmd_launch(spec_id: str) -> None:
         policy = execution_policy(ROOT, installed_commit)
     except ValueError as e:
         die(f"REFUSING to launch: {e}", 15)
-
-    ctx = preflight(spec_id)
-    spec, digest, approval = ctx["spec"], ctx["digest"], ctx["approval"]
-    # R71: role→model defaults come from scripts/models.json, read once here and frozen into lc
-    # below. An approval that explicitly pins a model still wins (owner decision 2026-07-15).
-    # Resolution (incl. the cross-vendor revalidation of pins) happens HERE, before the attempt
-    # claim, branch, or worktree exist — an invalid pin refuses cleanly with no side effects
-    # (owner-extension round 1: a late die() stranded a claimed 'launching' state).
-    cfg = load_model_config()
-    launch_models = resolve_launch_models(approval, cfg)
-    spec_bytes = ctx["spec_bytes"]   # the single buffer preflight read/hashed/parsed (B2 round-2)
 
     n = next_attempt(spec_id)
     # Gate 4: remediation budget + stop-early + high-risk per-dispatch approval. Dies (recording
@@ -2089,9 +2120,27 @@ def cmd_launch(spec_id: str) -> None:
         # T2: the frozen decision + why it was allowed. `exposure_accepted` is the operator's
         # knowing "yes, run this as me" — provenance never overstates the boundary.
         "isolation": iso, "exposure_accepted": (not iso and exposed),
+        # R73 Job 3: subagent BUILDs run inside the orchestrator session — provenance names the
+        # trust domain plainly (SECURITY.md) instead of claiming a worker envelope that never ran.
+        **({"trust_domain": "orchestrator"} if subagent_mode else {}),
         "worker_unit": f"codex-worker-{attempt_id}",
         "test_unit": f"codex-test-{attempt_id}", "created": now(),
     }, indent=2))
+
+    if subagent_mode:
+        # R73 Job 3: no unit starts. The orchestrator session now runs the BUILD itself — the
+        # launch-written prompt, inside the attempt worktree, with the frozen worker model —
+        # writes the subagent's final message to raw/worker-last-message.txt, then hands the
+        # attempt to `dispatch continue` for the unchanged grading half. The deadline is already
+        # running: continue refuses once deadline_ts is exhausted, and reconcile expires a
+        # stale awaiting_build the same way it expires a dead unit.
+        lc = json.loads((att_dir / "launch.json").read_text())
+        (att_dir / "raw" / "worker-prompt.txt").write_text(worker_prompt_text(att_dir, lc, n))
+        write_state(spec_id, {**read_state(spec_id), "status": "awaiting_build",
+                              "base_sha": base_sha,
+                              "detail": "subagent BUILD pending; grade with `dispatch continue`"})
+        print(attempt_id)
+        return
 
     unit = unit_name(spec_id, n)
     dispatch_bin = str(ROOT / "scripts" / "dispatch")
@@ -2136,8 +2185,9 @@ def cmd_launch(spec_id: str) -> None:
 
 
 # ================================================================ _run ========
-def _run(attempt_id: str) -> None:
-    """Runs INSIDE the systemd unit. The full attempt pipeline (Gate 1 steps 3-9)."""
+def _attempt_context(attempt_id: str):
+    """Shared _run/_grade prologue: load the frozen attempt context and build the ONE terminal
+    finish() writer, so both detached entry points record byte-identically shaped results."""
     spec_id, n = parse_attempt_id(attempt_id)
     att = ATTEMPTS / spec_id / str(n)
     lc = json.loads((att / "launch.json").read_text())
@@ -2152,6 +2202,15 @@ def _run(attempt_id: str) -> None:
         die(f"launch.json base_branch={lc.get('base_branch')!r} is not the automation target "
             f"{AUTOMATION_BASE!r}; refuse (stale/foreign attempt state).", 6)
 
+    if lc.get("worker_mode", "external-cli") == "subagent":
+        iso_desc = ("subagent BUILD in the orchestrator trust domain (SECURITY.md); test phase "
+                    + ("D5-isolated, network-off" if lc.get("isolation")
+                       else "same-user (the operator) fallback"))
+    else:
+        iso_desc = ("D5: codex-worker uid, systemd-hardened, the operator's home inaccessible, test "
+                    "phase network-off" if lc.get("isolation") else "same-user (the operator) fallback, "
+                    "codex bwrap sandbox")
+
     def finish(status: str, err_class, **extra) -> None:
         try:
             phase_attestation = json.loads((att / "test-attestation.json").read_text())
@@ -2163,9 +2222,7 @@ def _run(attempt_id: str) -> None:
             "attempt_id": attempt_id, "spec_id": spec_id, "attempt": n,
             "spec_digest": lc["spec_digest"], "base_sha": lc["base_sha"],
             "worker_model": lc["worker_model"], "reviewer_model": lc["reviewer_model"],
-            "isolation": ("D5: codex-worker uid, systemd-hardened, the operator's home inaccessible, test "
-                          "phase network-off" if lc.get("isolation") else "same-user (the operator) fallback, "
-                          "codex bwrap sandbox"),
+            "isolation": iso_desc,
             "test_command": lc["test_command"], "status": status,
             "error_class": err_class, "commit_policy": "orchestrator-commits (G1-A/C)",
             "attestation": phase_attestation, "finished": now(), **extra,
@@ -2179,6 +2236,12 @@ def _run(attempt_id: str) -> None:
                                                        "worker_exit") if k in extra}})
         sys.exit(0 if status == "passed_pr_opened" else 1)
 
+    return spec_id, n, att, lc, wt, raw, finish
+
+
+def _run(attempt_id: str) -> None:
+    """Runs INSIDE the systemd unit. The full attempt pipeline (Gate 1 steps 3-9)."""
+    spec_id, n, att, lc, wt, raw, finish = _attempt_context(attempt_id)
     try:
         _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish)
     except SystemExit:
@@ -2187,6 +2250,134 @@ def _run(attempt_id: str) -> None:
         import traceback
         (raw / "run-traceback.txt").write_text(traceback.format_exc())
         finish("failed_worker_error", ERR_WORKER, detail=f"dispatch _run crashed: {e}")
+
+
+def _grade(attempt_id: str) -> None:
+    """Runs INSIDE the systemd unit started by `dispatch continue` (R73 Job 3): the grading half
+    for a subagent-mode attempt whose BUILD the orchestrator session already ran."""
+    spec_id, n, att, lc, wt, raw, finish = _attempt_context(attempt_id)
+    try:
+        # Frozen-mode guard, mirror of _run_pipeline's: grading-only entry is for subagent
+        # records exclusively; an external-CLI record reaching _grade would skip its worker.
+        if lc.get("worker_mode", "external-cli") != "subagent":
+            finish("error_launch", ERR_LAUNCH,
+                   detail=f"launch record froze worker_mode="
+                          f"{lc.get('worker_mode', 'external-cli')!r}; _grade only accepts "
+                          f"subagent attempts — external-CLI attempts run their whole pipeline "
+                          f"in _run")
+        # T2, same doctrine as the BUILD half: an unisolated TEST phase without a recorded
+        # operator exposure acceptance is a tampered/hand-edited record — refuse.
+        # error_launch, not failed_launch: the refusal must be TERMINAL so `dispatch await`
+        # resolves it immediately (the three pre-existing failed_launch paths are the recorded
+        # backlog defect; new refusal paths do not add to it).
+        if not lc.get("isolation", False) and not lc.get("exposure_accepted"):
+            finish("error_launch", ERR_NO_ISOLATION,
+                   detail="launch record has isolation:false without a recorded operator "
+                          "exposure acceptance — refusing to run the spec test as the operator")
+        # B6: the ONE absolute deadline frozen at launch keeps running through the BUILD; a
+        # legacy-free subagent record always carries deadline_ts (frozen by cmd_launch).
+        deadline_ts = lc.get("deadline_ts")
+        if deadline_ts is None:
+            finish("error_launch", ERR_LAUNCH,
+                   detail="subagent launch record lacks deadline_ts (corrupt launch.json); "
+                          "fail closed")
+        lc["deadline_ts"] = deadline_ts
+        vendors = lc_frozen_vendor_fields(lc)
+        if vendors is None:
+            finish("error_launch", ERR_LAUNCH,
+                   detail="launch record carries a partial set of frozen vendor fields (corrupt "
+                          "launch.json); fail closed")
+        if VENDOR_ADAPTERS is None:
+            finish("error_launch", ERR_LAUNCH,
+                   detail=f"vendor adapters failed to load at dispatcher start "
+                          f"({VENDOR_ADAPTERS_ERR}); fail closed")
+        try:
+            worker_adapter = VENDOR_ADAPTERS.get_worker_adapter(vendors["worker_vendor"])
+        except Exception as exc:
+            finish("error_launch", ERR_LAUNCH,
+                   detail=f"worker adapter unavailable for vendor "
+                          f"{vendors.get('worker_vendor')!r}: {exc}; fail closed")
+        last_message = worker_adapter.recover_last_message(raw, lc.get("isolation", False))
+        _grade_phase(attempt_id, spec_id, n, att, lc, wt, raw, finish,
+                     worker_adapter, None, "", last_message)
+    except SystemExit:
+        raise
+    except Exception as e:  # any unexpected failure still leaves a terminal record
+        import traceback
+        (raw / "grade-traceback.txt").write_text(traceback.format_exc())
+        finish("failed_worker_error", ERR_WORKER, detail=f"dispatch _grade crashed: {e}")
+
+
+def cmd_continue(attempt_id: str) -> None:
+    """Hand a subagent-mode attempt's finished BUILD to the unchanged grading half (R73 Job 3).
+    Fail-closed preconditions, then the SAME detached-unit shape as cmd_launch, so await/status/
+    cancel/timeout/reconcile treat the attempt identically from here on."""
+    spec_id, n = parse_attempt_id(attempt_id)
+    att = ATTEMPTS / spec_id / str(n)
+    lc_path = att / "launch.json"
+    if not lc_path.exists():
+        die(f"no launch record for {attempt_id} (launch it first)", 6)
+    lc = json.loads(lc_path.read_text())
+    if lc.get("worker_mode", "external-cli") != "subagent":
+        die(f"{attempt_id} froze worker_mode="
+            f"{lc.get('worker_mode', 'external-cli')!r}; `dispatch continue` only grades "
+            f"subagent attempts — external-CLI attempts run end to end from launch.", 6)
+    if not (att / "raw" / "worker-last-message.txt").exists():
+        die("refusing to grade: raw/worker-last-message.txt is missing — the orchestrator "
+            "records the subagent's final message before continue (a BUILD that produced no "
+            "message was not completed; cancel the attempt instead).", 6)
+    deadline_ts = lc.get("deadline_ts")
+    if deadline_ts is None:
+        die(f"{attempt_id} launch record lacks deadline_ts (corrupt); refuse.", 6)
+    unit = unit_name(spec_id, n)
+    # CAS under the ONE state lock (same lock claim_slot uses): verify awaiting_build and flip to
+    # running atomically, so two concurrent continues cannot both start the grading unit.
+    STATE.mkdir(parents=True, exist_ok=True)
+    with open(STATE / ".lock", "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            st = read_state(spec_id) or {}
+            if st.get("attempt_id") != attempt_id or st.get("status") != "awaiting_build":
+                die(f"{attempt_id} is not awaiting a BUILD (state: "
+                    f"{st.get('status') if st.get('attempt_id') == attempt_id else 'foreign/absent'}); "
+                    f"continue grades exactly one finished subagent BUILD.", 8)
+            atomic_write(STATE / f"{spec_id}.json",
+                         json.dumps({**st, "status": "running",
+                                     "detail": "grading (dispatch continue)",
+                                     "updated": now()}, indent=2))
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
+    # B6: the grading unit's RuntimeMaxSec is the REMAINING time to the launch-frozen absolute
+    # deadline — the BUILD already spent its share; an exhausted deadline refuses with a durable
+    # terminal record (interrupted: the BUILD ran, nothing was graded, resumable as a fresh
+    # attempt) rather than starting a zero-ceiling unit.
+    outer_ceiling_s = remaining_ceiling_s(deadline_ts)
+    if outer_ceiling_s <= 0:
+        st = read_state(spec_id) or {}
+        write_state(spec_id, {**st, "status": "interrupted", "error_class": "interrupted",
+                              "detail": "attempt deadline exhausted before grading could start "
+                                        "(single absolute ceiling, B6); re-launch as a fresh "
+                                        "attempt"})
+        die("attempt deadline already exhausted before grading could start (B6)", 10)
+    dispatch_bin = str(ROOT / "scripts" / "dispatch")
+    cmd = [
+        "systemd-run", "--user", f"--unit={unit}", "--collect",
+        f"--property=Description=Grade subagent attempt {attempt_id}",
+        f"--property=RuntimeMaxSec={outer_ceiling_s}",
+        f"--property=ExecStopPost={dispatch_bin} timeout {attempt_id}",
+        "--setenv=HOME=" + os.environ.get("HOME", str(OPERATOR_HOME)),
+        "--setenv=PATH=" + os.environ.get("PATH", "/usr/bin:/bin"),
+        "--setenv=XDG_RUNTIME_DIR=" + os.environ.get("XDG_RUNTIME_DIR", ""),
+        dispatch_bin, "_grade", attempt_id,
+    ]
+    cp = run(cmd)
+    if cp.returncode != 0:
+        st = read_state(spec_id) or {}
+        write_state(spec_id, {**st, "status": "error_launch", "error_class": ERR_LAUNCH,
+                              "detail": f"systemd-run failed starting the grading unit: "
+                                        f"{cp.stderr.strip()}"})
+        die(f"failed to start grading unit: {cp.stderr.strip()}", 10)
+    print(attempt_id)
 
 
 def run_candidate_test_phases(lc: dict, wt: Path, worker_commit: str, att: Path,
@@ -2360,9 +2551,13 @@ def run_candidate_test_phases(lc: dict, wt: Path, worker_commit: str, att: Path,
     return result
 
 
-def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
-    # --- step 3: run the worker (scrubbed env, network off) --------------------
-    # Fixed preamble. Planning policy per policy-note item 2. Commit policy per G1-A/C.
+def worker_prompt_text(att: Path, lc: dict, n: int) -> str:
+    """The worker's BUILD prompt, from the verified launch snapshot — ONE builder for both
+    execution modes (R73 Job 3), so a subagent worker is told exactly what the external-CLI
+    worker would be. Fixed preamble; planning policy per policy-note item 2; commit policy per
+    G1-A/C. B2: the SNAPSHOT taken at launch, never the live spec file — an edit to
+    specs/<id>.yaml after approval must not change what the worker is told to build; the
+    snapshot bytes are re-hashed against the recorded digest on this read."""
     preamble = (
         "Implement this spec. Modify only in-scope paths. Run the test command until it exits 0. "
         "Leave your changes in the working tree; do NOT commit or push — the orchestrator commits "
@@ -2374,10 +2569,6 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
         "test command, inadequate scope), stop and report SPEC_BLOCKED on its own line followed by "
         "the reason — never improvise beyond the spec."
     )
-    # B2: the SNAPSHOT taken at launch, never the live spec file — an edit to specs/<id>.yaml after
-    # approval must not change what the worker is told to build. The snapshot bytes are re-hashed and
-    # verified against the recorded digest on this read, so tampering with spec-snapshot.yaml after
-    # launch is refused too (B2 finding 1).
     prompt = preamble + "\n\n=== SPEC ===\n" + snapshot_spec_text(
         att, lc.get("spec_snapshot_digest") or lc["spec_digest"])
     # Gate 4: a remediation attempt must address the SPECIFIC findings of the failed attempt —
@@ -2392,6 +2583,12 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
             f"findings cannot be addressed within the spec and scope, report SPEC_BLOCKED.\n"
             + json.dumps(rem["findings"], indent=2)
         )
+    return prompt
+
+
+def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
+    # --- step 3: run the worker (scrubbed env, network off) --------------------
+    prompt = worker_prompt_text(att, lc, n)
     (raw / "worker-prompt.txt").write_text(prompt)
 
     # T2: consume the FROZEN launch decision — never recompute isolation here. A launch record that
@@ -2433,6 +2630,15 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
                detail=f"worker adapter unavailable for vendor "
                       f"{vendors.get('worker_vendor')!r}: {exc}; fail closed — "
                       f"no worker was invoked")
+    # R73 Job 3: this pipeline invokes an EXTERNAL worker CLI. A record frozen as subagent mode
+    # has no CLI to invoke — its BUILD runs inside the orchestrator session and grading enters
+    # through `dispatch continue`. Refuse rather than run the wrong envelope (absent field =
+    # legacy external-cli record).
+    if lc.get("worker_mode", "external-cli") != "external-cli":
+        finish("error_launch", ERR_LAUNCH,
+               detail="launch record froze worker_mode="
+                      f"{lc.get('worker_mode')!r}; the external-CLI worker pipeline refuses it — "
+                      "subagent BUILDs are graded via `dispatch continue`")
     with open(raw / "events.jsonl", "w") as ev, open(raw / "worker-stderr.txt", "w") as er:
         if iso:
             # D5: worker runs as codex-worker in a hardened system service. Codex's own sandbox is
@@ -2508,20 +2714,36 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
     stderr_txt = (raw / "worker-stderr.txt").read_text()
     last_message = worker_adapter.recover_last_message(raw, iso)
 
+    _grade_phase(attempt_id, spec_id, n, att, lc, wt, raw, finish,
+                 worker_adapter, wc.returncode, stderr_txt, last_message)
+
+
+def _grade_phase(attempt_id, spec_id, n, att, lc, wt, raw, finish,
+                 worker_adapter, worker_exit, stderr_txt, last_message) -> None:
+    """Everything AFTER the worker ran: the ONE shared grading half (R73 Job 3). External-CLI
+    attempts reach it from _run_pipeline inside their detached unit; subagent attempts reach it
+    through `dispatch continue` → _grade. Both modes get byte-identical gates, in the
+    pre-split order: SPEC_BLOCKED honor, error classification, path-safety, orchestrator
+    commit, integrity, scope, isolated spec test, required-test restoration + attestation,
+    optional regression gate, bound review, stale-base guard, push + draft PR. Callers resolve
+    lc['deadline_ts'] before entry."""
+    iso = lc.get("isolation", False)
+    deadline_ts = lc["deadline_ts"]
+
     # policy-note item 2: worker signalled the spec is unworkable. Old approval is void; a spec
     # revision + new approval digest is required. Terminal, but NOT a worker failure.
     if re.search(r"(^|\n)\s*SPEC_BLOCKED\b", last_message):
-        finish("spec_blocked", ERR_SPEC_BLOCKED, worker_exit=wc.returncode,
+        finish("spec_blocked", ERR_SPEC_BLOCKED, worker_exit=worker_exit,
                detail="worker reported SPEC_BLOCKED; spec revision + new approval required",
                worker_message=last_message.strip()[:2000])
 
-    ec = worker_adapter.classify_error(wc.returncode, stderr_txt, raw)
+    ec = worker_adapter.classify_error(worker_exit, stderr_txt, raw)
     if ec is not None:
         # policy-note item 1: a quota/rate-limit mid-attempt is INTERRUPTED (external capacity),
         # not a merit failure. Preserve evidence, stop; resume ONLY as a fresh attempt when
         # capacity returns. The dispatcher never resumes a partial worktree.
         if ec == ERR_QUOTA:
-            finish("interrupted", ERR_QUOTA, worker_exit=wc.returncode,
+            finish("interrupted", ERR_QUOTA, worker_exit=worker_exit,
                    detail="Codex quota/rate-limit hit mid-attempt; re-launch as a fresh attempt "
                           "after capacity returns. Never hand-finish this worktree.")
         # NEVER inline stderr here: result.json is pushed as provenance and raw worker stderr can
@@ -2530,21 +2752,21 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
         # outside it records as the generic worker class (detail keeps the adapter's literal).
         finish("failed_worker_error",
                ec if ec in (ERR_AUTH, ERR_SANDBOX, ERR_WORKER) else ERR_WORKER,
-               worker_exit=wc.returncode,
+               worker_exit=worker_exit,
                detail=f"worker error class={ec}; stderr kept in raw/worker-stderr.txt")
 
     # --- D5 path-safety gate: reject planted symlinks/special files BEFORE any operator-context step
     # touches worker output (no later the operator process should be able to follow a link into the operator's files).
     unsafe = validate_worktree_safe(wt)
     if unsafe:
-        finish("failed_scope", ERR_SCOPE, worker_exit=wc.returncode,
+        finish("failed_scope", ERR_SCOPE, worker_exit=worker_exit,
                detail=f"unsafe filesystem entries planted by worker (symlink/fifo/socket/device): "
                       f"{unsafe[:20]}")
 
     # --- decision G1-A/C: ORCHESTRATOR commits the worktree state --------------
     changed = git("status", "--porcelain=v2", "--untracked-files=all", cwd=wt)
     if not changed.strip():
-        finish("failed_worker_error", ERR_WORKER, worker_exit=wc.returncode,
+        finish("failed_worker_error", ERR_WORKER, worker_exit=worker_exit,
                detail="worker produced no changes")
     git("add", "-A", cwd=wt)
     env = os.environ.copy()
@@ -3303,6 +3525,15 @@ def cmd_await(attempt_id: str, interval: int = 5, max_wait: int = 8 * 3600,
                     pass
             print(json.dumps(out))
             sys.exit(0 if status == "passed_pr_opened" else 1)
+        # R73 Job 3: awaiting_build has no unit BY DESIGN — the BUILD is running inside the
+        # orchestrator session. Await is for attempts with a pipeline unit; say so and leave
+        # (exit 3: neither success nor a terminal failure), instead of eight silent hours or a
+        # false 'interrupted' from the unit check below.
+        if status == "awaiting_build":
+            print(json.dumps({"attempt_id": attempt_id, "status": "awaiting_build",
+                              "detail": "subagent BUILD pending in the orchestrator session; "
+                                        "run `dispatch continue` after the BUILD, then await"}))
+            sys.exit(3)
         # Unit gone but state not terminal => crash/interrupted.
         if status in LIVE and not unit_active(unit):
             time.sleep(2)  # settle: _run may be writing terminal state
@@ -3484,6 +3715,16 @@ def cmd_health(attempt_id: str, inactivity_min: int = HEALTH_INACTIVITY_MIN) -> 
     att = ATTEMPTS / spec_id / str(n)
     events = att / "raw" / "events.jsonl"
 
+    # R73 Job 3: no unit, no event stream to judge — health for a pending subagent BUILD is the
+    # deadline story reconcile owns; say so instead of reading a dead unit as inactivity.
+    st0 = read_state(spec_id) or {}
+    if st0.get("attempt_id") == attempt_id and st0.get("status") == "awaiting_build":
+        print(json.dumps({"attempt_id": attempt_id, "status": "awaiting_build",
+                          "health": "not-applicable",
+                          "detail": "subagent BUILD pending in the orchestrator session; "
+                                    "reconcile expires it at the frozen deadline"}))
+        return
+
     show = systemctl_show(unit, "ActiveState", "SubState", "CPUUsageNSec")
     active = show.get("ActiveState") in {"active", "activating"}
     cpu = int(show.get("CPUUsageNSec", "0") or 0)
@@ -3578,6 +3819,31 @@ def cmd_reconcile() -> None:
             continue
         aid = st.get("attempt_id")
         spec_id = st.get("spec_id")
+        # R73 Job 3: awaiting_build is LIVE-without-a-unit by design (subagent BUILD inside the
+        # orchestrator session), so 'unit gone' is not a crash signal for it. It expires at the
+        # launch-frozen absolute deadline (B6) instead; an unreadable/missing deadline is corrupt
+        # state and expires too (fail closed, never an immortal claim on a concurrency slot).
+        if st.get("status") == "awaiting_build":
+            try:
+                lc = json.loads((ATTEMPTS / spec_id / str(st.get("attempt")) /
+                                 "launch.json").read_text())
+                expired = time.time() > float(lc["deadline_ts"])
+                why = "attempt deadline exhausted during the subagent BUILD (B6)"
+            except Exception as e:
+                expired, why = True, f"launch record unreadable for awaiting_build state ({e})"
+            if expired:
+                write_state(spec_id, {**st, "status": "interrupted",
+                                      "error_class": "interrupted",
+                                      "detail": f"reconcile: {why}; resumable as a fresh attempt"})
+                reconciled.append({"attempt_id": aid, "from": "awaiting_build",
+                                   "to": "interrupted", "unit_active": False,
+                                   "remaining_units": [], "teardown_verified": True})
+            else:
+                reconciled.append({"attempt_id": aid, "status": "awaiting_build",
+                                   "unit_active": False,
+                                   "note": "subagent BUILD pending (no unit by design); "
+                                           "grade with `dispatch continue`"})
+            continue
         unit = st.get("unit") or (unit_name(*parse_attempt_id(aid)) if aid else None)
         active = unit_active(unit) if unit else False
         if not active:
@@ -4217,7 +4483,7 @@ def main() -> None:
     for name in ("launch",):
         p = sub.add_parser(name)
         p.add_argument("spec_id")
-    for name in ("status", "cancel", "timeout", "merge", "_run"):
+    for name in ("status", "cancel", "timeout", "merge", "continue", "_run", "_grade"):
         p = sub.add_parser(name)
         p.add_argument("attempt_id")
     pw = sub.add_parser("await")
@@ -4255,8 +4521,12 @@ def main() -> None:
         cmd_metrics()
     elif args.cmd == "integrate":
         cmd_integrate(args.attempt_ids)
+    elif args.cmd == "continue":
+        cmd_continue(args.attempt_id)
     elif args.cmd == "_run":
         _run(args.attempt_id)
+    elif args.cmd == "_grade":
+        _grade(args.attempt_id)
 
 
 if __name__ == "__main__":

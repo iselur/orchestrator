@@ -35,6 +35,14 @@ proves them), **configured assumptions** (set up outside this repo, verified man
   else; the cost is that any program on this box that runs `bwrap` reaches more of the operating
   system's isolation machinery than before. `tests/worker_userns.sh` proves the worker still
   cannot reach the owner's home through it.
+- Subagent workers (today: any claude-vendor worker model) BUILD inside the orchestrator's own
+  session and trust domain — the operator context, with its tools and credentials. There is no
+  isolated Claude worker process: 2026 Anthropic terms keep subscription auth inside first-party
+  surfaces, and the owner chose subagent mode over an API-key side channel (2026-07-16). What
+  protects the repo is the unchanged grading half that `dispatch continue` runs — path-safety,
+  orchestrator commit, integrity, scope, the isolated network-off test phase, required-test
+  attestation, bound review — plus the resolution-time refusal of same-model self-review.
+  Process isolation is claimed for external-CLI workers only (`tests/dispatch_subagent_worker.sh`).
 - Approvals bind to the spec digest and instance identity; a CLAUDE bound reviewer runs with
   all tools denied (a CODEX bound reviewer has no tool-denial flag: its read-only sandbox
   limits only model-spawned shell commands, so as an operator subprocess it keeps codex's own
