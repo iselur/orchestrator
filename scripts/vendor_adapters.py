@@ -121,6 +121,13 @@ class CodexWorker:
         """Codex needs its own auth/state dir writable inside the hardened service."""
         return [str(worker_home / ".codex")]
 
+    def iso_env_extra(self, worker_home):
+        """Vendor auth/state variables for the ISOLATED service (round-1 review: these are
+        adapter surface, not role envelope). Value-identical to codex's default state dir
+        under HOME=worker_home; stated explicitly so a vendor whose default differs (Job 3)
+        has a hook instead of a hardcode in isolated_run."""
+        return {"CODEX_HOME": str(worker_home / ".codex")}
+
     def runtime(self, resolve_codex_runtime):
         """Delegates to dispatch.py's module-level worker_codex_runtime (injected by the
         caller): runtime resolution and vetting are trust machinery, exercised directly by

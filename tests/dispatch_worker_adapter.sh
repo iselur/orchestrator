@@ -50,8 +50,9 @@ check("unisolated argv is byte-identical (bwrap sandbox on, last-message file)",
                    last_message_path=LMP)
       == ["codex", *common, "--sandbox", "workspace-write",
           "--output-last-message", LMP, PROMPT])
-check("model id passes through untranslated (no alias surface on the worker path)",
-      "-m" in common and common[common.index("-m") + 1] == "gpt-5.6-luna")
+av = w.build_argv("gpt-5.6-luna", "high", WT, PROMPT, isolated=True, argv_prefix=PREFIX)
+check("model id passes through untranslated (asserted on build_argv OUTPUT, round-1 minor)",
+      av[av.index("-m") + 1] == "gpt-5.6-luna")
 
 # ---- unisolated env: FULL equality with the pre-refactor scrubbed dict -------------------
 home = pathlib.Path("/home/op")
@@ -62,6 +63,9 @@ check("unisolated scrubbed env is identical",
           "CODEX_HOME": "/home/op/.codex", "TERM": "dumb", "LANG": "C.UTF-8"})
 check("isolated rw extra is exactly the worker's .codex dir",
       w.iso_rw_paths(pathlib.Path("/home/codex-worker")) == ["/home/codex-worker/.codex"])
+check("isolated env extra is exactly CODEX_HOME at the pre-refactor value (round-1 major)",
+      w.iso_env_extra(pathlib.Path("/home/codex-worker"))
+      == {"CODEX_HOME": "/home/codex-worker/.codex"})
 
 # ---- runtime delegation -------------------------------------------------------------------
 sentinel = (["x"], [("a", "b")], "entry")
@@ -102,6 +106,16 @@ check("zero exit classifies as completion (None)",
 (raw / "events.jsonl").write_text('{"type":"turn.completed"}\n')
 check("completed turn + nonzero exit still classifies as completion (pre-refactor rule)",
       w.classify_error(1, "warning noise", raw) is None)
+
+# ---- integrate branch-deletion guard (round-1 BLOCKING) -----------------------------------
+check("frozen codex/<aid> branch validates for its own attempt",
+      d.valid_attempt_branch("codex/SPEC-000-1", "SPEC-000-1"))
+check("a future vendor namespace for the same attempt validates",
+      d.valid_attempt_branch("claude/SPEC-000-1", "SPEC-000-1"))
+for bad in ("main", "ready-for-main", "codex/SPEC-000-2", "codex/SPEC-000-1x",
+            "a/b/SPEC-000-1", "SPEC-000-1", "", None, 7, ["codex/SPEC-000-1"]):
+    check(f"corrupt/foreign branch value {bad!r} refuses deletion",
+          not d.valid_attempt_branch(bad, "SPEC-000-1"))
 
 # ---- registry ------------------------------------------------------------------------------
 check("worker vendor registry is codex-only until Job 3", va.worker_vendors() == ["codex"])

@@ -1650,8 +1650,13 @@ def isolated_run(unit, argv, cwd, rw_paths, private_network, ceiling_s, stdout, 
     # refs/replace, so a grader's OWN in-process `git` object reads would still resolve replacement
     # objects unless the child's environment disables them. Export it into every hardened grader
     # unit (candidate-isolated + regression phases + the spec test_command all route through here).
+    # R73 Job 2 round-1 review: vendor auth/state variables (CODEX_HOME) are adapter surface,
+    # not role envelope — the worker call site passes them via env_extra
+    # (worker_adapter.iso_env_extra). Dropping the hardcode is value-identical for every other
+    # unit: nothing else here runs a vendor CLI, and codex's default state dir under
+    # HOME=WORKER_HOME is the same path the removed variable named.
     envs = {"HOME": str(WORKER_HOME), "PATH": "/usr/bin:/bin",
-            "CODEX_HOME": str(WORKER_HOME / ".codex"), "TERM": "dumb", "LANG": "C.UTF-8",
+            "TERM": "dumb", "LANG": "C.UTF-8",
             "GIT_NO_REPLACE_OBJECTS": "1", **(env_extra or {})}
     setenvs = [f"--setenv={k}={v}" for k, v in envs.items()]
     cmd = ["sudo", "-n", "systemd-run", f"--uid={WORKER_USER}", f"--gid={WORKER_USER}",
@@ -2475,7 +2480,8 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
                 lc["worker_unit"], argv, cwd=str(wt),
                 rw_paths=[str(wt), *worker_adapter.iso_rw_paths(WORKER_HOME)],
                 private_network=False, ceiling_s=worker_ceiling_s, stdout=ev, stderr=er,
-                binds=binds, slice_name=attempt_slice(attempt_id))
+                binds=binds, slice_name=attempt_slice(attempt_id),
+                env_extra=worker_adapter.iso_env_extra(WORKER_HOME))
         else:
             # Fallback (fresh box / CI): same-user launch with Codex's bwrap sandbox. No systemd
             # RuntimeMaxSec here, so cap the run itself at the time remaining to the absolute deadline
@@ -2510,7 +2516,7 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
         # capacity returns. The dispatcher never resumes a partial worktree.
         if ec == ERR_QUOTA:
             finish("interrupted", ERR_QUOTA, worker_exit=wc.returncode,
-                   detail="worker quota/rate-limit hit mid-attempt; re-launch as a fresh attempt "
+                   detail="Codex quota/rate-limit hit mid-attempt; re-launch as a fresh attempt "
                           "after capacity returns. Never hand-finish this worktree.")
         # NEVER inline stderr here: result.json is pushed as provenance and raw worker stderr can
         # carry secrets (round-1 review). await shows a local-only tail from the gitignored file.
@@ -2716,6 +2722,16 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
 # classify_worker and last_agent_message moved into the worker adapter (R73 Job 2,
 # scripts/vendor_adapters.py CodexWorker): output recovery and error classification are
 # vendor CLI mechanics. The recorded error-class vocabulary (ERR_*) stays defined here.
+def valid_attempt_branch(branch, attempt_id: str) -> bool:
+    """True only for a branch name that provably belongs to this attempt: exactly one
+    namespace segment, a slash, then the exact attempt id (today: codex/SPEC-NNN-n). The
+    frozen lc["branch"] is DATA feeding destructive deletion (R73 Job 2 round-1 review,
+    blocking) — a corrupt record naming main, ready-for-main, an owner branch, or another
+    attempt's branch must never reach `git branch -D` / remote delete."""
+    return (isinstance(branch, str)
+            and re.fullmatch(r"[A-Za-z0-9._-]+/" + re.escape(attempt_id), branch) is not None)
+
+
 def base_moved(wt: Path, base_branch: str, base_sha: str) -> tuple[str, bool]:
     """Gate 3 part 3 stale-base guard. Fetch the base branch and compare its current tip to the
     sha this attempt was built and reviewed against. Returns (current_tip, moved). `moved` True
@@ -4162,15 +4178,22 @@ def cmd_integrate(attempt_ids: list[str]) -> None:
             if wt.exists():
                 run(["git", "worktree", "remove", "--force", str(wt)], cwd=str(ROOT))
         # R73 Job 2: delete the FROZEN branch from the attempt's own launch record instead of
-        # reconstructing codex/{attempt_id}. A record whose branch cannot be read leaves the
-        # branch for manual cleanup — a leftover branch is visible and harmless; deleting a
-        # guessed name is neither.
+        # reconstructing codex/{attempt_id}. Round-1 review (BLOCKING): the recorded value is
+        # data feeding destructive local+remote deletion, so it must prove it belongs to THIS
+        # attempt before anything is deleted — valid_attempt_branch requires one namespace
+        # segment plus the exact attempt id, which no base/protected/owner branch ever carries.
+        # Anything unreadable or failing that proof leaves the branch for manual cleanup — a
+        # leftover branch is visible and harmless; deleting a guessed or corrupt name is neither.
         try:
             lc_branch = json.loads(
                 (ATTEMPTS / sid / str(by_spec[sid]) / "launch.json").read_text())["branch"]
         except Exception as exc:
             print(f"note: {aid}: launch.json branch unreadable ({exc}); "
                   f"branch left for manual cleanup")
+            lc_branch = None
+        if lc_branch is not None and not valid_attempt_branch(lc_branch, aid):
+            print(f"note: {aid}: recorded branch {lc_branch!r} does not name this attempt's "
+                  f"worker namespace; branch left for manual cleanup")
             lc_branch = None
         if lc_branch:
             run(["git", "branch", "-D", lc_branch], cwd=str(ROOT))
