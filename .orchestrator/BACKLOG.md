@@ -39,6 +39,15 @@ against this description: what matches, what doesn't, what is missing.
    `.orchestrator/reviews/codex-audit-2026-07-15/report.md`. Trust-critical; overlaps items 5–6.
 9. **Program B (rev 4, after A)** — rotation, task leases, watchdog, compaction lifecycle; falsifier first.
 10. **Program C (rev 4, after B)** — thin orchestrator, specialists, authoring flip, unpin `CLAUDE_CODE_SUBAGENT_MODEL`.
+11. **Raise the review-round cap from 3 to 5** (owner 2026-07-16, during R73 Job 2's spent-cap
+    escalation). Touches CLAUDE.md rule 3 (line replacement, not a stacked rule),
+    scripts/review's round counter/refusal, and tests/review_cap.sh. Rulebook + review
+    machinery change — its own gated row, reviewed by the installed gates.
+12. **Fix pre-existing failed_launch terminal statuses** — three shipped _run_pipeline refusal
+    paths (ERR_NO_ISOLATION, two deadline refusals) record failed_launch, which is in neither
+    TERMINAL nor LIVE, so `dispatch await` polls 8h on them (found deterministically during the
+    R73 Job 2 round-3 review; same shape as the fixed Job 2 finding). Small spec: record
+    error_launch (or add failed_launch to TERMINAL — decide in spec), plus await test.
 
 ## Parked
 
