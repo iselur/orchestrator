@@ -16,7 +16,7 @@ Prefer a fresh session per workstream.
    session end — open rows raised to the owner, never dropped. Ledger private, not in this repo.
 2. **One workstream:** one active execution stream. New ideas go to `.orchestrator/BACKLOG.md`,
    never beside current work. Business ideas stay private.
-3. **Review cap:** up to three adversarial review rounds, each answered by one revision.
+3. **Review cap:** up to five adversarial review rounds, each answered by one revision.
    Trust-critical work with an unresolved critical finding stays BLOCKED: escalate, never ship on
    a spent cap.
 4. **Communication:** bottom line first, stay brief. Past one step, keep a live to-do list, never
