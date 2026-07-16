@@ -52,6 +52,20 @@ printf 'raw stdout provenance\n' > .orchestrator/plans/PLAN-105.stdout
 printf 'orphan stdout, no sibling md\n' > .orchestrator/plans/PLAN-106.stdout
 mk_plan .orchestrator/plans/PLAN-107.md claude-opus-4-8
 printf 'a plain claude-drafted note\n' > claude-note.md
+# Finding-1 fixtures: a Sol plan and a Claude plan copied to NON-reserved names. Content-based
+# detection must classify from the frontmatter, so a rename cannot strip the recorded authorship.
+mk_plan .orchestrator/plans/PLAN-201.md gpt-5.6-sol
+cp .orchestrator/plans/PLAN-201.md sol-plan-renamed.md      # id: PLAN-201, sol, non-reserved name
+mk_plan .orchestrator/plans/PLAN-202.md claude-opus-4-8
+cp .orchestrator/plans/PLAN-202.md claude-plan-renamed.md   # id: PLAN-202, claude, non-reserved name
+# Finding-2 fixtures: frontmatter parser laundering attempts. Written by hand (mk_plan can't emit
+# malformed frontmatter): a stray trailing quote and a duplicate author_model key must NOT launder
+# a Sol model into a 'claude' derivation — both refuse (exit 2), never guess.
+printf -- '---\nid: PLAN-203\nauthor_model: gpt-5.6-sol'"'"'\nstatus: draft\n---\n# body\n' > stray-quote.md
+printf -- '---\nid: PLAN-204\nauthor_model: gpt-5.6-sol\nauthor_model: claude-opus-4-8\nstatus: draft\n---\n# body\n' > dup-key.md
+# Finding-3 fixtures: two distinct Sol plans (ordering — multiple-plan refusal must precede the
+# codex self-review refusal), reusing PLAN-001 (sol) plus a second sol plan.
+mk_plan .orchestrator/plans/PLAN-205.md gpt-5.6-sol
 
 # 1. A Claude-authored plan (frontmatter author_model -> vendor claude) proceeds to Codex review
 #    under its bound topic, and the round is recorded.
@@ -131,6 +145,49 @@ n=$(find .orchestrator/reviews/plan-107 -name 'round-[0-9].md' | wc -l)
 scripts/review --topic plan-107-take2 --author claude --context .orchestrator/plans/PLAN-107.md "escape" >/dev/null 2>&1
 rc=$?
 [ "$rc" = 6 ] && ok "spent-cap artifact cannot escape via topic rename (exit 6)" || bad "cap escape via rename gave exit $rc, expected 6"
+
+# 10. FINDING 1 — a plan RENAMED to a non-reserved filename is still classified from its content,
+#     not laundered by the rename. A Sol plan under a wrong name+topic derives codex → refused;
+#     forged --author claude on it is a mismatch (exit 6, derived codex ≠ asserted claude).
+scripts/review --topic sol-plan-renamed --author claude --context sol-plan-renamed.md "review" >/dev/null 2>&1
+rc=$?
+[ "$rc" = 6 ] && ok "renamed Sol plan still derives codex (forged claude refused, exit 6)" \
+  || bad "renamed Sol plan laundered: gave exit $rc, expected 6"
+#     ...and it binds to its frontmatter id (PLAN-201), so even a matching --author codex under the
+#     renamed topic is a cap-reset attempt (exit 6, the binding gate) — not self-review (exit 4).
+scripts/review --topic sol-plan-renamed --author codex --context sol-plan-renamed.md "review" >/dev/null 2>&1
+rc=$?
+[ "$rc" = 6 ] && ok "renamed Sol plan binds to its content id, renamed topic refused (exit 6)" \
+  || bad "renamed Sol plan binding gave exit $rc, expected 6"
+#     A renamed CLAUDE plan is not over-refused: it derives claude and proceeds under its bound topic.
+scripts/review --topic plan-202 --author claude --context claude-plan-renamed.md "review" >/dev/null 2>&1 \
+  && ok "renamed Claude plan derives claude and reviews under its bound topic" \
+  || bad "renamed Claude plan refused under its bound topic"
+
+# 11. FINDING 2 — the frontmatter parser cannot be laundered. A stray trailing quote and a duplicate
+#     author_model key both refuse (exit 2); neither yields a 'claude' derivation from a Sol value.
+scripts/review --topic plan-203 --author claude --context stray-quote.md "review" >/dev/null 2>&1
+rc=$?
+[ "$rc" = 2 ] && ok "author_model with a stray unbalanced quote refused (exit 2)" \
+  || bad "stray-quote author_model gave exit $rc, expected 2"
+scripts/review --topic plan-204 --author claude --context dup-key.md "review" >/dev/null 2>&1
+rc=$?
+[ "$rc" = 2 ] && ok "duplicate author_model keys refused (exit 2)" \
+  || bad "duplicate author_model gave exit $rc, expected 2"
+
+# 12. FINDING 3 — binding order. Two distinct Sol plans with --author codex must refuse as
+#     multiple-plan (exit 2), NOT slip through to the codex self-review gate (exit 4).
+scripts/review --topic plan-001 --author codex \
+  --context .orchestrator/plans/PLAN-001.md --context .orchestrator/plans/PLAN-205.md "review" >/dev/null 2>&1
+rc=$?
+[ "$rc" = 2 ] && ok "two distinct Sol plans refuse as multiple-plan before self-review (exit 2)" \
+  || bad "two Sol plans with --author codex gave exit $rc, expected 2"
+#     A single Sol plan with --author codex under a WRONG topic is a cap-reset attempt (exit 6, the
+#     binding gate), NOT self-review (exit 4) — the exit code names the real reason.
+scripts/review --topic wrong-topic --author codex --context .orchestrator/plans/PLAN-001.md "review" >/dev/null 2>&1
+rc=$?
+[ "$rc" = 6 ] && ok "single Sol plan under a renamed topic refuses via binding (exit 6, not 4)" \
+  || bad "single Sol plan renamed topic gave exit $rc, expected 6"
 
 [ "$fails" -eq 0 ] && echo "PASS review_plan_authorship.sh" || echo "FAIL review_plan_authorship.sh"
 exit "$fails"
