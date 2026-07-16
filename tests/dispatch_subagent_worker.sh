@@ -115,9 +115,12 @@ drive_pipeline({**base_lc, "worker_vendor": "claude", "reviewer_vendor": "codex"
 check("claude vendor + external-cli mode is corrupt: error_launch, no worker invoked",
       recorded.get("status") == "error_launch" and "corrupt" in recorded.get("detail", ""))
 
-# ---- patched state/attempt roots for lifecycle tests ------------------------------------------
+# ---- patched state/attempt/escalation roots for lifecycle tests -------------------------------
+# ESCALATIONS too (round-4 major 1): the race cases below deliberately produce unverified
+# teardowns, and the production escalation writer must never plant fabricated incidents in the
+# repo's real audit-provenance directory during a test run.
 work = pathlib.Path(tempfile.mkdtemp())
-d.ATTEMPTS, d.STATE = work / "attempts", work / "state"
+d.ATTEMPTS, d.STATE, d.ESCALATIONS = work / "attempts", work / "state", work / "escalations"
 AID, SID, N = "SPEC-900-1", "SPEC-900", 1
 attd = d.ATTEMPTS / SID / "1"; (attd / "raw").mkdir(parents=True)
 (attd / "spec-snapshot.yaml").write_bytes(snap)
@@ -370,7 +373,7 @@ check("an isolated record still claims network=off for tests (and only then)",
 
 # ---- launch: awaiting_build with NO unit, honest provenance ----------------------------------
 lwork = pathlib.Path(tempfile.mkdtemp())
-d.ATTEMPTS, d.STATE = lwork / "attempts", lwork / "state"
+d.ATTEMPTS, d.STATE, d.ESCALATIONS = lwork / "attempts", lwork / "state", lwork / "escalations"
 d.ATTEMPTS.mkdir(parents=True); d.STATE.mkdir(parents=True)
 LSID = "SPEC-901"
 spec = {"id": LSID, "title": "t", "risk_class": "low", "test_command": "true",
