@@ -147,6 +147,9 @@ APPROVAL_SCHEMA = {
         "base_branch": {"type": "string"},
         "worker_model": {"type": "string"}, "worker_reasoning_effort": {"type": "string"},
         "reviewer_model": {"type": "string"}, "reviewer_effort": {"type": "string"},
+        "intake_row": {"type": "string", "minLength": 1},
+        "lease_generation": {"type": "integer", "minimum": 0},
+        "lease_session": {"type": "string", "minLength": 1},
         "note": {"type": "string"},
     },
 }
@@ -1882,6 +1885,78 @@ def run_box_preconditions(att: Path, policy: dict) -> dict[str, list[dict]]:
 
 
 # =============================================================== launch =======
+def _lease_module():
+    """Load the optional lease subsystem only when an approval/attempt binds one."""
+    try:
+        return importlib.import_module("lease")
+    except Exception as exc:
+        die(f"lease subsystem unavailable; refusing a lease-bound dispatch: {exc}", 6)
+
+
+def _lease_binding_fields(value: dict) -> dict | None:
+    row = value.get("intake_row")
+    if row is None:
+        lease = value.get("lease")
+        if isinstance(lease, dict):
+            row = lease.get("row") or lease.get("intake_row")
+            generation = lease.get("generation", lease.get("lease_generation"))
+            session = lease.get("session", lease.get("lease_session"))
+        else:
+            generation = value.get("lease_generation")
+            session = value.get("lease_session")
+    else:
+        generation = value.get("lease_generation")
+        session = value.get("lease_session")
+    if row is None:
+        return None
+    if generation is None:
+        die("lease-bound dispatch lacks lease_generation; refuse.", 6)
+    session = session or os.environ.get("ORCH_LEASE_SESSION") or os.environ.get("ORCH_SESSION_ID")
+    if not session:
+        die("lease-bound dispatch lacks lease_session; refuse.", 6)
+    return {"intake_row": row, "lease_generation": generation, "lease_session": session}
+
+
+def _enforce_recorded_lease(value: dict, action: str) -> dict | None:
+    binding = _lease_binding_fields(value)
+    if binding is None:
+        return None
+    try:
+        record = _lease_module().check(binding["intake_row"], binding["lease_session"],
+                                       binding["lease_generation"])
+    except SystemExit:
+        raise
+    except Exception as exc:
+        die(f"lease authorization refused for {action}: {exc}", 6)
+    if record is None:
+        die(f"lease authorization refused for {action}: missing record", 6)
+    return record
+
+
+def _launch_lease(approval: dict) -> dict | None:
+    if load_autonomy() is not None and not approval.get("intake_row"):
+        die("autonomous launch requires approval.intake_row; refuse.", 12)
+    if not approval.get("intake_row"):
+        return None
+    session = (approval.get("lease_session") or os.environ.get("ORCH_LEASE_SESSION")
+               or os.environ.get("ORCH_SESSION_ID"))
+    if not session:
+        die("lease-bound dispatch lacks lease_session; refuse.", 6)
+    generation = approval.get("lease_generation")
+    if generation is None:
+        try:
+            current = _lease_module().status(approval["intake_row"])
+        except Exception as exc:
+            die(f"lease authorization refused for launch: {exc}", 6)
+        if current is None:
+            die("lease authorization refused for launch: missing record", 6)
+        generation = current["generation"]
+    binding = {"intake_row": approval["intake_row"],
+               "lease_generation": generation, "lease_session": session}
+    _enforce_recorded_lease(binding, "launch")
+    return binding
+
+
 def cmd_launch(spec_id: str) -> None:
     # T2 (decision R26) — ISOLATION FAILS CLOSED. Selected ONCE, FIRST — before preflight, the
     # slot claim, the attempt directory, the worktree, and any worker-controlled code. Everything
@@ -1922,6 +1997,7 @@ def cmd_launch(spec_id: str) -> None:
     # all refuse cleanly with no side effects; the isolation gate above deliberately stays first).
     ctx = preflight(spec_id)
     spec, digest, approval = ctx["spec"], ctx["digest"], ctx["approval"]
+    lease_binding = _launch_lease(approval)
     # R71: role→model defaults come from scripts/models.json, read once here and frozen into lc
     # below. An approval that explicitly pins a model still wins (owner decision 2026-07-15).
     # Resolution (incl. pin revalidation) happens before the attempt claim, branch, or worktree
@@ -2135,6 +2211,7 @@ def cmd_launch(spec_id: str) -> None:
         **({"trust_domain": "orchestrator"} if subagent_mode else {}),
         "worker_unit": f"codex-worker-{attempt_id}",
         "test_unit": f"codex-test-{attempt_id}", "created": now(),
+        **({"lease": lease_binding} if lease_binding else {}),
     }, indent=2))
 
     if subagent_mode:
@@ -2345,6 +2422,7 @@ def cmd_continue(attempt_id: str) -> None:
     if not lc_path.exists():
         die(f"no launch record for {attempt_id} (launch it first)", 6)
     lc = json.loads(lc_path.read_text())
+    _enforce_recorded_lease(lc, "continue")
     if lc.get("worker_mode", "external-cli") != "subagent":
         die(f"{attempt_id} froze worker_mode="
             f"{lc.get('worker_mode', 'external-cli')!r}; `dispatch continue` only grades "
@@ -4319,6 +4397,7 @@ def cmd_merge(attempt_id: str) -> None:
         die(f"{attempt_id} status is {result.get('status')}, not passed_pr_opened; refuse.", 13)
 
     lc = json.loads((att / "launch.json").read_text())
+    _enforce_recorded_lease(lc, "merge")
     base_branch = lc.get("base_branch", AUTOMATION_BASE)
     # Base pin, defense in depth (B3): never merge a persisted attempt whose base is not the
     # automation target, even if it somehow reached passed_pr_opened.

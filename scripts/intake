@@ -22,6 +22,41 @@ HEADER='| id | date | request | lane | plan-ref | status | completion-evidence |
 
 fail() { echo "INTAKE REFUSED: $1" >&2; exit 1; }
 
+lease_fence() {
+  local id="$1" session rc state
+  [ -x scripts/lease ] || return 0
+  if state=$(scripts/lease status "$id" 2>/dev/null); then
+    :
+  else
+    rc=$?
+    case "$rc" in
+      9) exit 9 ;;
+      3) exit 3 ;;
+      *) fail "lease state for $id is unreadable" ;;
+    esac
+  fi
+  [ "$state" = "missing" ] && return 0
+  session="${ORCH_LEASE_SESSION:-${ORCH_SESSION_ID:-}}"
+  [ -n "$session" ] || fail "$id is leased; ORCH_LEASE_SESSION is required"
+  if [ -n "${ORCH_LEASE_GENERATION:-}" ]; then
+    if scripts/lease check "$id" "$session" "$ORCH_LEASE_GENERATION" >/dev/null 2>&1; then
+      rc=0
+    else
+      rc=$?
+    fi
+  elif scripts/lease check "$id" "$session" >/dev/null 2>&1; then
+    rc=0
+  else
+    rc=$?
+  fi
+  case "$rc" in
+    0) ;;
+    9) exit 9 ;;
+    3) exit 3 ;;
+    *) fail "$id is held by another session or is not live" ;;
+  esac
+}
+
 # One row per line, one table: fields may not contain newlines/CR (a row IS a line) or '|' (the
 # column separator — a crafted field could forge columns, a status, or a whole row). A field of
 # pure whitespace is an empty field.
@@ -46,6 +81,7 @@ case "${1:-}" in
     id="${2:-}" evidence="${3:-}"
     [ -n "$id" ] || fail "close needs an id: scripts/intake close R8 \"<evidence>\""
     check_field "completion evidence" "$evidence"
+    lease_fence "$id"
     grep -q "^| $id " "$LEDGER" || fail "no ledger row for $id"
     grep -q "^| $id .*| open |" "$LEDGER" || fail "$id is not open (already closed?)"
     tmp=$(mktemp)
@@ -136,6 +172,7 @@ case "${1:-}" in
     [ -n "$id" ] || fail "observe needs an id: scripts/intake observe R40 \"<owner approval evidence>\""
     printf '%s' "$id" | grep -qE '^R[0-9]+$' || fail "invalid id '$id' (Rn expected — it is used as an anchor when rewriting the row)"
     check_field "observation evidence" "$evidence"
+    lease_fence "$id"
     case "$evidence" in *\\*) fail "observation evidence must not contain backslashes" ;; esac
     [ "${#evidence}" -ge 10 ] || fail "observation evidence too thin — name the external event and the owner approval"
     grep -q "^| $id " "$LEDGER" || fail "no ledger row for $id"
