@@ -12,15 +12,14 @@ a recommendation, breaks it into tickets, logs them, improves the plan, executes
 result, tests it, deploys it, and maintains what it ships. Every holistic review measures the setup
 against this description: what matches, what doesn't, what is missing.
 
-## Next up (operator-ordered 2026-07-16)
+## Next up
 
-1. **Codex priority tier fast → standard** (cost lever from the 2026-07-15 token findings; owner
-   2026-07-16): flip worker/reviewer/spec-author Codex calls to standard processing; watch dispatch ceilings.
-2. **Program C (rev 4)** — thin orchestrator, specialists, authoring flip, unpin `CLAUDE_CODE_SUBAGENT_MODEL`.
-   Reshape in flight: review round binding shipped; the codex-plan vendor split and the analyst
-   one-shots remain (rows open in the private ledger).
-3. **Restrict worker build-phase egress before the first product-repo dispatch** (SECURITY.md gap 1,
+1. **Restrict worker build-phase egress before the first product-repo dispatch** (SECURITY.md gap 1,
    LOW-MEDIUM 2026-07-16): worker uid reaches only the model API; the credential-broker fix stays parked.
+
+(The Codex standard-tier cost lever and the Program C review-round-binding piece have shipped to
+main; the rest of Program C — the codex-plan vendor split and the analyst one-shots — is in flight,
+tracked in the private ledger. In-flight work lives in the ledger, not here.)
 
 ## Parked (owner 2026-07-16: keep for the future)
 
@@ -29,7 +28,9 @@ against this description: what matches, what doesn't, what is missing.
   recovery. If revived, rebuild in Python; the hardened scenario matrix is preserved on the
   lifecycle-falsifier branch.
 - Approvals rework (SECURITY.md gap 2): the autonomy grant covers low risk, owner confirms `main` only.
-- Move the test grade out of the worker's reach (SECURITY.md gap 3).
+- Move the test grade fully outside candidate/operator influence (SECURITY.md gap 3 residual): the
+  worker-reach fix already shipped — grader bytes are materialized from the pinned git tree and run
+  from a fresh checkout outside the worktree; only a same-uid operator race on that checkout remains.
 - Measure whether review catches bugs: plant three known defects, count catches, size review scope from the result.
 - 2026-07-15 audit remainder: re-verified 2026-07-16 — seven of eight highs already fixed on main,
   the last a low-risk merge-window race (owner enables GitHub's up-to-date-branch rule); four
