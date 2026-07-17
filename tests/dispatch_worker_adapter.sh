@@ -203,6 +203,15 @@ except ValueError:
     kimi_noalias_raises = True
 check("kimi without its required alias entry refuses (fail closed, never the raw id)",
       kimi_noalias_raises)
+# Round-2 review: an IDENTITY alias (raw id laundered through the map) and a non-string
+# alias value must refuse the same way — the alias is a non-empty string DISTINCT from the id.
+for bad_aliases in ({"kimi-k3": "kimi-k3"}, {"kimi-k3": 7}, {"kimi-k3": "  "}, "not-a-dict"):
+    try:
+        kw.build_argv("kimi-k3", "max", WT, PROMPT, isolated=True, argv_prefix=KPREFIX,
+                      cli_aliases=bad_aliases)
+        check(f"kimi refuses corrupt alias mapping {bad_aliases!r}", False)
+    except ValueError:
+        check(f"kimi refuses corrupt alias mapping {bad_aliases!r}", True)
 try:
     kw.build_argv("kimi-k3", "max", WT, PROMPT, isolated=False, last_message_path=LMP)
     kimi_uniso_raises = False

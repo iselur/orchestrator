@@ -127,6 +127,13 @@ except ValueError:
     km_noalias_raises = True
 check("kimi reviewer without its required alias entry refuses (fail closed)",
       km_noalias_raises)
+# Round-2 review: identity and malformed alias values refuse too — never the raw relay id.
+for bad_aliases in ({"kimi-k3": "kimi-k3"}, {"kimi-k3": 7}, {"kimi-k3": "  "}, None):
+    try:
+        km.build_argv("kimi-k3", "max", SCHEMA, bad_aliases, "/x/s.json", request="REQ")
+        check(f"kimi reviewer refuses corrupt alias mapping {bad_aliases!r}", False)
+    except ValueError:
+        check(f"kimi reviewer refuses corrupt alias mapping {bad_aliases!r}", True)
 shaped = km.reviewer_prompt("REQ", SCHEMA)
 check("kimi prompt shaping appends the schema and the JSON-only instruction (codex discipline)",
       shaped.startswith("REQ") and "rv1" in shaped and "ONLY one JSON object" in shaped)

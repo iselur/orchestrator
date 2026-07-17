@@ -129,10 +129,14 @@ class KimiReviewer:
                              f"{KIMI_ARGV_PROMPT_LIMIT}-byte argv guard (probe D E2BIG wall): "
                              f"refused before invocation, never truncated")
         model = cli_aliases.get(model_id) if isinstance(cli_aliases, dict) else None
-        if not model:
-            raise ValueError(f"kimi reviewer requires the CLI provider alias for {model_id!r} "
-                             f"(probe A: the kimi CLI accepts its own aliases, never relay "
-                             f"model ids) and the frozen cli_aliases carries none; fail closed")
+        # Round-2 review: truthiness alone accepted an identity alias (the raw relay id
+        # laundered through the map) and non-string values straight into argv — the alias
+        # must be a non-empty STRING distinct from the relay model id.
+        if not isinstance(model, str) or not model.strip() or model == model_id:
+            raise ValueError(f"kimi reviewer requires a distinct CLI provider alias for "
+                             f"{model_id!r} (probe A: the kimi CLI accepts its own aliases, "
+                             f"never relay model ids); the frozen cli_aliases carries "
+                             f"{model!r}; fail closed")
         return ["kimi", "-p", request, "-m", model, "--output-format", "stream-json"]
 
     def reviewer_prompt(self, req, schema_obj):
@@ -313,11 +317,15 @@ class KimiWorker:
             raise ValueError("kimi worker has no unisolated mode: the CLI cannot set its own "
                              "working directory (no --cd) and has no inner sandbox (probes "
                              "B/F); the hardened service is the only confinement — fail closed")
-        model = (cli_aliases or {}).get(model_id)
-        if not model:
-            raise ValueError(f"kimi worker requires the CLI provider alias for {model_id!r} "
-                             f"(probe A: the kimi CLI accepts its own aliases, never relay "
-                             f"model ids) and the frozen cli_aliases carries none; fail closed")
+        model = cli_aliases.get(model_id) if isinstance(cli_aliases, dict) else None
+        # Round-2 review: truthiness alone accepted an identity alias (the raw relay id
+        # laundered through the map) and non-string values straight into argv — the alias
+        # must be a non-empty STRING distinct from the relay model id.
+        if not isinstance(model, str) or not model.strip() or model == model_id:
+            raise ValueError(f"kimi worker requires a distinct CLI provider alias for "
+                             f"{model_id!r} (probe A: the kimi CLI accepts its own aliases, "
+                             f"never relay model ids); the frozen cli_aliases carries "
+                             f"{model!r}; fail closed")
         return [*(argv_prefix or []), "-p", prompt,
                 "-m", model, "--output-format", "stream-json", "-y"]
 

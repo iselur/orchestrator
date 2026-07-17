@@ -108,6 +108,11 @@ check("claude model declared as kimi vendor refuses launch (exit 2)", load_resul
 bad = copy.deepcopy(good); del bad["cli_aliases"]["kimi-k3"]
 scratch.write_text(json.dumps(bad))
 check("kimi-vendor model without its CLI alias refuses launch (exit 2)", load_result() == "exit2")
+# Round-2 review: an IDENTITY alias would launder the raw relay id through the translation —
+# the kimi alias must be DISTINCT from the model id.
+bad = copy.deepcopy(good); bad["cli_aliases"]["kimi-k3"] = "kimi-k3"
+scratch.write_text(json.dumps(bad))
+check("kimi identity alias (raw id laundering) refuses launch (exit 2)", load_result() == "exit2")
 bad = copy.deepcopy(good); del bad["vendor_map"][bad["roles"]["worker"]["model"]]
 scratch.write_text(json.dumps(bad))
 check("role model missing from vendor_map refuses launch (exit 2)", load_result() == "exit2")
