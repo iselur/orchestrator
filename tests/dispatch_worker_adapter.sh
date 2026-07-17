@@ -193,9 +193,25 @@ kav = kw.build_argv("kimi-k3", "max", WT, PROMPT, isolated=True, argv_prefix=KPR
 check("kimi argv carries no codex flags (exec/--cd/--sandbox/--json/effort) and no worktree path",
       not any(f in kav for f in ("exec", "--cd", "--sandbox", "--json", WT))
       and not any("model_reasoning_effort" in a for a in kav))
-kav2 = kw.build_argv("kimi-k3", "max", WT, PROMPT, isolated=True, argv_prefix=KPREFIX)
-check("kimi without an alias entry passes the model id through (alias-map convention)",
-      kav2[kav2.index("-m") + 1] == "kimi-k3")
+# Round-1 review of slice 3 (medium 4): kimi's CLI accepts only its provider aliases, so a
+# frozen alias map without the required entry REFUSES — the raw relay id must never reach
+# the CLI (deliberately flipping the slice-2 pass-through convention for kimi).
+try:
+    kw.build_argv("kimi-k3", "max", WT, PROMPT, isolated=True, argv_prefix=KPREFIX)
+    kimi_noalias_raises = False
+except ValueError:
+    kimi_noalias_raises = True
+check("kimi without its required alias entry refuses (fail closed, never the raw id)",
+      kimi_noalias_raises)
+# Round-2 review: an IDENTITY alias (raw id laundered through the map) and a non-string
+# alias value must refuse the same way — the alias is a non-empty string DISTINCT from the id.
+for bad_aliases in ({"kimi-k3": "kimi-k3"}, {"kimi-k3": 7}, {"kimi-k3": "  "}, "not-a-dict"):
+    try:
+        kw.build_argv("kimi-k3", "max", WT, PROMPT, isolated=True, argv_prefix=KPREFIX,
+                      cli_aliases=bad_aliases)
+        check(f"kimi refuses corrupt alias mapping {bad_aliases!r}", False)
+    except ValueError:
+        check(f"kimi refuses corrupt alias mapping {bad_aliases!r}", True)
 try:
     kw.build_argv("kimi-k3", "max", WT, PROMPT, isolated=False, last_message_path=LMP)
     kimi_uniso_raises = False
@@ -237,19 +253,43 @@ check("kimi config.invalid classifies as generic worker error (probe E: exit 1)"
 check("kimi never classifies sandbox_denial (no inner sandbox exists)",
       kw.classify_error(1, "bwrap: operation not permitted", kraw) == d.ERR_WORKER)
 
-# Kimi slice-2 inertness at the PIPELINE: a full kimi vendor record is unclassifiable until
-# the owner-gated slice 3 extends KNOWN_VENDORS — _run_pipeline records the same TERMINAL
-# error_launch refusal as a corrupt record, before any kimi CLI could be invoked.
+# Kimi slice 3 at the PIPELINE (deliberately flipping the slice-2 unclassifiable refusal):
+# a full kimi vendor record now classifies, routes to KimiWorker, and fails closed one gate
+# later — at runtime resolution (stubbed absent) via the vendor-selected resolver in the
+# live-resolve fallback (no pinned worker_runtime in the record). Still TERMINAL, still
+# before any kimi CLI invocation.
 lc_kimi = {"spec_digest": hashlib.sha256(snap).hexdigest(), "isolation": True,
            "deadline_ts": 4102444800.0,
            "worker_vendor": "kimi", "reviewer_vendor": "claude"}
+_saved_kimi_rt = d.worker_kimi_runtime
+d.worker_kimi_runtime = lambda: None
 recorded.clear()
 try:
     d._run_pipeline("SPEC-000-1", "SPEC-000", 1, att, lc_kimi,
                     pathlib.Path("/nonexistent-wt"), att / "raw", _finish)
 except _Stop:
     pass
-check("a frozen kimi vendor record refuses TERMINALLY until dispatcher slice 3 (error_launch)",
+d.worker_kimi_runtime = _saved_kimi_rt
+check("kimi record classifies; absent kimi runtime fails closed TERMINALLY (worker error)",
+      recorded.get("status") == "failed_worker_error" and recorded.get("status") in d.TERMINAL
+      and recorded.get("error_class") == d.ERR_WORKER)
+
+# Round-1 review of slice 3 (medium 5): a HAND-CARRIED unisolated kimi record (cmd_launch can
+# never produce one — it refuses kimi+unisolated before claiming) must land TERMINALLY as
+# error_launch through the pipeline's ValueError conversion, never as an uncaught exception
+# that strands the attempt. exposure_accepted gets it past T2 to the actual gate under test.
+lc_kimi_uniso = {"spec_digest": hashlib.sha256(snap).hexdigest(), "isolation": False,
+                 "exposure_accepted": True, "deadline_ts": 4102444800.0,
+                 "worker_vendor": "kimi", "reviewer_vendor": "claude",
+                 "worker_model": "kimi-k3", "worker_effort": "max",
+                 "cli_aliases": {"kimi-k3": "kimi-code/k3"}}
+recorded.clear()
+try:
+    d._run_pipeline("SPEC-000-1", "SPEC-000", 1, att, lc_kimi_uniso,
+                    pathlib.Path("/nonexistent-wt"), att / "raw", _finish)
+except _Stop:
+    pass
+check("hand-carried unisolated kimi record refuses TERMINALLY (error_launch, no crash)",
       recorded.get("status") == "error_launch" and recorded.get("status") in d.TERMINAL
       and recorded.get("error_class") == d.ERR_LAUNCH)
 
