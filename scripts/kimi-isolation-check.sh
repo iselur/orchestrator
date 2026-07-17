@@ -100,10 +100,18 @@ echo "dispatcher-vetted kimi binary: $KIMI_BIN"
 #       normal-exit denial as a denial — a signalled or abnormal probe FAILS CLOSED. Forging a
 #       specific exit needs ptrace, which quiescence (no attacker present) closes. (NoNewPrivileges
 #       is NOT a ptrace defense — it only blocks privilege gain through execve.)
-if sudo -n pgrep -u "$WORKER" >/dev/null 2>&1; then
-  echo "SKIP: $WORKER has running processes — run this gate with the worker UID quiescent (stop dispatch first); $PROHIBIT"
-  exit 77
-fi
+# Round-5 review (high): the quiescence probe must fail CLOSED on any sudo/pgrep error, never
+# fall through as "quiescent". `sudo -n pgrep` returns 1 for BOTH a no-match and a sudo denial,
+# and other nonzero for pgrep errors/missing binary — all previously read as idle. Run pgrep
+# under sudo and capture a sentinel that prints ONLY if sudo actually executed it, so a
+# no-match (Q1) is distinguished from sudo failure (no sentinel) and from a pgrep error (Q2/Q3/…).
+# Only a confirmed no-match proceeds; everything else is 77 (did not run = activation prohibited).
+qsent="$(sudo -n bash -c "pgrep -u '$WORKER' >/dev/null 2>&1; echo Q\$?" 2>/dev/null)"
+case "$qsent" in
+  Q0) echo "SKIP: $WORKER has running processes — run this gate with the worker UID quiescent (stop dispatch first); $PROHIBIT"; exit 77;;
+  Q1) : ;;   # confirmed no worker process — quiescent, proceed
+  *)  echo "SKIP: could not confirm $WORKER quiescence (sudo/pgrep probe returned '${qsent:-<no output>}'); $PROHIBIT"; exit 77;;
+esac
 
 fails=0
 ok(){ echo "ok   $*"; }
