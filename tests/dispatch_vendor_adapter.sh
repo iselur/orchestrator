@@ -184,12 +184,13 @@ check("unknown worker_vendor in a full record is corrupt (None)",
       d.lc_frozen_vendor_fields({"worker_vendor": "gemini", "reviewer_vendor": "codex"}) is None)
 check("unknown reviewer_vendor in a full record is corrupt (None)",
       d.lc_frozen_vendor_fields({"worker_vendor": "codex", "reviewer_vendor": "gemini"}) is None)
-# Kimi slice-2 inertness: the adapters are registered, but the dispatcher's KNOWN_VENDORS
-# still excludes kimi until the owner-gated slice 3 — a launch record freezing a kimi vendor
-# stays unclassifiable and every consumer fails closed before any kimi CLI could be invoked.
-check("kimi frozen vendor stays unclassifiable until dispatcher slice 3 (fail closed)",
-      d.lc_frozen_vendor_fields({"worker_vendor": "kimi", "reviewer_vendor": "claude"}) is None
-      and d.lc_frozen_vendor_fields({"worker_vendor": "codex", "reviewer_vendor": "kimi"}) is None)
+# Kimi slice 3: KNOWN_VENDORS now classifies kimi — a full record freezing kimi on either
+# side reads back verbatim (deliberately flipping the slice-2 unclassifiable assertion).
+check("kimi frozen vendor classifies on either side (dispatcher slice 3)",
+      d.lc_frozen_vendor_fields({"worker_vendor": "kimi", "reviewer_vendor": "claude"})
+      == {"worker_vendor": "kimi", "reviewer_vendor": "claude"}
+      and d.lc_frozen_vendor_fields({"worker_vendor": "codex", "reviewer_vendor": "kimi"})
+      == {"worker_vendor": "codex", "reviewer_vendor": "kimi"})
 cfg = d.load_model_config()
 r = d.resolve_launch_models({"worker_model": "gpt-5.6-luna",
                              "reviewer_model": "gpt-5.6-sol"}, cfg)
@@ -289,15 +290,47 @@ check("legacy record routes to the claude adapter with the shipped alias",
       and calls[0][calls[0].index("--model") + 1] == "fable"
       and calls[0][:2][-1] == "-p")
 
-# A frozen kimi reviewer vendor through review() itself: refused before any invocation —
-# lc_frozen_vendor_fields cannot classify it until dispatcher slice 3 extends KNOWN_VENDORS.
+# A frozen kimi reviewer vendor through review() itself, end to end (dispatcher slice 3 —
+# deliberately flipping the slice-2 refusal): the shaped request rides in argv, the model id
+# is alias-translated, and the verdict is recovered from the stream-json envelope.
 calls = []
-d.run = codex_ok_run
-lc94 = dict(lc90, reviewer_vendor="kimi")
+def kimi_ok_run(cmd, **kw):
+    calls.append(cmd)
+    return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(
+        {"role": "assistant", "content": json.dumps(good_verdict)}), stderr="")
+d.run = kimi_ok_run
+lc94 = dict(lc90, reviewer_vendor="kimi", reviewer_model="kimi-k3",
+            cli_aliases={"claude-fable-5": "fable", "kimi-k3": "kimi-code/k3"})
 att94 = tmp / "attempts" / "SPEC-954" / "1"; (att94 / "raw").mkdir(parents=True)
 verdict, raw = d.review(att94, "SPEC-954", lc94, "c" * 40)
-check("frozen kimi reviewer vendor refuses before any invocation until dispatcher slice 3",
-      verdict is None and len(calls) == 0 and "vendor" in raw)
+check("kimi-vendor review end to end: request in argv, aliased model, stream verdict accepted",
+      verdict is not None and verdict.get("verdict") == "PASS" and len(calls) == 1
+      and calls[0][0] == "kimi"
+      and calls[0][calls[0].index("-m") + 1] == "kimi-code/k3"
+      and "ONLY one JSON object" in calls[0][calls[0].index("-p") + 1])
+check("kimi-vendor review: the durable review request IS the argv prompt",
+      (att94 / "raw" / "review-request.txt").read_text()
+      == calls[0][calls[0].index("-p") + 1])
+
+# An OVERSIZED kimi request through review(): the adapter's argv byte guard refuses before
+# any invocation and the refusal (never a truncation) is the phase's recorded outcome.
+calls = []
+_saved_snap = d.snapshot_spec_text
+d.snapshot_spec_text = lambda att, digest: "x" * (va.KIMI_ARGV_PROMPT_LIMIT + 1)
+att96 = tmp / "attempts" / "SPEC-956" / "1"; (att96 / "raw").mkdir(parents=True)
+verdict, raw = d.review(att96, "SPEC-956", lc94, "c" * 40)
+d.snapshot_spec_text = _saved_snap
+check("kimi oversized review request refuses before invocation (argv guard, never truncated)",
+      verdict is None and len(calls) == 0
+      and "refused" in raw and "never truncated" in raw)
+
+# claude/codex reviewer build_argv accept the request keyword and ignore it (their prompts
+# ride on stdin) — signature uniformity for the slice-3 call site, zero behavior change.
+check("claude/codex build_argv accept request= and ignore it (argv unchanged)",
+      cl.build_argv("claude-fable-5", "high", SCHEMA, ALIASES, "/x/s.json", request="R")
+      == cl.build_argv("claude-fable-5", "high", SCHEMA, ALIASES, "/x/s.json")
+      and cx.build_argv("gpt-5.6-sol", "high", SCHEMA, ALIASES, "/x/s.json", request="R")
+      == cx.build_argv("gpt-5.6-sol", "high", SCHEMA, ALIASES, "/x/s.json"))
 
 sys.exit(1 if fails else 0)
 PY

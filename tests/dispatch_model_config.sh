@@ -194,10 +194,9 @@ check("pinning an unmapped worker model refuses launch (exit 2)",
 check("pinning an unmapped reviewer model refuses launch (exit 2)",
       resolve_result({"reviewer_model": "mystery-model-9"}) == "exit2")
 # Kimi slice 2: KimiWorker is registered, so a kimi worker pin RESOLVES and freezes truthful
-# vendor+mode (deliberately flipping the slice-1 refusal). Inertness moves one gate down:
-# KNOWN_VENDORS still excludes kimi until the owner-gated slice 3, so the frozen record is
-# unclassifiable at run time and the pipeline records a TERMINAL error_launch refusal before
-# any kimi CLI could be invoked (proven in tests/dispatch_worker_adapter.sh).
+# vendor+mode (deliberately flipping the slice-1 refusal). Slice 3 wired the dispatcher
+# (KNOWN_VENDORS, runtime resolver, argv plumbing); launch still requires the isolation gate
+# (tests/kimi_worker_isolation.sh, slice 4) before any kimi worker actually runs.
 r_kimi = d.resolve_launch_models({"worker_model": "kimi-k3"}, cfg)
 check("kimi worker pin resolves and freezes worker_vendor=kimi, worker_mode=external-cli",
       r_kimi["worker_vendor"] == "kimi" and r_kimi["worker_mode"] == "external-cli")

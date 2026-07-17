@@ -58,7 +58,9 @@ def _strict_json_object(raw):
 class ClaudeReviewer:
     """Today's shipped claude mechanics, verbatim — flags per B16 hardening."""
 
-    def build_argv(self, model_id, effort, schema_obj, cli_aliases, schema_path):
+    def build_argv(self, model_id, effort, schema_obj, cli_aliases, schema_path, request=None):
+        # request is accepted for signature uniformity (kimi carries the prompt in argv) and
+        # ignored: the claude prompt rides on stdin.
         return [
             "claude", "-p", "--output-format", "json", "--json-schema", json.dumps(schema_obj),
             "--model", cli_aliases.get(model_id, model_id),
@@ -82,7 +84,9 @@ class ClaudeReviewer:
 class CodexReviewer:
     """codex exec with structural output via --output-schema (probe-proven bare JSON)."""
 
-    def build_argv(self, model_id, effort, schema_obj, cli_aliases, schema_path):
+    def build_argv(self, model_id, effort, schema_obj, cli_aliases, schema_path, request=None):
+        # request is accepted for signature uniformity (kimi carries the prompt in argv) and
+        # ignored: the codex prompt rides on stdin ("-").
         return [
             "codex", "exec", "-m", cli_aliases.get(model_id, model_id),
             "-c", f"model_reasoning_effort={effort}",
@@ -107,8 +111,8 @@ KIMI_ARGV_PROMPT_LIMIT = 120_000   # UTF-8 bytes: conservative headroom under Li
 class KimiReviewer:
     """kimi-code one-shot review (probe evidence, .orchestrator/evidence/kimi-probes.md). The
     CLI has no stdin transport, so the SHAPED request itself must ride in argv: build_argv
-    takes it as `request` — dispatch.py's review() passes it when the owner-gated slice 3
-    lands; until then this adapter is registered but unreachable (KNOWN_VENDORS excludes kimi).
+    takes it as `request`, passed by dispatch.py's review() (kimi slice 3); a missing request
+    refuses rather than invoking a promptless CLI.
     A request over the argv wall is refused before invocation, never truncated (owner decision
     2026-07-16). No effort flag: K3 carries kimi's own effort model (only "max"), never
     codex's model_reasoning_effort. No auto-approval flag either: without -y kimi cannot write

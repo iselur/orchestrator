@@ -73,7 +73,7 @@ LEGACY_LAUNCH_DEFAULTS = {
 # before vendor freezing legally carry 3 model keys + 0 vendor keys, which must read as legacy
 # here — never as corrupt (owner-extension precedent: partial sets refuse, disjoint eras don't).
 LEGACY_VENDOR_DEFAULTS = {"worker_vendor": "codex", "reviewer_vendor": "claude"}
-KNOWN_VENDORS = ("claude", "codex")   # closed world: matches scripts/models_check.py VENDORS
+KNOWN_VENDORS = ("claude", "codex", "kimi")   # closed world: matches scripts/models_check.py VENDORS
 
 
 def _load_vendor_adapters():
@@ -1434,6 +1434,41 @@ def worker_codex_runtime():
     return None
 
 
+def worker_kimi_runtime():
+    """How an ISOLATED worker runs kimi: (argv prefix, read-only bind mounts, entry file), or
+    None when this box has no worker-launchable install. Native single-ELF ONLY (probe A,
+    .orchestrator/evidence/kimi-probes.md: kimi-code ships as one static binary; no npm layout
+    exists). Candidates are vetted by _trusted_runtime_file, ELF-checked, and fingerprinted at
+    launch so _run refuses a runtime that changed under it; the resolved real binary is
+    bind-mounted past the operator-home boundary to /opt/kimi/kimi."""
+    import shutil
+    cands = [OPERATOR_HOME / ".kimi-code/bin/kimi", OPERATOR_HOME / ".local/bin/kimi",
+             Path("/usr/local/bin/kimi"), Path("/usr/bin/kimi")]
+    which = shutil.which("kimi")
+    if which:
+        cands.append(Path(which))
+    for cand in cands:
+        real = _trusted_runtime_file(cand)
+        if real is None:
+            continue
+        try:
+            with real.open("rb") as fh:
+                elf = fh.read(4) == b"\x7fELF"
+        except OSError:
+            continue
+        if elf:
+            return ["/opt/kimi/kimi"], [(str(real), "/opt/kimi/kimi")], real
+    return None
+
+
+def worker_runtime_resolver(vendor):
+    """The module-level runtime resolver for a frozen worker vendor — selection follows the
+    FROZEN vendor at launch and in the legacy fallback (kimi brief, slice 3). Runtime
+    resolution and vetting are trust machinery and stay in this module; adapters only
+    delegate. Every external-CLI vendor without its own resolver is codex today."""
+    return worker_kimi_runtime if vendor == "kimi" else worker_codex_runtime
+
+
 def runtime_fingerprint(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as fh:
@@ -1480,7 +1515,13 @@ def pin_runtime_sources(rt_argv: list, rt_binds: list) -> dict:
     for src, _dst in rt_binds:
         sp = Path(src)
         pins[src] = _tree_fingerprint(sp) if sp.is_dir() else runtime_fingerprint(sp)
-    if not rt_argv[0].startswith("/opt/codex"):
+    # argv[0] is host-pinned only when it executes FROM the host (npm's /usr/bin/node); a bind
+    # DESTINATION is not a host path — its source is already pinned above. Recognizing any
+    # destination (was: a literal /opt/codex prefix — kimi slice 3) keeps codex npm/native
+    # behavior identical and lets another vendor's mount (kimi's /opt/kimi/kimi) pin without
+    # probing a nonexistent host path.
+    if not any(rt_argv[0] == dst or rt_argv[0].startswith(dst.rstrip("/") + "/")
+               for _src, dst in rt_binds):
         pins[rt_argv[0]] = runtime_fingerprint(Path(rt_argv[0]))
     return pins
 
@@ -1930,6 +1971,14 @@ def cmd_launch(spec_id: str) -> None:
     cfg = load_model_config()
     launch_models = resolve_launch_models(approval, cfg)
     subagent_mode = launch_models["worker_mode"] == "subagent"
+    # Kimi slice 3: kimi has NO unisolated mode — the CLI cannot set its own working directory
+    # and has no inner sandbox (codex's unisolated fallback keeps bwrap ON; kimi would run with
+    # no confinement at all). The adapter refuses at argv build; refusing HERE keeps the
+    # failure before any side effects instead of a mid-pipeline exception.
+    if not iso and launch_models["worker_vendor"] == "kimi":
+        die("REFUSING to launch: kimi workers have no unisolated mode (no --cd, no inner "
+            "sandbox — the hardened service is the only confinement). Provision isolation "
+            "with ./scripts/setup-worker-user.sh, or choose another worker vendor.", 15)
     spec_bytes = ctx["spec_bytes"]   # the single buffer preflight read/hashed/parsed (B2 round-2)
 
     # Same fail-fast doctrine for the worker's Codex runtime: an isolated launch without one dies
@@ -1957,7 +2006,16 @@ def cmd_launch(spec_id: str) -> None:
             die("REFUSING to launch: trusted test runtime failed under service hardening "
                 f"(exit {probe.returncode}).", 15)
     elif iso:
-        rt = worker_codex_runtime()
+        # Kimi slice 3: the resolver follows the FROZEN worker vendor (codex behavior, unit
+        # name included, is byte-identical — the vendor is "codex" there).
+        wv = launch_models["worker_vendor"]
+        rt = worker_runtime_resolver(wv)()
+        if rt is None and wv == "kimi":
+            die("REFUSING to launch: no worker-launchable kimi runtime on this box.\n"
+                "  Isolated kimi workers need a native kimi ELF binary (~/.kimi-code/bin,\n"
+                "  ~/.local/bin, /usr/local/bin, /usr/bin, or on PATH) — owned by\n"
+                "  root/operator, not group/world-writable. Install kimi-code natively,\n"
+                "  then relaunch.", 15)
         if rt is None:
             die("REFUSING to launch: no worker-launchable Codex runtime on this box.\n"
                 "  Isolated workers need EITHER the npm package\n"
@@ -1967,12 +2025,12 @@ def cmd_launch(spec_id: str) -> None:
                 "  Fix: npm install -g --prefix ~/.local @openai/codex   (plus a system node),\n"
                 "       or install the native binary. Then relaunch.", 15)
         rt_argv, rt_binds, rt_entry = rt
-        probe = isolated_run(f"codex-rtprobe-{spec_id}", [*rt_argv, "--version"], cwd=None,
+        probe = isolated_run(f"{wv}-rtprobe-{spec_id}", [*rt_argv, "--version"], cwd=None,
                              rw_paths=[], private_network=True, ceiling_s=120,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, binds=rt_binds)
         if probe.returncode != 0:
-            die("REFUSING to launch: the resolved Codex runtime failed its probe under the real "
-                f"service hardening (exit {probe.returncode}).\n"
+            die(f"REFUSING to launch: the resolved {wv} worker runtime failed its probe under "
+                f"the real service hardening (exit {probe.returncode}).\n"
                 f"  Runtime: {rt_entry}\n"
                 f"  Probe stderr: {(probe.stderr or b'').decode('utf-8', 'replace').strip()[-400:]}",
                 15)
@@ -2759,20 +2817,26 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
                               if Path(src).is_dir())
                 if stale or not pins or not entry_ok or not tree_ok:
                     finish("failed_worker_error", ERR_WORKER,
-                           detail="Codex runtime changed, vanished or lost trust between launch "
-                                  f"and run (stale: {stale or 'no pins recorded'}, "
-                                  f"tree_ok={tree_ok}); refusing")
+                           detail=f"{vendors['worker_vendor']} runtime changed, vanished or "
+                                  f"lost trust between launch and run (stale: "
+                                  f"{stale or 'no pins recorded'}, tree_ok={tree_ok}); refusing")
                 argv_prefix, binds = rt["argv"], [tuple(b) for b in rt["binds"]]
             else:  # launch record predates runtime pinning: resolve live (adapter delegates
-                # to the module-level worker_codex_runtime — trust machinery stays here)
-                runtime = worker_adapter.runtime(worker_codex_runtime)
+                # to the module-level resolver for the FROZEN vendor — trust machinery stays here)
+                runtime = worker_adapter.runtime(worker_runtime_resolver(vendors["worker_vendor"]))
                 if runtime is None:
                     finish("failed_worker_error", ERR_WORKER,
-                           detail="no worker-launchable Codex runtime (npm package + system "
-                                  "node, or a native ELF binary)")
+                           detail=f"no worker-launchable {vendors['worker_vendor']} runtime "
+                                  "(a native ELF binary; for codex, the npm package + system "
+                                  "node also qualifies)")
                 argv_prefix, binds, _entry = runtime
+            # Kimi slice 3: the frozen alias map rides to the worker adapter — kimi's CLI takes
+            # the provider alias, not the relay model id; codex ignores the keyword (verbatim
+            # contract, tests/dispatch_worker_adapter.sh). Post-config records always carry
+            # cli_aliases; pre-config records are codex-era, where the empty fallback is inert.
             argv = worker_adapter.build_argv(lc["worker_model"], lc["worker_effort"], wt,
-                                             prompt, isolated=True, argv_prefix=argv_prefix)
+                                             prompt, isolated=True, argv_prefix=argv_prefix,
+                                             cli_aliases=lc.get("cli_aliases") or {})
             worker_ceiling_s = remaining_ceiling_s(deadline_ts)
             if worker_ceiling_s <= 0:
                 finish("error_launch", ERR_TIMEOUT,
@@ -2795,9 +2859,19 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
                        detail="attempt deadline already exhausted before the worker phase could "
                               "start (single absolute ceiling, B6); refusing")
             scrubbed = worker_adapter.worker_env(OPERATOR_HOME, OPERATOR_USER)
-            worker_cmd = [*prefix, *worker_adapter.build_argv(
-                lc["worker_model"], lc["worker_effort"], wt, prompt, isolated=False,
-                last_message_path=raw / "worker-last-message.txt")]
+            # Kimi slice 3: an adapter may refuse the unisolated envelope outright (kimi does —
+            # no --cd, no inner sandbox). cmd_launch already refuses such launches before side
+            # effects; this converts a refusal on a hand-carried record into a TERMINAL
+            # error_launch instead of an uncaught exception that would strand the attempt.
+            try:
+                built = worker_adapter.build_argv(
+                    lc["worker_model"], lc["worker_effort"], wt, prompt, isolated=False,
+                    last_message_path=raw / "worker-last-message.txt",
+                    cli_aliases=lc.get("cli_aliases") or {})
+            except ValueError as exc:
+                finish("error_launch", ERR_LAUNCH,
+                       detail=f"worker argv refused: {exc}")
+            worker_cmd = [*prefix, *built]
             with open(os.devnull) as devnull:
                 wc = subprocess.run(worker_cmd, env=scrubbed, stdin=devnull, stdout=ev, stderr=er)
 
@@ -3460,8 +3534,17 @@ def review(att: Path, spec_id: str, lc: dict, wc: str, test_attestation=None):
         # flag set, verbatim, inside ClaudeReviewer; codex uses --output-schema + read-only
         # sandbox). Aliases come from the frozen launch config; ids without an alias pass
         # through unchanged, and pre-config records keep the shipped alias (round-2 review).
-        cmd = [*prefix, *adapter.build_argv(model_id, lc["reviewer_effort"], schema_obj,
-                                            frozen["cli_aliases"], schema_path)]
+        # Kimi slice 3: the shaped request rides along — kimi has no stdin transport, so its
+        # argv carries the prompt itself; claude/codex ignore the keyword and keep reading
+        # stdin. A ValueError is the adapter refusing the invocation (kimi: missing request,
+        # or a request over the argv byte guard — refused, never truncated) and becomes this
+        # phase's refusal string: no reviewer runs, no verdict exists.
+        try:
+            cmd = [*prefix, *adapter.build_argv(model_id, lc["reviewer_effort"], schema_obj,
+                                                frozen["cli_aliases"], schema_path,
+                                                request=req)]
+        except ValueError as exc:
+            return f"reviewer argv refused: {exc}"
         # B16 + reviewer isolation: run from an empty directory OUTSIDE this repo so the reviewer
         # process loads no project rulebook or memory (it must see only spec+diff+evidence, and that
         # context is pure token waste for a tools-denied one-shot). TMPDIR may point inside the repo,
