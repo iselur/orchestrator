@@ -16,8 +16,9 @@ rounds.
 
 Once started, the system can continue autonomously while you are away. A watchdog checks the
 private request ledger every ten minutes and restarts or resumes the session whenever work is
-pending. Automatically retrying after a five-hour usage-window reset is a future, owner-gated
-option, not enabled by default. Every change must pass tests and verification.
+pending. Automatically retrying after a usage-window limit is a built-in but owner-gated option
+(off by default): when enabled it retries on a fixed cadence until the window reopens. Every
+change must pass tests and verification.
 
 Passing work becomes a pull request to `ready-for-main`. Promotion to `main` is yours — or the
 orchestrator's, only under your recorded grant (green `ci` plus a binding cross-vendor PASS on
