@@ -203,10 +203,22 @@ refuse_foreign() { # $1 the refused action — a visible refusal, deduped by ale
 # the owner (or a crashed job) left in-progress work there that automation must not trample.
 # Read-only: this only inspects git, it never touches the working tree. Returns 0 (clean) only when
 # HEAD is on the expected branch AND the tree is clean; any doubt — including a git that cannot
-# answer (missing, not a repo) — returns non-zero so supervision fails toward standing down.
+# answer (missing, broken, or unavailable) — returns non-zero so supervision fails toward standing
+# down. Exception: when git definitively reports that $ROOT is not a git repository at all, the
+# guard is not applicable to that checkout and returns 0 (this distinguishes "git broke" from
+# "this is simply not a repo", while keeping "any doubt" scoped to genuine uncertainty).
 checkout_clean() {
-  local expect="${ORCH_EXPECT_BRANCH:-main}" head
+  local expect="${ORCH_EXPECT_BRANCH:-main}" head err
+  # Capture stderr in English so the "not a git repository" message is locale-independent.
+  # Stdout is the branch name and is re-read in the next call.
+  err=$(LC_ALL=C LANG=C git -C "$ROOT" symbolic-ref --quiet --short HEAD 2>&1 >/dev/null) || true
   head=$(git -C "$ROOT" symbolic-ref --quiet --short HEAD 2>/dev/null) || head=""
+  if [ -z "$head" ]; then
+    # git did not return a branch. "not a git repository" is a definitive answer that the guard
+    # is N/A here; any other failure (unavailable, broken, injected exit) is any-doubt -> stand down.
+    case "$err" in *"not a git repository"*) return 0 ;; esac
+    return 1
+  fi
   [ "$head" = "$expect" ] || return 1
   [ -z "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ] || return 1
   return 0
@@ -723,8 +735,8 @@ check() {
           else
             case "$(usage_wait_status)" in
               brake)   note "usage limit cadence armed; respawn deferred until it elapses" ;;
-              expired) rm -f "$WD/usage-wait"; respawn ;;        # cadence up: ordinary --resume recovery
-              *)       respawn ;;                                # no wait: ordinary crash recovery
+              expired) rm -f "$WD/usage-wait"; respawn "$ids" ;; # cadence up: ordinary --resume recovery
+              *)       respawn "$ids" ;;                         # no wait: ordinary crash recovery
             esac
           fi ;;
         alive)                                                   # (c)
