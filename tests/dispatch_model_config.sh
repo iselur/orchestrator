@@ -193,11 +193,14 @@ check("pinning an unmapped worker model refuses launch (exit 2)",
       resolve_result({"worker_model": "mystery-model-9"}) == "exit2")
 check("pinning an unmapped reviewer model refuses launch (exit 2)",
       resolve_result({"reviewer_model": "mystery-model-9"}) == "exit2")
-# Kimi slice-1 inertness: the vendor is declared but no kimi worker adapter is registered yet,
-# so a kimi worker pin refuses at resolution, before any side effects. Slice 2 flips this
-# assertion deliberately when KimiWorker registers.
-check("kimi worker pin refuses until the kimi worker adapter exists (exit 2)",
-      resolve_result({"worker_model": "kimi-k3"}) == "exit2")
+# Kimi slice 2: KimiWorker is registered, so a kimi worker pin RESOLVES and freezes truthful
+# vendor+mode (deliberately flipping the slice-1 refusal). Inertness moves one gate down:
+# KNOWN_VENDORS still excludes kimi until the owner-gated slice 3, so the frozen record is
+# unclassifiable at run time and the pipeline records a TERMINAL error_launch refusal before
+# any kimi CLI could be invoked (proven in tests/dispatch_worker_adapter.sh).
+r_kimi = d.resolve_launch_models({"worker_model": "kimi-k3"}, cfg)
+check("kimi worker pin resolves and freezes worker_vendor=kimi, worker_mode=external-cli",
+      r_kimi["worker_vendor"] == "kimi" and r_kimi["worker_mode"] == "external-cli")
 check("armed failover keeps the config fallback in the resolved fields",
       d.resolve_launch_models({"worker_model": "gpt-5.6-sol"}, cfg)
       ["reviewer_fallback_model"] == cfg["reviewer_failover"]["fallback_model"])
