@@ -146,11 +146,17 @@ cat > "$F/git" <<'FAKE'
 # clean tree on 'main'. FAKE_GIT_BRANCH sets the branch; FAKE_GIT_DIRTY non-empty makes the tree
 # dirty (its value is the porcelain line); FAKE_GIT_FAIL makes git unable to answer at all
 # (missing repo / broken git), exactly the "any doubt -> stand down" case.
+# FAKE_GIT_STATUS_FAIL makes only the status subcommand exit 128 (symbolic-ref still succeeds).
+# FAKE_GIT_STDERR_MSG prints a custom message to stderr and exits 128 on symbolic-ref.
 [ -n "${FAKE_GIT_FAIL:-}" ] && exit 128
 [ "${1:-}" = "-C" ] && shift 2      # ignore the '-C <dir>' the watchdog always passes
 case "${1:-}" in
-  symbolic-ref) printf '%s\n' "${FAKE_GIT_BRANCH:-main}" ;;
-  status)       [ -n "${FAKE_GIT_DIRTY:-}" ] && printf '%s\n' "$FAKE_GIT_DIRTY" ;;
+  symbolic-ref)
+    if [ -n "${FAKE_GIT_STDERR_MSG:-}" ]; then printf '%s\n' "$FAKE_GIT_STDERR_MSG" >&2; exit 128; fi
+    printf '%s\n' "${FAKE_GIT_BRANCH:-main}" ;;
+  status)
+    [ -n "${FAKE_GIT_STATUS_FAIL:-}" ] && exit 128
+    [ -n "${FAKE_GIT_DIRTY:-}" ] && printf '%s\n' "$FAKE_GIT_DIRTY" ;;
 esac
 exit 0
 FAKE
@@ -171,7 +177,7 @@ reset() { # fresh state between scenarios
   unset FAKE_CURL_EXIT FAKE_TMUX_FAIL FAKE_CLAUDE_VERSION FAKE_PS_TABLE FAKE_PS_FAIL \
         FAKE_PS_MAKE_HALT FAKE_PS_MAKE_HALT_ON FAKE_PS_ADD_ROW FAKE_PS_ADD_AFTER \
         FAKE_PS_SWAP_PANE FAKE_PS_SWAP_ON FAKE_TMUX_SWAP_AFTER_NEW FAKE_TMUX_SWAP_LP_ON FAKE_TMUX_SWAP_PANE_LP_ON \
-        FAKE_GIT_BRANCH FAKE_GIT_DIRTY FAKE_GIT_FAIL 2>/dev/null || true
+        FAKE_GIT_BRANCH FAKE_GIT_DIRTY FAKE_GIT_FAIL FAKE_GIT_STATUS_FAIL FAKE_GIT_STDERR_MSG 2>/dev/null || true
 }
 open_row() { (cd "$R" && scripts/intake -g "${1:-drill goal}" -d "done when the drill criterion holds" >/dev/null); }
 keys() { cat "$TS/sessions/orch-auto.keys" 2>/dev/null || true; }
@@ -321,6 +327,17 @@ run_wd
 [ "$(keys | wc -l)" = "$n_before" ] && ok "observe mode sent nothing" || bad "observe mode sent input"
 [ ! -e "$WDIR/usage-wait" ] && ok "expired wait consumed" || bad "wait not cleared"
 
+echo "== W5b: expired wait + new limit bytes -> expiry fires; scan_usage does not push the epoch forward"
+# An expired current-generation wait must survive scan_usage even when new limit bytes appear in the
+# transcript: scan_usage must return early on any current-gen wait (expired or not) so the retry
+# branch can consume it on this same tick.
+printf 'Usage limit reached.\n' >> "$WDIR/transcript.log"  # new limit bytes this tick
+echo "$(( $(date +%s) - 60 )) $gen" > "$WDIR/usage-wait"  # arm an already-elapsed wait
+rm -f "$WDIR/ALERT-usage-would-retry"
+run_wd
+[ -e "$WDIR/ALERT-usage-would-retry" ] && ok "observe expired wait fired despite new limit bytes in transcript" || bad "expiry did not fire; scan_usage may have overwritten the epoch"
+[ ! -e "$WDIR/usage-wait" ] && ok "expired wait consumed, not pushed to a new future epoch" || bad "wait survived or was pushed forward by the new limit bytes"
+
 echo "== W6 (c): active mode sends exactly one continue nudge after the cadence, and counts it"
 printf 'USAGE_RETRY_MODE=active\n' > "$WDIR/env"; chmod 600 "$WDIR/env"
 gen=$(cat "$WDIR/generation")
@@ -341,6 +358,41 @@ run_wd
 [ "$(keys | wc -l)" = "$n_before" ] && ok "corrupt wait sent nothing" || bad "corrupt wait reached the send branch"
 [ ! -e "$WDIR/usage-wait" ] && ok "corrupt wait discarded" || bad "corrupt wait kept"
 [ -e "$WDIR/ALERT-usage-corrupt" ] && ok "corrupt wait raised an incident" || bad "corrupt wait silent"
+
+echo "== W6c: garbage transcript.offset is treated as 0 — corrupted classifier input never disables recovery"
+# Under set -u, $((off + 1)) where off='garbage' would expand 'garbage' as a variable name, find it
+# unset, and abort the tick. With numeric validation, off falls back to 0 and scan_usage continues.
+reset; open_row
+run_wd                                              # launch, gen=1
+printf 'some non-limit output\n' >> "$WDIR/transcript.log"  # transcript exists so scan_usage runs
+echo "garbage" > "$WDIR/transcript.offset"          # corrupt: non-numeric
+dead_pane
+resumes_before=$(grep -c -- '--resume' <(keys) || true)
+run_wd
+[ "$(grep -c -- '--resume' <(keys) || true)" = "$((resumes_before + 1))" ] && \
+  ok "garbage transcript.offset: dead-pane recovery still ran (offset treated as 0)" || \
+  bad "garbage transcript.offset crashed or blocked recovery (tick may have aborted under set -u)"
+
+echo "== W6d: garbage USAGE_RETRY_INTERVAL falls back to 1800 — corrupted interval never disables recovery"
+# Under set -u, $(( t + USAGE_RETRY_INTERVAL )) where the value is 'garbage' aborts the tick before
+# recovery runs. With numeric validation, USAGE_RETRY_INTERVAL falls back to 1800.
+reset; open_row
+run_wd                                              # launch, gen=1
+printf 'USAGE_RETRY_INTERVAL=garbage\n' >> "$WDIR/env"
+gen=$(cat "$WDIR/generation")
+printf 'Usage limit reached.\n' >> "$WDIR/transcript.log"  # force scan_usage to hit the arithmetic
+dead_pane
+run_wd
+# With fix: USAGE_RETRY_INTERVAL falls back to 1800; scan_usage arms a wait; dead branch defers.
+[ -e "$WDIR/usage-wait" ] && ok "garbage USAGE_RETRY_INTERVAL: wait armed with fallback interval (tick did not abort)" || \
+  bad "wait not armed: tick may have aborted before reaching USAGE_RETRY_INTERVAL arithmetic"
+# Expire the wait so the dead-pane recovery fires on the next tick.
+echo "$(( $(date +%s) - 60 )) $gen" > "$WDIR/usage-wait"
+resumes_before=$(grep -c -- '--resume' <(keys) || true)
+run_wd
+[ "$(grep -c -- '--resume' <(keys) || true)" = "$((resumes_before + 1))" ] && \
+  ok "garbage USAGE_RETRY_INTERVAL: dead-pane recovery reached after cadence expired" || \
+  bad "dead-pane recovery blocked after USAGE_RETRY_INTERVAL fallback"
 
 echo "== W7 (c): a stale wait from an older pane generation is discarded, not obeyed"
 gen=$(cat "$WDIR/generation")
@@ -383,6 +435,23 @@ run_wd                                              # 4th retry: past the cap
 run_wd heartbeat
 [ "$(cat "$WDIR/usage-retries" 2>/dev/null)" = "0" ] && ok "a heartbeat resets the retry counter (retries worked)" || bad "counter not reset by heartbeat"
 
+echo "== W8c: expired wait + new limit bytes + dead pane -> respawn fires; scan_usage cannot re-arm"
+# Same invariant as W5b but for the dead-pane branch: limit bytes appearing in the transcript on the
+# same tick that the cadence expires must not push the epoch forward and defer the respawn.
+reset; open_row
+run_wd                                              # launch, gen=1
+printf 'USAGE_RETRY_MODE=active\n' > "$WDIR/env"; chmod 600 "$WDIR/env"
+gen=$(cat "$WDIR/generation")
+printf 'Usage limit reached.\n' >> "$WDIR/transcript.log"  # new limit bytes present this tick
+echo "$(( $(date +%s) - 60 )) $gen" > "$WDIR/usage-wait"  # already-elapsed wait, current gen
+dead_pane
+resumes_before=$(grep -c -- '--resume' <(keys) || true)
+run_wd
+[ "$(grep -c -- '--resume' <(keys) || true)" = "$((resumes_before + 1))" ] && \
+  ok "dead-pane respawn fired with expired wait and new limit bytes in transcript" || \
+  bad "respawn deferred: scan_usage may have pushed the expired wait to a future epoch"
+[ ! -e "$WDIR/usage-wait" ] && ok "expired wait consumed by respawn, not re-armed by new limit bytes" || bad "wait survived or was pushed forward"
+
 echo "== W9: replay resistance — consumed bytes and external truncation never re-arm a wait"
 reset; open_row
 run_wd                                              # launch, gen=1
@@ -414,6 +483,18 @@ export FAKE_GIT_FAIL=1
 run_wd
 [ "$(invoked new-session)" = "0" ] && ok "git cannot answer: still parked (any doubt stands down)" || bad "launched when git could not answer"
 unset FAKE_GIT_FAIL
+# Status exit-128 with empty output must not read as a clean tree (the reviewer-named fail-open path).
+export FAKE_GIT_STATUS_FAIL=1
+run_wd
+[ "$(invoked new-session)" = "0" ] && ok "git status exit-128 (no output): still parked, not clean" || bad "silent status failure read as clean tree"
+unset FAKE_GIT_STATUS_FAIL
+# A path error whose stderr contains "not a git repository" (but not as the leading "fatal:" prefix)
+# must NOT trigger the guard-N/A return — only the anchored "fatal: not a git repository" message
+# is a definitive "no repo here" answer.
+export FAKE_GIT_STDERR_MSG="fatal: cannot change to '/path/not a git repository': No such file or directory"
+run_wd
+[ "$(invoked new-session)" = "0" ] && ok "path error containing 'not a git repository' not treated as guard-N/A" || bad "unanchored match fired on path error"
+unset FAKE_GIT_STDERR_MSG
 run_wd
 [ ! -e "$WDIR/standdown-dirty" ] && [ "$(invoked new-session)" = "1" ] && ok "clean tree on main: marker cleared, launch resumed" || bad "no resume after the checkout went clean"
 
