@@ -1,7 +1,7 @@
 # BACKLOG — why we are here, and what is next
 
 New ideas land here, never into flight; work starts only via `scripts/intake` with a definition of
-done. A real product outside this repo must always be on this list (CI checks it is never without one).
+done. Product work is tracked privately (owner 2026-07-17); this list carries only the harness itself.
 
 ## Why (the operator's own description of what this system is for)
 
@@ -17,18 +17,17 @@ against this description: what matches, what doesn't, what is missing.
 1. **Codex priority tier fast → standard** (cost lever from the 2026-07-15 token findings; owner
    2026-07-16): flip worker/reviewer/spec-author Codex calls to standard processing; watch dispatch ceilings.
 2. **Program C (rev 4)** — thin orchestrator, specialists, authoring flip, unpin `CLAUDE_CODE_SUBAGENT_MODEL`.
-   Reshape in flight as R83–R86; C2 (review round binding) shipped, C1bc and C3 remain.
-3. **Ship a real product, end to end** — top idea from `~/orchestrator-private/IDEAS-shortlist/`,
-   its own repo, one small feature through idea → brief → tickets → build → test → review → merge → running.
-   product: new repo from the private shortlist (name it at intake)
-4. **Restrict worker build-phase egress before the first product-repo dispatch** (SECURITY.md gap 1,
+   Reshape in flight: review round binding shipped; the codex-plan vendor split and the analyst
+   one-shots remain (rows open in the private ledger).
+3. **Restrict worker build-phase egress before the first product-repo dispatch** (SECURITY.md gap 1,
    LOW-MEDIUM 2026-07-16): worker uid reaches only the model API; the credential-broker fix stays parked.
 
 ## Parked (owner 2026-07-16: keep for the future)
 
-- In-flight session-to-session handoff (deferred from the R77 descope, owner 2026-07-16): atomic
-  handoff commit/consumption, duplicate suppression, mid-handoff crash recovery. If revived, take
-  the Python falsifier route; scenario matrix preserved on branch orch/r77-lifecycle-falsifier.
+- In-flight session-to-session handoff (deferred in the lifecycle-program descope, owner
+  2026-07-16): atomic handoff commit/consumption, duplicate suppression, mid-handoff crash
+  recovery. If revived, rebuild in Python; the hardened scenario matrix is preserved on the
+  lifecycle-falsifier branch.
 - Approvals rework (SECURITY.md gap 2): the autonomy grant covers low risk, owner confirms `main` only.
 - Move the test grade out of the worker's reach (SECURITY.md gap 3).
 - Measure whether review catches bugs: plant three known defects, count catches, size review scope from the result.
