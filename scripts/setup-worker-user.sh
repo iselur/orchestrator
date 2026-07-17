@@ -92,23 +92,18 @@ if [ -d "$OP_KIMI" ] && [ ! -L "$OP_KIMI" ]; then
       echo "refuse: operator kimi source $s is not a regular file (symlink/special)" >&2; exit 1
     fi
   done
-  # Minimum required state only (kimi brief, slice 4): the managed-provider config and the
-  # OAuth credential. Both are REQUIRED — a partial copy that still "succeeded" would let an
-  # incomplete worker login masquerade as provisioned (round-1 review, high 3).
+  # Minimum required state (kimi brief, slice 4): managed-provider config + OAuth credential.
+  # Both are REQUIRED — a partial copy would let an incomplete worker login look provisioned.
   if [ ! -f "$src_cfg" ] || [ ! -f "$src_cred" ]; then
     echo "refuse: operator kimi state incomplete (need config.toml + credentials/kimi-code.json); run 'kimi login' first" >&2
     exit 1
   fi
-  # Round-1 review (CRITICAL): after the first provisioning codex-worker OWNS ~/.kimi-code, so a
-  # privileged re-run must NEVER mkdir/cp THROUGH that worker-owned tree — the worker could swap
-  # any component for a symlink and redirect a root write onto an arbitrary host file. Build the
-  # whole tree as root in a staging dir the worker cannot touch (a root-owned mktemp under the
-  # worker-home PARENT, same filesystem for an atomic swap), then replace atomically with mv -T.
-  # rename(2) over a worker-planted symlink OR an empty dir replaces it; over a NON-empty dir it
-  # fails and the script aborts (fail closed). None of these can capture a root write — the only
-  # residual is a DoS abort (round-2 review). The staging parent must itself be root-trusted, or
-  # the worker could pre-plant the staging path: verify it is root-owned and not group/world-
-  # writable before staging there.
+  # After the first run codex-worker OWNS ~/.kimi-code, so a privileged re-run must NEVER
+  # mkdir/cp THROUGH that worker-owned tree (the worker could swap a component for a symlink and
+  # redirect a root write). Build the whole tree as root in a root-owned staging dir on the same
+  # filesystem, then publish it with a single `mv -T`: rename over a planted symlink/empty dir
+  # replaces it, over a non-empty dir it aborts — neither captures a root write. The staging
+  # parent must itself be root-owned and non-writable by others, else the worker could pre-plant it.
   stage_parent="$(dirname "$WORKER_HOME")"
   parent_owner="$(stat -c '%U' "$stage_parent")"
   parent_mode="$(stat -c '%a' "$stage_parent")"
@@ -117,10 +112,8 @@ if [ -d "$OP_KIMI" ] && [ ! -L "$OP_KIMI" ]; then
     exit 1
   fi
   stage="$(sudo mktemp -d -p "$stage_parent" .kimi-code.stage.XXXXXX)"
-  # Populate as root, then flip ownership of the WHOLE tree (the mktemp root is root:root — a
-  # per-child -o left the top dir root-owned, so the worker could not traverse its own state and
-  # the gate's K2/K3 failed; round-3 review, high 1) in a single -R pass as the LAST step before
-  # the atomic rename, so no root write ever passes through a worker-owned path.
+  # Populate as root; flip ownership of the WHOLE tree (mktemp's root dir is root:root) in one -R
+  # pass as the LAST step before the rename, so no root write ever passes through a worker path.
   sudo install -d -m 700 "$stage/credentials"
   sudo install -m 600 "$src_cfg"  "$stage/config.toml"
   sudo install -m 600 "$src_cred" "$stage/credentials/kimi-code.json"

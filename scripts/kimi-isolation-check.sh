@@ -80,9 +80,11 @@ sudo -n -u "$WORKER" true || { echo "FAIL positive control: cannot run commands 
 svc w0 true || { echo "FAIL positive control: hardened probe unit does not run; $PROHIBIT"; exit 1; }
 ok "worker UID and hardened service both run (denials below are meaningful)"
 
-echo "== K1: the worker UID (DAC) cannot read the operator's kimi credential"
+echo "== K1: the worker UID (DAC) cannot read or traverse the operator's kimi state"
 if sudo -n -u "$WORKER" cat "$OP_CRED" >/dev/null 2>&1; then bad "worker read $OP_CRED (LEAK)"; else ok "worker denied $OP_CRED"; fi
-if sudo -n -u "$WORKER" ls "$OPERATOR_HOME/.kimi-code" >/dev/null 2>&1; then bad "worker listed operator ~/.kimi-code (LEAK)"; else ok "worker denied operator ~/.kimi-code"; fi
+# Test TRAVERSAL (dir search bit), not listing: a 0711 dir denies `ls` but still lets the worker
+# `cd` in and reach known paths, so `cd` is the boundary probe. Success = the boundary is broken.
+if sudo -n -u "$WORKER" bash -c "cd -- '$OPERATOR_HOME/.kimi-code'" 2>/dev/null; then bad "worker can traverse operator ~/.kimi-code (LEAK)"; else ok "worker denied traversal of operator ~/.kimi-code"; fi
 
 echo "== K2: the worker's provisioned state has the required ownership and modes"
 # The four expected entries, checked individually, plus an exact entry count so a stray file is
