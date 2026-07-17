@@ -103,10 +103,20 @@ if [ -d "$OP_KIMI" ] && [ ! -L "$OP_KIMI" ]; then
   # privileged re-run must NEVER mkdir/cp THROUGH that worker-owned tree — the worker could swap
   # any component for a symlink and redirect a root write onto an arbitrary host file. Build the
   # whole tree as root in a staging dir the worker cannot touch (a root-owned mktemp under the
-  # worker-home PARENT, same filesystem for an atomic swap), then replace atomically with mv -T:
-  # rename(2) over a worker-planted symlink replaces the symlink itself; over a real directory it
-  # fails and the script aborts (fail closed) — neither can capture a root write.
-  stage="$(sudo mktemp -d -p "$(dirname "$WORKER_HOME")" .kimi-code.stage.XXXXXX)"
+  # worker-home PARENT, same filesystem for an atomic swap), then replace atomically with mv -T.
+  # rename(2) over a worker-planted symlink OR an empty dir replaces it; over a NON-empty dir it
+  # fails and the script aborts (fail closed). None of these can capture a root write — the only
+  # residual is a DoS abort (round-2 review). The staging parent must itself be root-trusted, or
+  # the worker could pre-plant the staging path: verify it is root-owned and not group/world-
+  # writable before staging there.
+  stage_parent="$(dirname "$WORKER_HOME")"
+  parent_owner="$(stat -c '%U' "$stage_parent")"
+  parent_mode="$(stat -c '%a' "$stage_parent")"
+  if [ "$parent_owner" != root ] || [ $(( 8#$parent_mode & 022 )) -ne 0 ]; then
+    echo "refuse: staging parent $stage_parent must be root-owned and not group/world-writable (is $parent_owner $parent_mode)" >&2
+    exit 1
+  fi
+  stage="$(sudo mktemp -d -p "$stage_parent" .kimi-code.stage.XXXXXX)"
   sudo install -o "$WORKER" -g "$WORKER" -d -m 700 "$stage/credentials"
   sudo install -o "$WORKER" -g "$WORKER" -m 600 "$src_cfg"  "$stage/config.toml"
   sudo install -o "$WORKER" -g "$WORKER" -m 600 "$src_cred" "$stage/credentials/kimi-code.json"
