@@ -131,27 +131,20 @@ assert created.utcoffset() == datetime.timedelta(0), created
 assert match.group(2) == "complete default plan", repr(match.group(2))
 PY
 
-# A repeatable --context preserves option order, and --small switches prompts.
-small_result="$({
+# A repeatable --context preserves option order.
+context_result="$({
   PATH="$tmp/bin:$PATH" \
   CODEX_STUB_ARGS="$args_file" \
   CODEX_STUB_PROMPT="$prompt_file" \
-  CODEX_STUB_STDOUT='micro plan body' \
-    scripts/codex-plan --small \
+  CODEX_STUB_STDOUT='context order plan' \
+    scripts/codex-plan \
       --context "$tmp/context one.txt" \
       --context "$tmp/context-two.txt" \
       --out "$run_dir" \
       'Make a tiny change'
 })"
-[[ "$small_result" == *"PLAN-009"* ]] || fail "identifier did not increment"
+[[ "$context_result" == *"PLAN-009"* ]] || fail "identifier did not increment"
 assert_file "$run_dir/PLAN-009.md"
-grep -qi 'five-field micro-plan' "$prompt_file" || fail "small prompt not selected"
-for field in objective scope action verification rollback; do
-  grep -qi "$field" "$prompt_file" || fail "small prompt missing field: $field"
-done
-if grep -qi 'alternatives considered' "$prompt_file"; then
-  fail "small prompt retained the default planning template"
-fi
 python3 - "$prompt_file" "$tmp/context one.txt" "$tmp/context-two.txt" <<'PY'
 from pathlib import Path
 import sys
@@ -219,8 +212,8 @@ assert_no_file "$run_dir/PLAN-011.md"
 assert_file "$run_dir/PLAN-011.stdout"
 assert_file "$run_dir/PLAN-011.stderr"
 
-# Each tier has its own cap (--small 40, default 250, --brief 400; CLAUDE.md rule 5 now names only
-# --brief, while --small and the no-flag standard tier remain usable). A body over
+# Each tier has its own cap (default 250, --brief 400; CLAUDE.md rule 5 names only --brief, while
+# the no-flag standard tier remains usable). A body over
 # its cap is refused, the raw output is retained, and no plan is minted. Exact boundaries, and the
 # fixtures have NO terminal newline (the stub prints with printf '%s') — the cap must count a final
 # unterminated line, which wc -l would miss. Both spellings of "N lines" must agree, so every
@@ -247,7 +240,6 @@ check_cap() { # $1 tier flag ("" for default), $2 cap, $3 expected plan id at ca
 }
 
 check_cap ''       250 PLAN-013
-check_cap --small   40 PLAN-017
 assert_file "$run_dir/PLAN-012.stdout"   # the refused oversized default retained its provenance
 
 # --- the brief tier -----------------------------------------------------------------------------
@@ -306,14 +298,6 @@ duplicated="$(valid_brief 30)"$'\n## Outcome\na second, contradictory outcome'
 grep -qi 'earliest falsifiable' "$prompt_file" || fail "brief prompt missing the falsifiable-proof section"
 grep -qi 'independently shippable' "$prompt_file" || fail "brief prompt missing the slices section"
 
-# Contradictory tiers are refused, never last-flag-wins: "ambiguity picks the higher tier".
-for combo in "--small --brief" "--brief --small"; do
-  if PATH="$tmp/bin:$PATH" CODEX_STUB_ARGS="$args_file" CODEX_STUB_PROMPT="$prompt_file" \
-    CODEX_STUB_STDOUT='x' scripts/codex-plan $combo --out "$run_dir" 'contradictory tiers' >/dev/null 2>&1; then
-    fail "'$combo' was accepted; contradictory tier flags must be refused"
-  fi
-done
-
 # --- the regression the stdin fix exists for ----------------------------------------------------
 # The prompt used to travel in argv, which dies over ~130KB (AGENTS.md) — precisely what a brief
 # with real context files produces. Feed a 200KB context and require the WHOLE prompt to arrive on
@@ -340,7 +324,7 @@ exec 7>>"$conc_dir/.plan-id.lock"
 flock 7
 PATH="$tmp/bin:$PATH" CODEX_STUB_ARGS="$tmp/probe-args" CODEX_STUB_PROMPT="$tmp/probe-prompt" \
   CODEX_STUB_STDOUT='lock probe plan' \
-  scripts/codex-plan --small --out "$conc_dir" 'lock honor probe' >"$tmp/probe.out" 2>&1 &
+  scripts/codex-plan --out "$conc_dir" 'lock honor probe' >"$tmp/probe.out" 2>&1 &
 probe_pid=$!
 sleep 2   # ~1000x the stubbed run's wall clock; the unfixed script has long finished by now
 kill -0 "$probe_pid" 2>/dev/null \
@@ -357,11 +341,11 @@ exec 7>>"$conc_dir/.plan-id.lock"
 flock 7
 PATH="$tmp/bin:$PATH" CODEX_STUB_ARGS="$tmp/conc-args-1" CODEX_STUB_PROMPT="$tmp/conc-prompt-1" \
   CODEX_STUB_STDOUT='concurrent plan ONE' \
-  scripts/codex-plan --small --out "$conc_dir" 'concurrent task one' >"$tmp/conc1.out" 2>&1 &
+  scripts/codex-plan --out "$conc_dir" 'concurrent task one' >"$tmp/conc1.out" 2>&1 &
 conc_pid1=$!
 PATH="$tmp/bin:$PATH" CODEX_STUB_ARGS="$tmp/conc-args-2" CODEX_STUB_PROMPT="$tmp/conc-prompt-2" \
   CODEX_STUB_STDOUT='concurrent plan TWO' \
-  scripts/codex-plan --small --out "$conc_dir" 'concurrent task two' >"$tmp/conc2.out" 2>&1 &
+  scripts/codex-plan --out "$conc_dir" 'concurrent task two' >"$tmp/conc2.out" 2>&1 &
 conc_pid2=$!
 sleep 1   # let both queue on the held lock before releasing it
 flock -u 7
@@ -386,7 +370,7 @@ cfg = json.load(open(sys.argv[1])); del cfg["vendor_map"]
 json.dump(cfg, open(sys.argv[2], "w"))
 GUT
 if PATH="$tmp/bin:$PATH" CODEX_STUB_ARGS="$tmp/gut-args" CODEX_STUB_PROMPT="$tmp/gut-prompt" \
-    "$tmp/gutted/scripts/codex-plan" --small --out "$tmp/gutted-out" 'should refuse' \
+    "$tmp/gutted/scripts/codex-plan" --out "$tmp/gutted-out" 'should refuse' \
     >"$tmp/gutted.out" 2>&1; then
   fail "codex-plan drafted with a config missing vendor_map: $(cat "$tmp/gutted.out")"
 fi
