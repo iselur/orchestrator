@@ -80,6 +80,25 @@ sudo chmod 700 "$WCODEX"; sudo find "$WCODEX" -type f -exec chmod 600 {} +
 sudo chmod 750 "$WORKER_HOME"
 echo "worker CODEX_HOME set (700 codex-worker; the operator cannot read it, nor can the worker read the operator)"
 
+say "4b. worker kimi state with the kimi-code OAuth credential (same residual class as codex: the worker's own token, never the operator's)"
+WKIMI="$WORKER_HOME/.kimi-code"
+if [ -d "$OPERATOR_HOME/.kimi-code" ]; then
+  sudo mkdir -p "$WKIMI/credentials"
+  # Minimum required state only (kimi brief, slice 4): the managed-provider config and the
+  # OAuth credential. Everything else (device_id, logs, session state) the CLI recreates
+  # inside the worker's own writable .kimi-code.
+  [ -f "$OPERATOR_HOME/.kimi-code/config.toml" ] && \
+    sudo cp "$OPERATOR_HOME/.kimi-code/config.toml" "$WKIMI/config.toml"
+  [ -f "$OPERATOR_HOME/.kimi-code/credentials/kimi-code.json" ] && \
+    sudo cp "$OPERATOR_HOME/.kimi-code/credentials/kimi-code.json" "$WKIMI/credentials/kimi-code.json"
+  sudo chown -R "$WORKER":"$WORKER" "$WKIMI"
+  sudo find "$WKIMI" -type d -exec chmod 700 {} +
+  sudo find "$WKIMI" -type f -exec chmod 600 {} +
+  echo "worker kimi state set (700/600 codex-worker; operator's ~/.kimi-code stays unreachable)"
+else
+  echo "operator has no ~/.kimi-code — skipped (kimi not installed for the operator; re-run after kimi login)"
+fi
+
 say "5. root-owned read-only Python runtime for isolated installed tests"
 req_hash=$(sha256sum scripts/requirements.txt | awk '{print $1}')
 installed_hash=$(sudo sh -c "cat '$TEST_RUNTIME/.requirements-sha256' 2>/dev/null || true")
@@ -101,7 +120,7 @@ echo "test runtime: $(sudo stat -c '%a %U:%G' "$TEST_RUNTIME") $TEST_RUNTIME ($r
 
 say "6. sanity: worker is denied every operator credential (the whole point of D5)"
 ok=1
-for f in "$OPERATOR_HOME/.config/gh/hosts.yml" "$OPERATOR_HOME/.codex/auth.json" "$OPERATOR_HOME/.claude.json" "$OPERATOR_HOME/.ssh/id_ed25519"; do
+for f in "$OPERATOR_HOME/.config/gh/hosts.yml" "$OPERATOR_HOME/.codex/auth.json" "$OPERATOR_HOME/.claude.json" "$OPERATOR_HOME/.ssh/id_ed25519" "$OPERATOR_HOME/.kimi-code/credentials/kimi-code.json"; do
   if sudo -u "$WORKER" cat "$f" >/dev/null 2>&1; then echo "  !!! $WORKER CAN READ $f"; ok=0; else echo "  denied: $f"; fi
 done
 [ "$ok" = 1 ] && echo "ALL operator credentials denied to $WORKER ✓" || { echo "SETUP FAILED — credential readable"; exit 1; }
