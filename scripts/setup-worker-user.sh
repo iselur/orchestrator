@@ -117,10 +117,15 @@ if [ -d "$OP_KIMI" ] && [ ! -L "$OP_KIMI" ]; then
     exit 1
   fi
   stage="$(sudo mktemp -d -p "$stage_parent" .kimi-code.stage.XXXXXX)"
-  sudo install -o "$WORKER" -g "$WORKER" -d -m 700 "$stage/credentials"
-  sudo install -o "$WORKER" -g "$WORKER" -m 600 "$src_cfg"  "$stage/config.toml"
-  sudo install -o "$WORKER" -g "$WORKER" -m 600 "$src_cred" "$stage/credentials/kimi-code.json"
+  # Populate as root, then flip ownership of the WHOLE tree (the mktemp root is root:root — a
+  # per-child -o left the top dir root-owned, so the worker could not traverse its own state and
+  # the gate's K2/K3 failed; round-3 review, high 1) in a single -R pass as the LAST step before
+  # the atomic rename, so no root write ever passes through a worker-owned path.
+  sudo install -d -m 700 "$stage/credentials"
+  sudo install -m 600 "$src_cfg"  "$stage/config.toml"
+  sudo install -m 600 "$src_cred" "$stage/credentials/kimi-code.json"
   sudo chmod 700 "$stage"
+  sudo chown -R "$WORKER":"$WORKER" "$stage"
   sudo rm -rf "$WKIMI"
   sudo mv -T "$stage" "$WKIMI"
   echo "worker kimi state provisioned atomically (700/600 codex-worker; operator's ~/.kimi-code stays unreachable)"

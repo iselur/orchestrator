@@ -18,8 +18,10 @@
 #   K5  the DISPATCHER-VETTED native binary (resolved via worker_kimi_runtime — same ELF/trust
 #       checks the launch path uses) executes --version, bound to /opt/kimi/kimi under the
 #       service hardening. Unvetted output is never echoed.
-# Anti-vacuity: positive controls first, verdicts read from each unit's OWN owner-captured pipe
-# (never a worker-writable file), operator resolved not hardcoded.
+# Anti-vacuity: worker-UID quiescence is required first (no concurrent worker to forge a
+# verdict); every verdict is the probe's EXACT exit status reported owner-side by systemd/sudo
+# (never a worker-writable file or pipe); positive controls run first; operator resolved not
+# hardcoded.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -87,33 +89,43 @@ if [ -z "$KIMI_BIN" ] || ! sudo test -f "$KIMI_BIN"; then
 fi
 echo "dispatcher-vetted kimi binary: $KIMI_BIN"
 
+# Round-3 review (high): grading a probe's STDOUT (or a marker file) is forgeable by a concurrent
+# same-UID codex-worker — it can write /proc/<pid>/fd/1 or signal the probe. Two defenses:
+#   (a) QUIESCENCE — refuse to run unless the worker UID is idle, so no concurrent worker exists
+#       to inject or signal (this is an owner-operated activation gate, not a live-dispatch check).
+#   (b) Verdicts come from the EXACT process exit status, reported owner-side by systemd/PID1
+#       (svc) or sudo (wdeny) — a signalled/killed/abnormal probe yields a non-expected code and
+#       FAILS CLOSED; forging a specific exit needs ptrace, which quiescence + NoNewPrivileges deny.
+if pgrep -u "$WORKER" >/dev/null 2>&1; then
+  echo "SKIP: $WORKER has running processes — run this gate with the worker UID quiescent (stop dispatch first); $PROHIBIT"
+  exit 77
+fi
+
 fails=0
 ok(){ echo "ok   $*"; }
 bad(){ echo "FAIL $*"; fails=$((fails+1)); }
-deny(){ local desc="$1"; shift; "$@" >/dev/null 2>&1; local rc=$?
-  if [ "$rc" -eq 0 ]; then bad "$desc (SUCCEEDED — isolation broken)"
-  elif [ "$rc" -eq 226 ]; then bad "$desc — probe never ran (exit 226); vacuous, not a denial"
-  else ok "$desc — denied"; fi; }
-# Round-2 review (high): a marker FILE written into a worker-writable drill dir could be
-# pre-planted/overwritten by a concurrent codex-worker process to forge a verdict. Grade the
-# OWNER-CAPTURED stdout of the --pipe service instead — a separate worker process cannot inject
-# into another unit's pipe. Empty output = the unit never reported (vacuous) = failure, never a pass.
-vstr(){ local got="$1" desc="$2" want="$3"
-  if [ "$got" = "$want" ]; then ok "$desc"
-  elif [ -z "$got" ]; then bad "$desc — probe never reported (vacuous; unit likely failed to start)"
-  else bad "$desc — probe reported '$got' (isolation broken)"; fi; }
+# A worker-run command that MUST be denied: wrap so success exits 9 (LEAK), denial exits 0.
+# Any other code (signalled/abnormal) is vacuous → fail closed, never accepted as a denial.
+wdeny(){ local desc="$1" cmd="$2"
+  sudo -n -u "$WORKER" bash -c "$cmd >/dev/null 2>&1 && exit 9 || exit 0"; local rc=$?
+  case "$rc" in
+    0) ok "$desc — denied";;
+    9) bad "$desc (SUCCEEDED — isolation broken)";;
+    *) bad "$desc — probe abnormal (exit $rc); vacuous, not a denial";;
+  esac; }
 
 echo "== K0 harness: positive control — sudo executes commands as $WORKER"
-if sudo -n -u "$WORKER" cat /etc/hostname >/dev/null 2>&1; then
-  ok "sudo -u $WORKER runs commands (denials below are meaningful)"
+if [ "$(sudo -n -u "$WORKER" bash -c 'echo -n live')" = live ] \
+   && sudo -n -u "$WORKER" bash -c 'exit 0'; then
+  ok "sudo -u $WORKER runs commands and its exit status reaches the owner (verdicts are meaningful)"
 else
   echo "FAIL positive control: cannot run commands as $WORKER — every denial would be vacuous; $PROHIBIT"
   exit 1
 fi
 
 echo "== K1: codex-worker is denied the operator's kimi credential (DAC)"
-deny "read $OP_CRED" sudo -u "$WORKER" cat "$OP_CRED"
-deny "traverse $OPERATOR_HOME/.kimi-code" sudo -u "$WORKER" ls "$OPERATOR_HOME/.kimi-code"
+wdeny "read $OP_CRED" "cat '$OP_CRED'"
+wdeny "traverse $OPERATOR_HOME/.kimi-code" "ls '$OPERATOR_HOME/.kimi-code'"
 
 echo "== K2: the worker's provisioned kimi state is EXACTLY the required tree (no extra/foreign entries)"
 # %y is the type: d/f/l/... — anything but the four expected regular entries fails, INCLUDING a
@@ -143,40 +155,52 @@ else
   echo "--- observed"; printf '%s\n' "$have"
 fi
 
-svc(){ sudo -n systemd-run --uid="$WORKER" --gid="$WORKER" --pipe --wait --quiet --collect \
+# svc runs a probe as a hardened transient unit and returns the unit's EXACT exit status
+# (systemd/PID1 → systemd-run --wait → this shell), the owner-controlled verdict channel.
+svc(){ sudo -n systemd-run --uid="$WORKER" --gid="$WORKER" --wait --quiet --collect \
         --unit="kimicheck-$1" --property=ProtectSystem=strict \
         --property=InaccessiblePaths="$OPERATOR_HOME" \
         --property=PrivateTmp=yes --property=NoNewPrivileges=yes \
-        --setenv=HOME="$WORKER_HOME" "${@:2}" 2>/dev/null; }
+        --setenv=HOME="$WORKER_HOME" "${@:2}" >/dev/null 2>&1; }
+# Grade a probe unit on its exact expected exit code; any other (incl. signalled 128+sig, or
+# 226 = unit failed to start) fails closed.
+expect(){ local unit="$1" want="$2" desc="$3"; shift 3
+  svc "$unit" "$@"; local rc=$?
+  if [ "$rc" -eq "$want" ]; then ok "$desc"; else bad "$desc (exit $rc, wanted $want)"; fi; }
 
-echo "== K3 harness: positive control — hardened service runs and its stdout reaches the owner"
-if [ "$(svc w0 bash -c 'echo ALIVE')" = ALIVE ]; then
-  ok "hardened probe service runs and reports on its own pipe (verdicts below are meaningful)"
+echo "== K3 harness: positive control — a hardened probe unit runs and its exit status reaches the owner"
+svc w0 true
+if [ $? -eq 0 ]; then
+  ok "hardened probe unit runs and propagates exit status (verdicts below are meaningful)"
 else
-  bad "positive control: probe service produced no captured stdout — units do not run here"
+  bad "positive control: probe unit did not run/propagate — every service verdict would be vacuous"
   echo; echo "FAIL: kimi isolation drills (harness broken; $fails failed); $PROHIBIT"; exit 1
 fi
 
 echo "== K3: hardened service reads AND writes the worker's own kimi state (the dispatcher rw path)"
-out="$(svc k3 --property=ReadWritePaths="$WORKER_HOME/.kimi-code" bash -c \
-  "if cat '$WORKER_HOME/.kimi-code/credentials/kimi-code.json' >/dev/null 2>&1 \
-      && touch '$WORKER_HOME/.kimi-code/.drill-write' 2>/dev/null; then echo READY; else echo BROKEN; fi")"
-vstr "$out" "worker kimi state readable and writable inside the service" READY
+# exit 0 iff BOTH the read and the write succeed; the write target is removed afterward.
+expect k3 0 "worker kimi state readable and writable inside the service" \
+  --property=ReadWritePaths="$WORKER_HOME/.kimi-code" bash -c \
+  "cat '$WORKER_HOME/.kimi-code/credentials/kimi-code.json' >/dev/null 2>&1 \
+     && touch '$WORKER_HOME/.kimi-code/.drill-write'"
 sudo rm -f "$WORKER_HOME/.kimi-code/.drill-write"
 
 echo "== K4: hardened service cannot reach the operator's kimi credential"
-out="$(svc k4 bash -c "if cat '$OP_CRED' >/dev/null 2>&1; then echo LEAK; else echo DENIED; fi")"
-vstr "$out" "service read of operator kimi credential — denied" DENIED
+# exit 0 = denied (cat failed); exit 9 = LEAK; anything else = abnormal → fail closed.
+svc k4 bash -c "cat '$OP_CRED' >/dev/null 2>&1 && exit 9 || exit 0"; rc=$?
+case "$rc" in
+  0) ok "service read of operator kimi credential — denied";;
+  9) bad "service read of operator kimi credential (SUCCEEDED — isolation broken)";;
+  *) bad "K4 probe abnormal (exit $rc); vacuous, not a denial";;
+esac
 
 echo "== K5: the DISPATCHER-VETTED native kimi binary executes under service hardening"
 # The resolved real binary bind-mounted RO to /opt/kimi/kimi, argv execs the destination —
-# exactly the slice-3 launch shape. --version needs no credential or network. Only the unit's
-# READY/BROKEN word is read from its pipe; the binary's own output is discarded, never echoed
-# (it is not guaranteed credential-free).
-out="$(svc k5 --property=PrivateNetwork=yes \
-  --property=BindReadOnlyPaths="$KIMI_BIN:/opt/kimi/kimi" bash -c \
-  "if /opt/kimi/kimi --version >/dev/null 2>&1; then echo READY; else echo BROKEN; fi")"
-vstr "$out" "bound dispatcher-vetted kimi binary executes under service hardening" READY
+# exactly the slice-3 launch shape. --version needs no credential or network. The binary's own
+# output is discarded (not guaranteed credential-free); only its exit status is graded.
+expect k5 0 "bound dispatcher-vetted kimi binary executes under service hardening" \
+  --property=PrivateNetwork=yes --property=BindReadOnlyPaths="$KIMI_BIN:/opt/kimi/kimi" \
+  bash -c "/opt/kimi/kimi --version >/dev/null 2>&1"
 
 echo
 if [ "$fails" = 0 ]; then echo "PASS: kimi isolation drills (0 failed) — kimi activation permitted on this host"; exit 0
