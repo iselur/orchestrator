@@ -189,6 +189,11 @@ try:
     content = raw.decode("utf-8")
 except UnicodeDecodeError:
     print("broken\tinvalid UTF-8 in plan frontmatter file — refuse rather than guess"); sys.exit(0)
+# A UTF-8 BOM survives strict decoding as one leading U+FEFF, which the anchored frontmatter regex
+# does not match — a BOM-prefixed renamed Sol plan fell through to notplan and derived 'claude'
+# (round-5 review, fail-open). The BOM is an encoding signature, not content: strip exactly one.
+if content.startswith("﻿"):
+    content = content[1:]
 try:
     import yaml
 except Exception:

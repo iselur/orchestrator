@@ -68,6 +68,12 @@ printf -- '---\nid: PLAN-204\nauthor_model: gpt-5.6-sol\nauthor_model: claude-op
 # detection, so the plain `author_model: claude-opus-4-8` set the vendor and this Sol-value file
 # derived 'claude'. Strict decoding treats invalid UTF-8 as broken provenance and refuses (exit 2).
 printf -- '---\nid: PLAN-206\nauthor_model\xff: gpt-5.6-sol\nauthor_model: claude-opus-4-8\nstatus: draft\n---\n# body\n' > bad-utf8-dup.md
+# Round-5 finding fixture: a valid UTF-8 BOM before the frontmatter of a RENAMED Sol plan. The BOM
+# decodes to one leading U+FEFF the anchored regex missed, so the file fell through to notplan and
+# derived 'claude' (fail-open). One leading BOM is stripped as an encoding signature, so the file
+# classifies from its frontmatter like any other renamed plan.
+printf '\xef\xbb\xbf' > bom-sol-renamed.md
+cat sol-plan-renamed.md >> bom-sol-renamed.md
 # Finding-3 fixtures: two distinct Sol plans (ordering — multiple-plan refusal must precede the
 # codex self-review refusal), reusing PLAN-001 (sol) plus a second sol plan.
 mk_plan .orchestrator/plans/PLAN-205.md gpt-5.6-sol
@@ -202,6 +208,12 @@ rc=$?
 scripts/review --topic plan-202 --author claude --context claude-plan-renamed.md "review" >/dev/null 2>&1 \
   && ok "renamed Claude plan derives claude and reviews under its bound topic" \
   || bad "renamed Claude plan refused under its bound topic"
+#     ROUND-5 FINDING — a BOM-prefixed renamed Sol plan must classify from its frontmatter, not
+#     fall through to notplan/'claude': forged --author claude is a mismatch (exit 6), as in 10.
+scripts/review --topic bom-sol-renamed --author claude --context bom-sol-renamed.md "review" >/dev/null 2>&1
+rc=$?
+[ "$rc" = 6 ] && ok "BOM-prefixed renamed Sol plan still derives codex (forged claude refused, exit 6)" \
+  || bad "BOM-prefixed renamed Sol plan laundered: gave exit $rc, expected 6"
 
 # 11. FINDING 2 — the frontmatter parser cannot be laundered. A stray trailing quote and a duplicate
 #     author_model key both refuse (exit 2); neither yields a 'claude' derivation from a Sol value.
