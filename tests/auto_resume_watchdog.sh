@@ -362,6 +362,8 @@ run_wd
 echo "== W6c: garbage transcript.offset is treated as 0 — corrupted classifier input never disables recovery"
 # Under set -u, $((off + 1)) where off='garbage' would expand 'garbage' as a variable name, find it
 # unset, and abort the tick. With numeric validation, off falls back to 0 and scan_usage continues.
+# A leading-zero digit string like '08' passes ^[0-9]+$ but is invalid octal; base-10 normalization
+# via $((10#$off)) is required so that $((off + 1)) never aborts.
 reset; open_row
 run_wd                                              # launch, gen=1
 printf 'some non-limit output\n' >> "$WDIR/transcript.log"  # transcript exists so scan_usage runs
@@ -372,10 +374,23 @@ run_wd
 [ "$(grep -c -- '--resume' <(keys) || true)" = "$((resumes_before + 1))" ] && \
   ok "garbage transcript.offset: dead-pane recovery still ran (offset treated as 0)" || \
   bad "garbage transcript.offset crashed or blocked recovery (tick may have aborted under set -u)"
+# Leading-zero digit string: passes ^[0-9]+$ but '08' is invalid octal; must be normalized to 8.
+reset; open_row
+run_wd                                              # launch, gen=1
+printf 'some non-limit output\n' >> "$WDIR/transcript.log"
+echo "08" > "$WDIR/transcript.offset"               # leading-zero octal trap
+dead_pane
+resumes_before=$(grep -c -- '--resume' <(keys) || true)
+run_wd
+[ "$(grep -c -- '--resume' <(keys) || true)" = "$((resumes_before + 1))" ] && \
+  ok "leading-zero offset '08': dead-pane recovery still ran (base-10 normalized to 8)" || \
+  bad "leading-zero offset '08' aborted or blocked recovery"
 
 echo "== W6d: garbage USAGE_RETRY_INTERVAL falls back to 1800 — corrupted interval never disables recovery"
 # Under set -u, $(( t + USAGE_RETRY_INTERVAL )) where the value is 'garbage' aborts the tick before
 # recovery runs. With numeric validation, USAGE_RETRY_INTERVAL falls back to 1800.
+# A leading-zero string like '01800' passes the regex but is invalid as octal (digit 8); base-10
+# normalization via $((10#$USAGE_RETRY_INTERVAL)) ensures the arithmetic never aborts.
 reset; open_row
 run_wd                                              # launch, gen=1
 printf 'USAGE_RETRY_INTERVAL=garbage\n' >> "$WDIR/env"
@@ -393,6 +408,22 @@ run_wd
 [ "$(grep -c -- '--resume' <(keys) || true)" = "$((resumes_before + 1))" ] && \
   ok "garbage USAGE_RETRY_INTERVAL: dead-pane recovery reached after cadence expired" || \
   bad "dead-pane recovery blocked after USAGE_RETRY_INTERVAL fallback"
+# Leading-zero digit string: '01800' passes ^[0-9]+$ but is invalid octal (contains digit 8).
+reset; open_row
+run_wd                                              # launch, gen=1
+printf 'USAGE_RETRY_INTERVAL=01800\n' >> "$WDIR/env"
+gen=$(cat "$WDIR/generation")
+printf 'Usage limit reached.\n' >> "$WDIR/transcript.log"
+dead_pane
+run_wd
+[ -e "$WDIR/usage-wait" ] && ok "leading-zero USAGE_RETRY_INTERVAL '01800': wait armed (base-10 normalized to 1800)" || \
+  bad "leading-zero '01800' aborted the tick before arming the wait"
+echo "$(( $(date +%s) - 60 )) $gen" > "$WDIR/usage-wait"
+resumes_before=$(grep -c -- '--resume' <(keys) || true)
+run_wd
+[ "$(grep -c -- '--resume' <(keys) || true)" = "$((resumes_before + 1))" ] && \
+  ok "leading-zero USAGE_RETRY_INTERVAL: dead-pane recovery reached after cadence expired" || \
+  bad "dead-pane recovery blocked with leading-zero USAGE_RETRY_INTERVAL"
 
 echo "== W7 (c): a stale wait from an older pane generation is discarded, not obeyed"
 gen=$(cat "$WDIR/generation")

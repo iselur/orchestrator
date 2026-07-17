@@ -461,6 +461,7 @@ scan_usage() {
   size=$(stat -c %s "$log" 2>/dev/null) || return 0
   off=$(get "$WD/transcript.offset"); off=${off:-0}
   [[ "$off" =~ ^[0-9]+$ ]] || { note "transcript.offset non-numeric ('$off'); treating as 0"; off=0; }
+  off=$(( 10#$off ))   # normalize: leading-zero strings (e.g. "08") are invalid octal under set -u
   gen=$(get "$WD/generation"); gen=${gen:-0}
   # Bounded transcript: keep the last 1MB once it passes 5MB. The offset moves WITH the kept
   # bytes — already-consumed content stays consumed (rescanning it could re-arm an old wait).
@@ -597,6 +598,7 @@ check() {
   USAGE_RETRY_MODE="${USAGE_RETRY_MODE:-observe}"
   USAGE_RETRY_INTERVAL="${USAGE_RETRY_INTERVAL:-1800}"
   [[ "$USAGE_RETRY_INTERVAL" =~ ^[0-9]+$ ]] || { note "USAGE_RETRY_INTERVAL non-numeric; falling back to 1800"; USAGE_RETRY_INTERVAL=1800; }
+  USAGE_RETRY_INTERVAL=$(( 10#$USAGE_RETRY_INTERVAL ))   # normalize: leading-zero strings are invalid octal
   USAGE_RETRY_CAP="${USAGE_RETRY_CAP:-12}"
 
   halted && exit 0                  # immediately before opening the lock (round-2 review)
