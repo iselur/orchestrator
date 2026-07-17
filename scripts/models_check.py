@@ -113,6 +113,13 @@ def validate(cfg) -> list:
             if _nonempty_str(v) and v != k and (v in vm or v in named_models):
                 errs.append(f"cli_aliases.{k} targets another declared model ({v}): an alias "
                             f"maps a model id to its CLI name, never to a different model")
+        # Kimi slice 3 (round-1 review): the kimi CLI accepts only its provider aliases, never
+        # relay model ids — a kimi-vendor model without a cli_aliases entry would freeze an
+        # alias map its adapter must refuse at every invocation. Required at validation.
+        for m, v in sorted(vm.items()):
+            if v == "kimi" and not _nonempty_str(aliases.get(m)):
+                errs.append(f"vendor_map.{m} is kimi-vendor but cli_aliases has no entry for "
+                            f"it (the kimi CLI accepts only its provider aliases)")
 
     # Owner decision 2026-07-16: vendor PAIRING is the owner's call, made by editing this
     # config — nothing here polices same- vs cross-vendor. Two mechanical rules remain:

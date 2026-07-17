@@ -118,6 +118,15 @@ except ValueError:
     over_raises = True
 check("kimi request one byte over the guard refuses before invocation (never truncated)",
       over_raises)
+# Round-1 review of slice 3 (medium 4): an alias map without the required kimi entry refuses
+# — the raw relay id must never reach the CLI (probe A: it only accepts provider aliases).
+try:
+    km.build_argv("kimi-k3", "max", SCHEMA, {}, "/x/schema.json", request="REQ")
+    km_noalias_raises = False
+except ValueError:
+    km_noalias_raises = True
+check("kimi reviewer without its required alias entry refuses (fail closed)",
+      km_noalias_raises)
 shaped = km.reviewer_prompt("REQ", SCHEMA)
 check("kimi prompt shaping appends the schema and the JSON-only instruction (codex discipline)",
       shaped.startswith("REQ") and "rv1" in shaped and "ONLY one JSON object" in shaped)

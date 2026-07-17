@@ -128,8 +128,12 @@ class KimiReviewer:
             raise ValueError(f"kimi reviewer request is {size} UTF-8 bytes, over the "
                              f"{KIMI_ARGV_PROMPT_LIMIT}-byte argv guard (probe D E2BIG wall): "
                              f"refused before invocation, never truncated")
-        return ["kimi", "-p", request, "-m", cli_aliases.get(model_id, model_id),
-                "--output-format", "stream-json"]
+        model = cli_aliases.get(model_id) if isinstance(cli_aliases, dict) else None
+        if not model:
+            raise ValueError(f"kimi reviewer requires the CLI provider alias for {model_id!r} "
+                             f"(probe A: the kimi CLI accepts its own aliases, never relay "
+                             f"model ids) and the frozen cli_aliases carries none; fail closed")
+        return ["kimi", "-p", request, "-m", model, "--output-format", "stream-json"]
 
     def reviewer_prompt(self, req, schema_obj):
         return (req + "\n\nOutput ONLY one JSON object conforming exactly to this schema — no "
@@ -309,9 +313,13 @@ class KimiWorker:
             raise ValueError("kimi worker has no unisolated mode: the CLI cannot set its own "
                              "working directory (no --cd) and has no inner sandbox (probes "
                              "B/F); the hardened service is the only confinement — fail closed")
+        model = (cli_aliases or {}).get(model_id)
+        if not model:
+            raise ValueError(f"kimi worker requires the CLI provider alias for {model_id!r} "
+                             f"(probe A: the kimi CLI accepts its own aliases, never relay "
+                             f"model ids) and the frozen cli_aliases carries none; fail closed")
         return [*(argv_prefix or []), "-p", prompt,
-                "-m", (cli_aliases or {}).get(model_id, model_id),
-                "--output-format", "stream-json", "-y"]
+                "-m", model, "--output-format", "stream-json", "-y"]
 
     def worker_env(self, operator_home, operator_user):
         """Scrubbed environment for the UNISOLATED path, kept total because dispatch.py builds

@@ -103,6 +103,11 @@ check("kimi model declared as codex vendor refuses launch (exit 2)", load_result
 bad = copy.deepcopy(good); bad["vendor_map"]["claude-opus-4-8"] = "kimi"
 scratch.write_text(json.dumps(bad))
 check("claude model declared as kimi vendor refuses launch (exit 2)", load_result() == "exit2")
+# Kimi slice 3 (round-1 review): a kimi-vendor model MUST carry its CLI provider alias — the
+# kimi CLI never accepts relay model ids, so an alias-less declaration is invalid config.
+bad = copy.deepcopy(good); del bad["cli_aliases"]["kimi-k3"]
+scratch.write_text(json.dumps(bad))
+check("kimi-vendor model without its CLI alias refuses launch (exit 2)", load_result() == "exit2")
 bad = copy.deepcopy(good); del bad["vendor_map"][bad["roles"]["worker"]["model"]]
 scratch.write_text(json.dumps(bad))
 check("role model missing from vendor_map refuses launch (exit 2)", load_result() == "exit2")

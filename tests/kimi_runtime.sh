@@ -80,6 +80,46 @@ if got:
         print("  ok: argv execs /opt/kimi/kimi; bind source is the resolved real path")
 shutil.rmtree(home, ignore_errors=True)
 
+# 5b. a named POSIX ACL on the candidate rejects it (write granted invisibly to a mode
+#     check) — mirrors codex_runtime.sh case 10; skips if setfacl/nobody unavailable.
+import subprocess
+home = pathlib.Path(tempfile.mkdtemp()); cand = native(home)
+if shutil.which("setfacl") and subprocess.run(["id", "nobody"],
+                                              capture_output=True).returncode == 0:
+    if subprocess.run(["setfacl", "-m", "u:nobody:rwx", str(cand)],
+                      capture_output=True).returncode == 0:
+        d.OPERATOR_HOME = home
+        got = d.worker_kimi_runtime()
+        if chose_ours(got, home):
+            fails.append("named ACL granting nobody:rwx did NOT reject the kimi candidate")
+        else:
+            print("  ok: named ACL rejects the candidate")
+    else:
+        print("  skip: setfacl failed (no ACL support on this fs)")
+else:
+    print("  skip: setfacl or nobody absent")
+shutil.rmtree(home, ignore_errors=True)
+# 5c. unsafe ancestry: a NON-sticky world-writable ancestor rejects the candidate
+#     (rename-parent attack); sticky (like /tmp) is accepted — mirrors codex case 11.
+base = pathlib.Path(tempfile.mkdtemp())
+mid = base / "mid"; mid.mkdir()
+cand = native(mid)
+d.OPERATOR_HOME = mid
+ancestry_before = chose_ours(d.worker_kimi_runtime(), mid)
+mid.chmod(0o777)   # world-writable, NO sticky
+ancestry_open = chose_ours(d.worker_kimi_runtime(), mid)
+mid.chmod(0o1777)  # sticky -> safe again
+ancestry_sticky = chose_ours(d.worker_kimi_runtime(), mid)
+if not ancestry_before:
+    fails.append("baseline: clean nested candidate rejected before chmod")
+elif ancestry_open:
+    fails.append("non-sticky world-writable parent did NOT reject the candidate")
+elif not ancestry_sticky:
+    fails.append("sticky world-writable parent wrongly rejects the candidate")
+else:
+    print("  ok: non-sticky world-writable ancestor rejects; sticky accepted")
+shutil.rmtree(base, ignore_errors=True)
+
 # 6. resolver selection follows the FROZEN worker vendor (launch probe + legacy fallback)
 if d.worker_runtime_resolver("kimi") is not d.worker_kimi_runtime:
     fails.append("worker_runtime_resolver('kimi') is not worker_kimi_runtime")
@@ -114,6 +154,28 @@ if pathlib.Path("/usr/bin/node").exists():
         print("  ok: codex npm pinning unchanged (host node still pinned)")
 else:
     print("  skip: npm pin case (/usr/bin/node absent)")
+# 8. round-1 review (high): degenerate destinations must NOT swallow the host pin — "" and
+#    "/" cover every absolute argv[0] under a naive prefix rule; only a proper absolute
+#    destination below / is recognized. A prefix COLLISION ("/opt/cod" vs /opt/codex/...)
+#    must also keep the pin; a genuine ancestor destination ("/opt") legitimately covers.
+hbin = home / "hostbin"; hbin.write_bytes(ELF)
+for bad_dst in ("", "/", "//"):
+    pins = d.pin_runtime_sources([str(hbin)], [(str(kbin), bad_dst)])
+    if str(hbin) not in pins:
+        fails.append(f"degenerate destination {bad_dst!r} swallowed the host argv[0] pin")
+        break
+else:
+    print("  ok: degenerate destinations ('', '/', '//') keep the conservative host pin")
+pins = d.pin_runtime_sources([str(hbin)], [(str(kbin), str(hbin)[:-3])])
+if str(hbin) not in pins:
+    fails.append(f"prefix collision {str(hbin)[:-3]!r} wrongly covered {hbin}")
+else:
+    print("  ok: prefix collision does not cover a sibling path")
+pins = d.pin_runtime_sources([str(hbin)], [(str(kbin), str(hbin.parent))])
+if str(hbin) in pins:
+    fails.append("ancestor destination did not cover its own subtree")
+else:
+    print("  ok: a genuine ancestor destination covers its subtree")
 shutil.rmtree(home, ignore_errors=True)
 
 for f in fails:

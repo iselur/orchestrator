@@ -1519,9 +1519,15 @@ def pin_runtime_sources(rt_argv: list, rt_binds: list) -> dict:
     # DESTINATION is not a host path — its source is already pinned above. Recognizing any
     # destination (was: a literal /opt/codex prefix — kimi slice 3) keeps codex npm/native
     # behavior identical and lets another vendor's mount (kimi's /opt/kimi/kimi) pin without
-    # probing a nonexistent host path.
-    if not any(rt_argv[0] == dst or rt_argv[0].startswith(dst.rstrip("/") + "/")
-               for _src, dst in rt_binds):
+    # probing a nonexistent host path. Round-1 review (high): a degenerate destination (""
+    # or "/") would cover EVERY absolute argv[0] and silently drop the host pin — only a
+    # proper absolute destination below / is recognized; anything else keeps the
+    # conservative host pin (fail closed).
+    def _covered(a0, dst):
+        dst = dst.rstrip("/")
+        return dst.startswith("/") and bool(dst.strip("/")) and (
+            a0 == dst or a0.startswith(dst + "/"))
+    if not any(_covered(rt_argv[0], dst) for _src, dst in rt_binds):
         pins[rt_argv[0]] = runtime_fingerprint(Path(rt_argv[0]))
     return pins
 
@@ -1974,7 +1980,8 @@ def cmd_launch(spec_id: str) -> None:
     # Kimi slice 3: kimi has NO unisolated mode — the CLI cannot set its own working directory
     # and has no inner sandbox (codex's unisolated fallback keeps bwrap ON; kimi would run with
     # no confinement at all). The adapter refuses at argv build; refusing HERE keeps the
-    # failure before any side effects instead of a mid-pipeline exception.
+    # failure before the attempt is claimed and before any worktree or worker side effect
+    # (preflight's instance bookkeeping is the only earlier write — round-1 review, medium 2).
     if not iso and launch_models["worker_vendor"] == "kimi":
         die("REFUSING to launch: kimi workers have no unisolated mode (no --cd, no inner "
             "sandbox — the hardened service is the only confinement). Provision isolation "
@@ -2029,8 +2036,11 @@ def cmd_launch(spec_id: str) -> None:
                              rw_paths=[], private_network=True, ceiling_s=120,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, binds=rt_binds)
         if probe.returncode != 0:
-            die(f"REFUSING to launch: the resolved {wv} worker runtime failed its probe under "
-                f"the real service hardening (exit {probe.returncode}).\n"
+            # Round-1 review (medium 3): codex messages stay byte-identical — "Codex", not the
+            # lowercase vendor token, on every pre-slice-3 path.
+            rt_name = "Codex" if wv == "codex" else wv
+            die(f"REFUSING to launch: the resolved {rt_name} runtime failed its probe under the real "
+                f"service hardening (exit {probe.returncode}).\n"
                 f"  Runtime: {rt_entry}\n"
                 f"  Probe stderr: {(probe.stderr or b'').decode('utf-8', 'replace').strip()[-400:]}",
                 15)
@@ -2816,27 +2826,37 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
                 tree_ok = all(trusted_runtime_tree(Path(src)) for src, _dst in rt["binds"]
                               if Path(src).is_dir())
                 if stale or not pins or not entry_ok or not tree_ok:
+                    # Round-1 review (medium 3): codex message stays byte-identical ("Codex").
+                    rt_vendor = ("Codex" if vendors["worker_vendor"] == "codex"
+                                 else vendors["worker_vendor"])
                     finish("failed_worker_error", ERR_WORKER,
-                           detail=f"{vendors['worker_vendor']} runtime changed, vanished or "
-                                  f"lost trust between launch and run (stale: "
-                                  f"{stale or 'no pins recorded'}, tree_ok={tree_ok}); refusing")
+                           detail=f"{rt_vendor} runtime changed, vanished or lost trust between launch "
+                                  f"and run (stale: {stale or 'no pins recorded'}, "
+                                  f"tree_ok={tree_ok}); refusing")
                 argv_prefix, binds = rt["argv"], [tuple(b) for b in rt["binds"]]
             else:  # launch record predates runtime pinning: resolve live (adapter delegates
                 # to the module-level resolver for the FROZEN vendor — trust machinery stays here)
                 runtime = worker_adapter.runtime(worker_runtime_resolver(vendors["worker_vendor"]))
                 if runtime is None:
                     finish("failed_worker_error", ERR_WORKER,
-                           detail=f"no worker-launchable {vendors['worker_vendor']} runtime "
-                                  "(a native ELF binary; for codex, the npm package + system "
-                                  "node also qualifies)")
+                           detail="no worker-launchable Codex runtime (npm package + system "
+                                  "node, or a native ELF binary)"
+                                  if vendors["worker_vendor"] == "codex" else
+                                  f"no worker-launchable {vendors['worker_vendor']} runtime "
+                                  f"(native ELF binary)")
                 argv_prefix, binds, _entry = runtime
             # Kimi slice 3: the frozen alias map rides to the worker adapter — kimi's CLI takes
             # the provider alias, not the relay model id; codex ignores the keyword (verbatim
-            # contract, tests/dispatch_worker_adapter.sh). Post-config records always carry
-            # cli_aliases; pre-config records are codex-era, where the empty fallback is inert.
-            argv = worker_adapter.build_argv(lc["worker_model"], lc["worker_effort"], wt,
-                                             prompt, isolated=True, argv_prefix=argv_prefix,
-                                             cli_aliases=lc.get("cli_aliases") or {})
+            # contract, tests/dispatch_worker_adapter.sh). A kimi record whose frozen aliases
+            # lack the required entry is refused by the adapter (ValueError) and recorded
+            # TERMINALLY here — never invoked with a raw relay id (round-1 review, medium 4).
+            try:
+                argv = worker_adapter.build_argv(lc["worker_model"], lc["worker_effort"], wt,
+                                                 prompt, isolated=True, argv_prefix=argv_prefix,
+                                                 cli_aliases=lc.get("cli_aliases") or {})
+            except ValueError as exc:
+                finish("error_launch", ERR_LAUNCH,
+                       detail=f"worker argv refused: {exc}")
             worker_ceiling_s = remaining_ceiling_s(deadline_ts)
             if worker_ceiling_s <= 0:
                 finish("error_launch", ERR_TIMEOUT,
