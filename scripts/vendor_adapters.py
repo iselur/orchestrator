@@ -58,7 +58,9 @@ def _strict_json_object(raw):
 class ClaudeReviewer:
     """Today's shipped claude mechanics, verbatim — flags per B16 hardening."""
 
-    def build_argv(self, model_id, effort, schema_obj, cli_aliases, schema_path):
+    def build_argv(self, model_id, effort, schema_obj, cli_aliases, schema_path, request=None):
+        # request is accepted for signature uniformity (kimi carries the prompt in argv) and
+        # ignored: the claude prompt rides on stdin.
         return [
             "claude", "-p", "--output-format", "json", "--json-schema", json.dumps(schema_obj),
             "--model", cli_aliases.get(model_id, model_id),
@@ -82,7 +84,9 @@ class ClaudeReviewer:
 class CodexReviewer:
     """codex exec with structural output via --output-schema (probe-proven bare JSON)."""
 
-    def build_argv(self, model_id, effort, schema_obj, cli_aliases, schema_path):
+    def build_argv(self, model_id, effort, schema_obj, cli_aliases, schema_path, request=None):
+        # request is accepted for signature uniformity (kimi carries the prompt in argv) and
+        # ignored: the codex prompt rides on stdin ("-").
         return [
             "codex", "exec", "-m", cli_aliases.get(model_id, model_id),
             "-c", f"model_reasoning_effort={effort}",
@@ -107,8 +111,8 @@ KIMI_ARGV_PROMPT_LIMIT = 120_000   # UTF-8 bytes: conservative headroom under Li
 class KimiReviewer:
     """kimi-code one-shot review (probe evidence, .orchestrator/evidence/kimi-probes.md). The
     CLI has no stdin transport, so the SHAPED request itself must ride in argv: build_argv
-    takes it as `request` — dispatch.py's review() passes it when the owner-gated slice 3
-    lands; until then this adapter is registered but unreachable (KNOWN_VENDORS excludes kimi).
+    takes it as `request`, passed by dispatch.py's review() (kimi slice 3); a missing request
+    refuses rather than invoking a promptless CLI.
     A request over the argv wall is refused before invocation, never truncated (owner decision
     2026-07-16). No effort flag: K3 carries kimi's own effort model (only "max"), never
     codex's model_reasoning_effort. No auto-approval flag either: without -y kimi cannot write
@@ -124,8 +128,16 @@ class KimiReviewer:
             raise ValueError(f"kimi reviewer request is {size} UTF-8 bytes, over the "
                              f"{KIMI_ARGV_PROMPT_LIMIT}-byte argv guard (probe D E2BIG wall): "
                              f"refused before invocation, never truncated")
-        return ["kimi", "-p", request, "-m", cli_aliases.get(model_id, model_id),
-                "--output-format", "stream-json"]
+        model = cli_aliases.get(model_id) if isinstance(cli_aliases, dict) else None
+        # Round-2 review: truthiness alone accepted an identity alias (the raw relay id
+        # laundered through the map) and non-string values straight into argv — the alias
+        # must be a non-empty STRING distinct from the relay model id.
+        if not isinstance(model, str) or not model.strip() or model == model_id:
+            raise ValueError(f"kimi reviewer requires a distinct CLI provider alias for "
+                             f"{model_id!r} (probe A: the kimi CLI accepts its own aliases, "
+                             f"never relay model ids); the frozen cli_aliases carries "
+                             f"{model!r}; fail closed")
+        return ["kimi", "-p", request, "-m", model, "--output-format", "stream-json"]
 
     def reviewer_prompt(self, req, schema_obj):
         return (req + "\n\nOutput ONLY one JSON object conforming exactly to this schema — no "
@@ -305,9 +317,17 @@ class KimiWorker:
             raise ValueError("kimi worker has no unisolated mode: the CLI cannot set its own "
                              "working directory (no --cd) and has no inner sandbox (probes "
                              "B/F); the hardened service is the only confinement — fail closed")
+        model = cli_aliases.get(model_id) if isinstance(cli_aliases, dict) else None
+        # Round-2 review: truthiness alone accepted an identity alias (the raw relay id
+        # laundered through the map) and non-string values straight into argv — the alias
+        # must be a non-empty STRING distinct from the relay model id.
+        if not isinstance(model, str) or not model.strip() or model == model_id:
+            raise ValueError(f"kimi worker requires a distinct CLI provider alias for "
+                             f"{model_id!r} (probe A: the kimi CLI accepts its own aliases, "
+                             f"never relay model ids); the frozen cli_aliases carries "
+                             f"{model!r}; fail closed")
         return [*(argv_prefix or []), "-p", prompt,
-                "-m", (cli_aliases or {}).get(model_id, model_id),
-                "--output-format", "stream-json", "-y"]
+                "-m", model, "--output-format", "stream-json", "-y"]
 
     def worker_env(self, operator_home, operator_user):
         """Scrubbed environment for the UNISOLATED path, kept total because dispatch.py builds

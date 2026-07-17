@@ -103,6 +103,16 @@ check("kimi model declared as codex vendor refuses launch (exit 2)", load_result
 bad = copy.deepcopy(good); bad["vendor_map"]["claude-opus-4-8"] = "kimi"
 scratch.write_text(json.dumps(bad))
 check("claude model declared as kimi vendor refuses launch (exit 2)", load_result() == "exit2")
+# Kimi slice 3 (round-1 review): a kimi-vendor model MUST carry its CLI provider alias — the
+# kimi CLI never accepts relay model ids, so an alias-less declaration is invalid config.
+bad = copy.deepcopy(good); del bad["cli_aliases"]["kimi-k3"]
+scratch.write_text(json.dumps(bad))
+check("kimi-vendor model without its CLI alias refuses launch (exit 2)", load_result() == "exit2")
+# Round-2 review: an IDENTITY alias would launder the raw relay id through the translation —
+# the kimi alias must be DISTINCT from the model id.
+bad = copy.deepcopy(good); bad["cli_aliases"]["kimi-k3"] = "kimi-k3"
+scratch.write_text(json.dumps(bad))
+check("kimi identity alias (raw id laundering) refuses launch (exit 2)", load_result() == "exit2")
 bad = copy.deepcopy(good); del bad["vendor_map"][bad["roles"]["worker"]["model"]]
 scratch.write_text(json.dumps(bad))
 check("role model missing from vendor_map refuses launch (exit 2)", load_result() == "exit2")
@@ -194,10 +204,9 @@ check("pinning an unmapped worker model refuses launch (exit 2)",
 check("pinning an unmapped reviewer model refuses launch (exit 2)",
       resolve_result({"reviewer_model": "mystery-model-9"}) == "exit2")
 # Kimi slice 2: KimiWorker is registered, so a kimi worker pin RESOLVES and freezes truthful
-# vendor+mode (deliberately flipping the slice-1 refusal). Inertness moves one gate down:
-# KNOWN_VENDORS still excludes kimi until the owner-gated slice 3, so the frozen record is
-# unclassifiable at run time and the pipeline records a TERMINAL error_launch refusal before
-# any kimi CLI could be invoked (proven in tests/dispatch_worker_adapter.sh).
+# vendor+mode (deliberately flipping the slice-1 refusal). Slice 3 wired the dispatcher
+# (KNOWN_VENDORS, runtime resolver, argv plumbing); launch still requires the isolation gate
+# (tests/kimi_worker_isolation.sh, slice 4) before any kimi worker actually runs.
 r_kimi = d.resolve_launch_models({"worker_model": "kimi-k3"}, cfg)
 check("kimi worker pin resolves and freezes worker_vendor=kimi, worker_mode=external-cli",
       r_kimi["worker_vendor"] == "kimi" and r_kimi["worker_mode"] == "external-cli")
