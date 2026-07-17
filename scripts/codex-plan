@@ -9,11 +9,10 @@ task_parts=()
 
 usage() {
   cat <<'EOF'
-Usage: scripts/codex-plan [--small|--brief] [--context FILE]... [--out DIR] [--] [TASK...]
+Usage: scripts/codex-plan [--brief] [--context FILE]... [--out DIR] [--] [TASK...]
 
-The rulebook (CLAUDE.md rule 5) names one tier: --brief. The lighter tiers remain: --small by
-flag, standard when no flag is given. Ambiguity picks the HIGHER tier.
-  --small     one reversible spec, one bounded component        cap  40 lines
+The rulebook (CLAUDE.md rule 5) names one tier: --brief. The lighter tier remains: standard when
+no flag is given.
   (default)   a non-trivial single spec, decision-complete      cap 250 lines
   --brief     a program: coordinated specs, a handoff gate,     cap 400 lines
               trust-boundary/high-risk work, a migration, or
@@ -42,15 +41,7 @@ MODEL=$(python3 "$SCRIPTS_DIR/models_check.py" "$MODELS_CFG" get roles.spec_auth
 
 while (($#)); do
   case "$1" in
-    --small)
-      # "Ambiguity picks the HIGHER tier" (CLAUDE.md rule 5) — so a contradictory pair of flags is
-      # refused outright rather than silently letting the last one win.
-      [[ "$tier" == "brief" ]] && die "--small and --brief contradict each other; pick one (when unsure, --brief)"
-      tier="small"
-      shift
-      ;;
     --brief)
-      [[ "$tier" == "small" ]] && die "--small and --brief contradict each other; pick one (when unsure, --brief)"
       tier="brief"
       shift
       ;;
@@ -130,14 +121,6 @@ stderr_path="$out_dir/$plan_id.stderr"
 flock -u 8
 
 case "$tier" in
-  small)
-    cap=40
-    instructions=$(cat <<'EOF'
-Draft a concise five-field micro-plan. Use exactly these fields: objective,
-scope, action, verification, and rollback. Make each field specific enough to
-execute, and return only the Markdown plan body without YAML frontmatter.
-EOF
-) ;;
   standard)
     cap=250
     instructions=$(cat <<'EOF'

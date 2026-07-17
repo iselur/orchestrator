@@ -8,13 +8,13 @@
 # BUILD; _grade's never-overwrite state guard; the shared grading half from SPEC_BLOCKED through
 # no-changes to a synthetic passed_pr_opened; await/health treating awaiting_build as
 # pending-by-design; and the codex worker prompt surviving the factoring byte-identically.
-# Same box-only skip contract as tests/dispatch_fail_closed.sh (venv-needing self-test).
+# Same venv-skip contract as tests/dispatch_fail_closed.sh (venv-needing self-test).
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
 PY="${ORCH_TEST_PY:-.venv/bin/python}"
 if [ ! -x "$PY" ] || ! "$PY" -c 'import yaml, jsonschema' 2>/dev/null; then
-  echo "SKIP dispatch_subagent_worker.sh: .venv/pyyaml/jsonschema absent (dispatcher self-test runs on the box only, not CI)"
+  echo "SKIP dispatch_subagent_worker.sh: .venv/pyyaml/jsonschema absent (dispatcher self-test needs the dispatcher venv; CI installs it)"
   exit 77   # did NOT run — never a pass (T1/R26)
 fi
 
@@ -60,8 +60,6 @@ CFG = {"schema_version": "1",
                  "worker": {"model": "claude-sonnet-4-6", "effort": "high"},
                  "bound_reviewer": {"model": "claude-fable-5", "effort": "high"},
                  "orchestrator_artifact_reviewer": {"model": "gpt-5.6-sol", "effort": "high"}},
-       "reviewer_failover": {"trigger_model": "claude-fable-5",
-                             "fallback_model": "claude-opus-4-8"},
        "cli_aliases": {"claude-fable-5": "fable"},
        "vendor_map": {"gpt-5.6-luna": "codex", "gpt-5.6-sol": "codex",
                       "claude-fable-5": "claude", "claude-opus-4-8": "claude",
@@ -131,8 +129,7 @@ def write_lc(**over):
           "base_sha": "0" * 40, "branch": f"codex/{AID}", "base_branch": "ready-for-main",
           "worktree": str(work / "wt"), "worker_model": "claude-sonnet-4-6",
           "worker_effort": "high", "reviewer_model": "claude-fable-5",
-          "reviewer_effort": "high", "reviewer_failover_trigger": "claude-fable-5",
-          "reviewer_fallback_model": "claude-opus-4-8", "cli_aliases": {},
+          "reviewer_effort": "high", "cli_aliases": {},
           "worker_vendor": "claude", "reviewer_vendor": "claude", "worker_mode": "subagent",
           "test_command": "true", "approved_scope": ["**"],
           "hard_ceiling_hours": 1.0, "deadline_ts": time.time() + 3600,
