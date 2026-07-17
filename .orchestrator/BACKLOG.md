@@ -16,24 +16,19 @@ against this description: what matches, what doesn't, what is missing.
 
 1. **Codex priority tier fast → standard** (cost lever from the 2026-07-15 token findings; owner
    2026-07-16): flip worker/reviewer/spec-author Codex calls to standard processing; watch dispatch ceilings.
-2. **Auto-resume after a usage window (descoped 2026-07-16)** — the long-lived session, the
-   watchdog restart/alert, session rotation, and user-presence standby already shipped. Remaining
-   piece only: when a usage limit is hit, retry on a blind fixed timer (no reset-time parsing — a
-   retry into a still-closed window is harmless and re-arms) until the window reopens, and stand
-   down on a dirty or off-branch checkout so automation never fights the owner's own work or
-   another branch. Off by default (observe mode); the owner flips `USAGE_RETRY_MODE=active`.
-3. **Program B (rev 4)** — rotation, task leases, watchdog, compaction lifecycle; falsifier first.
-4. **Program C (rev 4, after B)** — thin orchestrator, specialists, authoring flip, unpin `CLAUDE_CODE_SUBAGENT_MODEL`.
-5. **Ship a real product, end to end** — top idea from `~/orchestrator-private/IDEAS-shortlist/`,
+2. **Program C (rev 4)** — thin orchestrator, specialists, authoring flip, unpin `CLAUDE_CODE_SUBAGENT_MODEL`.
+   Reshape in flight as R83–R86; C2 (review round binding) shipped, C1bc and C3 remain.
+3. **Ship a real product, end to end** — top idea from `~/orchestrator-private/IDEAS-shortlist/`,
    its own repo, one small feature through idea → brief → tickets → build → test → review → merge → running.
    product: new repo from the private shortlist (name it at intake)
-6. **Fix failed_launch terminal statuses** — three `_run_pipeline` refusal paths record a status in
-   neither TERMINAL nor LIVE, so `dispatch await` polls 8h. Small spec: error_launch or TERMINAL, plus await test.
-7. **Restrict worker build-phase egress before the first product-repo dispatch** (SECURITY.md gap 1,
+4. **Restrict worker build-phase egress before the first product-repo dispatch** (SECURITY.md gap 1,
    LOW-MEDIUM 2026-07-16): worker uid reaches only the model API; the credential-broker fix stays parked.
 
 ## Parked (owner 2026-07-16: keep for the future)
 
+- In-flight session-to-session handoff (deferred from the R77 descope, owner 2026-07-16): atomic
+  handoff commit/consumption, duplicate suppression, mid-handoff crash recovery. If revived, take
+  the Python falsifier route; scenario matrix preserved on branch orch/r77-lifecycle-falsifier.
 - Approvals rework (SECURITY.md gap 2): the autonomy grant covers low risk, owner confirms `main` only.
 - Move the test grade out of the worker's reach (SECURITY.md gap 3).
 - Measure whether review catches bugs: plant three known defects, count catches, size review scope from the result.
