@@ -104,22 +104,6 @@ KIMI_ARGV_PROMPT_LIMIT = 120_000   # UTF-8 bytes: conservative headroom under Li
                                    # single-argument wall (MAX_ARG_STRLEN), the probe-D E2BIG line
 
 
-def _last_assistant_content(stream_text):
-    """The final assistant message from a kimi stream-json capture: the last line that is a
-    JSON object with role=assistant and string content (probe G). None when no such line
-    exists — callers treat that as no message / no verdict and fail closed."""
-    content = None
-    for line in (stream_text or "").splitlines():
-        try:
-            e = json.loads(line)
-        except Exception:
-            continue
-        if (isinstance(e, dict) and e.get("role") == "assistant"
-                and isinstance(e.get("content"), str)):
-            content = e["content"]
-    return content
-
-
 class KimiReviewer:
     """kimi-code one-shot review (probe evidence, .orchestrator/evidence/kimi-probes.md). The
     CLI has no stdin transport, so the SHAPED request itself must ride in argv: build_argv
@@ -149,7 +133,29 @@ class KimiReviewer:
                 + json.dumps(schema_obj, indent=2))
 
     def extract_verdict(self, stdout):
-        content = _last_assistant_content(stdout)
+        # Round-1 review (major): taking the last WELL-FORMED assistant string let an earlier
+        # PASS survive trailing malformed JSON, non-string content, or raw prose — a stale
+        # verdict extracted from a stream that no longer ends in one. The verdict source is the
+        # content of the LAST assistant event only while the stream stays valid behind it: any
+        # malformed line, non-object line, or assistant event with non-string content
+        # invalidates what came before; only a subsequent VALID assistant event supersedes the
+        # damage. Whitespace-only lines are neutral; other non-assistant JSON objects are
+        # ordinary stream events and leave the verdict source untouched.
+        content = None
+        for line in (stdout or "").splitlines():
+            if not line.strip():
+                continue
+            try:
+                e = json.loads(line)
+            except Exception:
+                content = None
+                continue
+            if not isinstance(e, dict):
+                content = None
+                continue
+            if e.get("role") == "assistant":
+                c = e.get("content")
+                content = c if isinstance(c, str) else None
         return _strict_json_object(content) if content is not None else None
 
 
@@ -328,14 +334,24 @@ class KimiWorker:
         return resolve_runtime()
 
     def recover_last_message(self, raw_dir, isolated):
-        """The worker's final message: the last assistant line of the stream-json capture.
-        kimi has no --output-last-message, so BOTH paths read the captured stream (stdout
-        lands in events.jsonl either way)."""
+        """The worker's final message: the last assistant line with string content in the
+        stream-json capture, skipping malformed lines — MESSAGE RECOVERY with the same
+        leniency as codex's event-stream read, not a gate (the reviewer's verdict extraction
+        is the strict one). kimi has no --output-last-message, so BOTH paths read the
+        captured stream (stdout lands in events.jsonl either way)."""
+        msg = ""
         try:
-            stream = (raw_dir / "events.jsonl").read_text()
+            for line in (raw_dir / "events.jsonl").read_text().splitlines():
+                try:
+                    e = json.loads(line)
+                except Exception:
+                    continue
+                if (isinstance(e, dict) and e.get("role") == "assistant"
+                        and isinstance(e.get("content"), str)):
+                    msg = e["content"]
         except Exception:
-            return ""
-        return _last_assistant_content(stream) or ""
+            pass
+        return msg
 
     def classify_error(self, exit_code, stderr, raw_dir):
         """A structured error class, or None when the worker ran to completion — the

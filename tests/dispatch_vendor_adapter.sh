@@ -148,9 +148,26 @@ check("kimi verdict: truncated/malformed stream is refused",
       km.extract_verdict('{"role":"assis') is None)
 check("kimi verdict: non-dict verdict JSON is refused",
       km.extract_verdict(json.dumps({"role": "assistant", "content": '["PASS"]'})) is None)
-check("kimi verdict: non-string assistant content is skipped (refused when nothing else)",
+check("kimi verdict: non-string assistant content is refused",
       km.extract_verdict(json.dumps({"role": "assistant",
                                      "content": {"verdict": "PASS"}})) is None)
+# Round-1 review (major): an earlier PASS must NOT survive trailing damage — the verdict
+# source is the last assistant event only while the stream stays valid behind it. All three
+# demonstrated stale-PASS sequences refuse; a subsequent VALID assistant event supersedes.
+vline = json.dumps({"role": "assistant", "content": probe})
+check("kimi verdict: PASS followed by a non-string-content assistant event is refused",
+      km.extract_verdict(vline + "\n"
+                         + json.dumps({"role": "assistant", "content": None})) is None)
+check("kimi verdict: PASS followed by trailing malformed stream data is refused",
+      km.extract_verdict(vline + '\n{"role":"assis') is None)
+check("kimi verdict: PASS followed by trailing raw prose is refused",
+      km.extract_verdict(vline + "\nBLOCKING: unsafe") is None)
+check("kimi verdict: a valid assistant event AFTER damage supersedes it (parses)",
+      km.extract_verdict('{"broken\n' + vline) == json.loads(probe))
+check("kimi verdict: non-assistant events and blank lines after the verdict stay neutral",
+      km.extract_verdict(vline + "\n\n"
+                         + json.dumps({"role": "tool", "content": "exit 0"}) + "\n")
+      == json.loads(probe))
 
 # ---- frozen vendor fields ----------------------------------------------------------------
 check("both vendor fields present are used verbatim",
