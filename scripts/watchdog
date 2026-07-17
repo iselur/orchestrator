@@ -17,9 +17,12 @@
 #             that is CORRUPT fails visibly (alert, no relaunch — the brief forbids guessing);
 #             --continue runs only when no id was ever recorded, and alerts, because it cannot
 #             prove which conversation it picked.
-#   (c)       recognized usage wait      -> no input before the reset time; after it, observe
-#             mode records the event, active mode sends one retry. Classifier failures scope to
-#             this behavior only — they never disable (a), (b), (d), or HALT.
+#   (c)       usage limit seen           -> no input while a blind retry cadence is armed; after it,
+#             observe mode records the event, active mode sends one retry (or a dead pane respawns).
+#             The reset time is NOT parsed — a retry into a still-closed window is harmless and
+#             re-arms. Classifier failures scope to this behavior only — never (a), (b), (d), HALT.
+#   DIRTY     the shared checkout is dirty or off its expected branch -> supervision parks (like
+#             standby) until the owner's in-progress work there is committed/stashed or reverted.
 #   (d)       pending work idle too long, and no live attempt -> local ALERT record + journal
 #             always; external delivery is best-effort and never blocks supervision.
 set -uo pipefail
@@ -27,7 +30,6 @@ set -uo pipefail
 ROOT="${ORCH_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 WD="${ORCH_WATCHDOG_DIR:-$ROOT/.orchestrator/watchdog}"
 SESSION="${ORCH_TMUX_SESSION:-orch-auto}"
-FRAMING_DIR="$ROOT/scripts/lib/usage-framings"
 HALT="$ROOT/.orchestrator/HALT"
 # Typed into the pane RELATIVE to the session cwd ($ROOT): no absolute path ever reaches the
 # shell line, so a hostile checkout path cannot inject through it. pipe-pane still needs one
@@ -194,6 +196,34 @@ verify_target_session() {
 }
 refuse_foreign() { # $1 the refused action — a visible refusal, deduped by alert_raise
   alert_raise foreign-session "session is not verifiably the supervised one (identity mismatch or unreadable record); $1 refused"
+}
+
+# ---- checkout guard (requirement b, R-item1) ----------------------------------------------------
+# The auto-session shares the owner's $ROOT checkout, so a dirty tree or an unexpected branch means
+# the owner (or a crashed job) left in-progress work there that automation must not trample.
+# Read-only: this only inspects git, it never touches the working tree. Returns 0 (clean) only when
+# HEAD is on the expected branch AND the tree is clean; any doubt — including a git that cannot
+# answer (missing, broken, or unavailable) — returns non-zero so supervision fails toward standing
+# down. Exception: when git definitively reports that $ROOT is not a git repository at all, the
+# guard is not applicable to that checkout and returns 0.
+checkout_clean() {
+  local expect="${ORCH_EXPECT_BRANCH:-main}" out rc porcelain
+  # Single combined capture: on rc=0 out is the branch name (stdout); on rc!=0 out is the error
+  # message (stderr merged via 2>&1, English locale forced so the match is translation-independent).
+  # Using one call eliminates a retarget race between two separate git invocations.
+  out=$(LC_ALL=C LANG=C git -C "$ROOT" symbolic-ref --quiet --short HEAD 2>&1); rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
+    # Anchored prefix match: C-locale git emits "fatal: not a git repository ..." — this is the
+    # definitive "no repo here" answer and means the guard is N/A. An unanchored match would fire
+    # on a ROOT path that itself contains the substring "not a git repository" (e.g. a -C path error).
+    case "$out" in "fatal: not a git repository"*) return 0 ;; esac
+    return 1
+  fi
+  [ "$out" = "$expect" ] || return 1
+  # Capture both output AND exit code: a git status that silently exits 128 must not read as clean.
+  porcelain=$(git -C "$ROOT" status --porcelain 2>/dev/null) || return 1
+  [ -z "$porcelain" ] || return 1
+  return 0
 }
 
 # ---- lifecycle rotation (flag-gated) ------------------------------------------------------------
@@ -417,38 +447,21 @@ live_attempt() {
 }
 
 # ---- usage-limit classifier (behavior c only) ---------------------------------------------------
-# Consumes new transcript bytes each tick (consumed bytes can never re-arm anything). A framing
-# fixture is a sed -nE script in scripts/lib/usage-framings/*.sed that prints a UTC reset epoch
-# when — and only when — the raw CLI limit framing matches. The set ships EMPTY: until a real
-# capture is approved (follow-up row, gate 9), nothing classifies, and limit-LIKE text raises one
-# re-verification incident per pane generation. Failures here scope to the retry send alone.
-usage_unknown_once() { # $1 current generation, $2 message — at most one incident per generation
-  local f="$WD/ALERT-usage-unknown"
-  if [ -e "$f" ] && grep -qx "gen=$1" "$f"; then return 0; fi
-  rm -f "$f"
-  alert_raise usage-unknown "$2" "gen=$1"
-}
-check_cli_version() {
-  # Pinning is on the framing FIXTURE, never the version string (round-1 brief review, finding 1):
-  # a version change raises one re-verification incident and stops nothing.
-  ls "$FRAMING_DIR"/*.sed >/dev/null 2>&1 || return 0
-  local ver prev
-  ver=$(claude --version 2>/dev/null | head -1)
-  [ -n "$ver" ] || return 0
-  prev=$(get "$WD/claude-version")
-  if [ -n "$prev" ] && [ "$ver" != "$prev" ]; then
-    rm -f "$WD/ALERT-cli-version"
-    alert_raise cli-version "claude CLI changed ($prev -> $ver); re-verify the usage framing at the next natural limit"
-  fi
-  [ "$ver" = "$prev" ] || put "$WD/claude-version" "$ver"
-}
+# Blind timed retry (R-item1 descope): the watchdog does NOT parse the exact reset time. Parsing it
+# bought nothing a timer does not — a retry sent while the window is still closed is harmless (the
+# CLI reports the limit again and the next scan simply re-arms). So limit-like output on new
+# transcript bytes arms a wait for a fixed cadence (USAGE_RETRY_INTERVAL, default 1800s); when the
+# cadence elapses, active mode sends one continue nudge (or a dead pane respawns), observe mode
+# records a would-retry. Consumed transcript bytes can never re-arm anything, and an already-armed,
+# unexpired wait is never pushed forward, so one limit message arms exactly one cadence.
 scan_usage() {
   local log="$WD/transcript.log"
   [ -e "$log" ] || return 0
-  check_cli_version
   local size off gen
   size=$(stat -c %s "$log" 2>/dev/null) || return 0
   off=$(get "$WD/transcript.offset"); off=${off:-0}
+  [[ "$off" =~ ^[0-9]+$ ]] || { note "transcript.offset non-numeric ('$off'); treating as 0"; off=0; }
+  off=$(( 10#$off ))   # normalize: leading-zero strings (e.g. "08") are invalid octal under set -u
   gen=$(get "$WD/generation"); gen=${gen:-0}
   # Bounded transcript: keep the last 1MB once it passes 5MB. The offset moves WITH the kept
   # bytes — already-consumed content stays consumed (rescanning it could re-arm an old wait).
@@ -460,9 +473,9 @@ scan_usage() {
     size=$(stat -c %s "$log")
   fi
   if [ "$size" -lt "$off" ]; then
-    # The transcript shrank outside our own rotation: something else touched it. Fail closed for
-    # the classifier (consume nothing, keep the retry disabled), say so, supervise on.
-    usage_unknown_once "$gen" "transcript shrank outside rotation; classifier state reset"
+    # The transcript shrank outside our own rotation: something else touched it. Consume nothing
+    # this tick (bytes we can no longer place must not re-arm a wait), reset the offset, carry on.
+    note "transcript shrank outside rotation; offset reset, nothing classified this tick"
     put "$WD/transcript.offset" "$size"
     return 0
   fi
@@ -470,68 +483,84 @@ scan_usage() {
   local new
   new=$(tail -c +"$((off + 1))" "$log" | sed -E 's/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\x1b\][^\x07]*\x07//g')
   put "$WD/transcript.offset" "$size"
-  local fx epoch
-  for fx in "$FRAMING_DIR"/*.sed; do
-    [ -e "$fx" ] || continue
-    epoch=$(printf '%s\n' "$new" | sed -nE -f "$fx" | head -1)
-    [ -n "$epoch" ] || continue
-    local t; t=$(now)
-    if [[ "$epoch" =~ ^[0-9]{9,11}$ ]] && [ "$epoch" -gt $((t - 86400)) ] && [ "$epoch" -lt $((t + 604800)) ]; then
-      put "$WD/usage-wait" "$epoch $gen $(basename "$fx") $((off + 1)):$size"
-      note "recognized usage limit (framing $(basename "$fx")); waiting until epoch $epoch"
-    else
-      # Matched framing but a nonsense deadline: fail closed for the retry only.
-      usage_unknown_once "$gen" "approved framing produced an invalid reset epoch"
+  printf '%s\n' "$new" | grep -qiE 'usage limit|rate limit|limit reached|out of (usage|quota)' || return 0
+  # Never touch a current-generation wait — expired or not. Expiry is consumed by the send/respawn
+  # branch which rm's the file; only after that can a new banner arm a new cadence. Without this,
+  # limit banners accumulated before the first post-expiry tick would overwrite the expired epoch
+  # with a future one, deferring respawn/nudge indefinitely.
+  local w_epoch w_gen
+  if [ -e "$WD/usage-wait" ]; then
+    read -r w_epoch w_gen _ < "$WD/usage-wait" 2>/dev/null || true
+    if [[ "${w_epoch:-}" =~ ^[0-9]+$ ]] && [[ "${w_gen:-}" =~ ^[0-9]+$ ]] \
+       && [ "$w_gen" = "$gen" ]; then
+      return 0  # current-gen wait present; expiry is consumed by send/respawn, not by a new banner
     fi
-    return 0
-  done
-  if printf '%s\n' "$new" | grep -qiE 'usage limit|rate limit|limit reached|out of (usage|quota)'; then
-    usage_unknown_once "$gen" "limit-like output with no approved framing; retry stays disabled"
   fi
+  local t; t=$(now)
+  put "$WD/usage-wait" "$(( t + USAGE_RETRY_INTERVAL )) $gen"
+  note "usage limit detected; holding ~${USAGE_RETRY_INTERVAL}s (until $(( t + USAGE_RETRY_INTERVAL )))"
 }
 
-handle_usage_wait() {
-  [ -e "$WD/usage-wait" ] || return 0
-  local epoch gen fr cur
-  read -r epoch gen fr < "$WD/usage-wait" || true
+usage_wait_status() {
+  # Prints one of: brake (armed, cadence not yet elapsed) | expired (armed, elapsed) | none.
+  # A corrupt or stale-generation wait is discarded here as a side effect, so it can never reach a
+  # send branch (keeps the W6b/W7 semantics: discard, never obey).
+  [ -e "$WD/usage-wait" ] || { echo none; return 0; }
+  local epoch gen cur
+  read -r epoch gen _ < "$WD/usage-wait" 2>/dev/null || true
   cur=$(get "$WD/generation"); cur=${cur:-0}
   if ! [[ "${epoch:-}" =~ ^[0-9]+$ ]] || ! [[ "${gen:-}" =~ ^[0-9]+$ ]]; then
-    # A corrupt wait must not reach the send branch: discard it, disable the retry, say so.
     rm -f "$WD/usage-wait"
-    usage_unknown_once "$cur" "corrupt usage-wait state discarded; retry stays disabled"
-    return 0
+    alert_raise usage-corrupt "corrupt usage-wait state discarded; retry stays disarmed this generation"
+    echo none; return 0
   fi
-  # A new pane generation cannot inherit a previous generation's wait.
-  if [ "$gen" != "$cur" ]; then rm -f "$WD/usage-wait"; return 0; fi
-  [ "$(now)" -lt "$epoch" ] && return 0
+  if [ "$gen" != "$cur" ]; then rm -f "$WD/usage-wait"; echo none; return 0; fi
+  if [ "$(now)" -lt "$epoch" ]; then echo brake; else echo expired; fi
+}
+
+count_usage_retry() {
+  # Bounds blind retrying: a window longer than the cadence would otherwise retry in silence
+  # forever. Count consecutive retries (reset by a heartbeat — genuine progress means the retry
+  # worked) and raise ONE alert past the cap; supervision is never stopped, only surfaced.
+  local n; n=$(get "$WD/usage-retries")
+  [[ "$n" =~ ^[0-9]+$ ]] || { note "usage-retries non-numeric ('${n:-}'); treating as 0"; n=0; }
+  n=$(( 10#$n + 1 ))   # normalize: leading-zero strings (e.g. "08") are invalid octal under set -u
+  put "$WD/usage-retries" "$n"
+  [ "$n" -gt "$USAGE_RETRY_CAP" ] && alert_raise usage-stuck \
+    "usage limit has persisted across $n retries (~$(( n * USAGE_RETRY_INTERVAL / 60 ))min at ${USAGE_RETRY_INTERVAL}s cadence); the window may be longer than expected or the account is out of quota"
+}
+
+retry_usage_wait_alive() {
+  # The cadence elapsed while the pane is still alive (claude held the session at the limit banner
+  # instead of exiting). active mode sends the single continue nudge; the wait is consumed only
+  # AFTER a successful send (round-3 finding 2), so a deferred/refused/failed send stays armed for
+  # the next tick. observe mode records the would-retry and consumes it, sending nothing.
   if [ "$USAGE_RETRY_MODE" = "active" ]; then
     # LAST GATE — presence, HALT, then target identity LAST, HALT again: the authorization is the
-    # final external read before the send (extra-round review, finding 1), and the wait is
-    # consumed only AFTER a successful send (round-3 review, finding 2), so a deferred, refused,
-    # or failed retry stays armed for the next tick instead of being silently spent; the residual
-    # is one duplicate retry prompt if the rm itself fails, accepted and benign.
-    if user_claude_present; then note "a user claude appeared mid-tick; the post-reset retry stays armed"; return 0; fi
+    # final external read before the send (extra-round review, finding 1).
+    if user_claude_present; then note "a user claude appeared mid-tick; the usage retry stays armed"; return 0; fi
     halted && return 0
     local target
-    if ! target=$(verify_target_session); then refuse_foreign "post-reset retry"; return 0; fi
+    if ! target=$(verify_target_session); then refuse_foreign "usage retry"; return 0; fi
     target=${target##* }
     halted && return 0
     if tmux send-keys -t "$target" \
-         "The usage window has reset. Continue the pending orchestrator work; run scripts/watchdog heartbeat when you begin." Enter; then
+         "The usage limit may have cleared. Continue the pending orchestrator work; run scripts/watchdog heartbeat when you resume real work, and stop if the limit is still in effect." Enter; then
       rm -f "$WD/usage-wait"
+      count_usage_retry
       record_run
-      note "usage window reset; sent one retry prompt"
+      note "usage retry cadence elapsed; sent one continue prompt"
     else
-      note "send-keys failed for the post-reset retry; the wait stays armed, will retry next tick"
+      note "send-keys failed for the usage retry; the wait stays armed, will retry next tick"
     fi
   else
     # Observation mode acts on no session: presence defers consumption, HALT is re-checked after
     # the presence window, and only then is the wait consumed and recorded.
-    if user_claude_present; then note "a user claude appeared mid-tick; the post-reset retry stays armed"; return 0; fi
+    if user_claude_present; then note "a user claude appeared mid-tick; the usage retry stays armed"; return 0; fi
     halted && return 0
     rm -f "$WD/usage-wait"
     rm -f "$WD/ALERT-usage-would-retry"
-    alert_raise usage-would-retry "observation mode: usage window reset; a retry WOULD have been sent"
+    alert_raise usage-would-retry "observation mode: usage retry cadence elapsed; a retry WOULD have been sent"
   fi
 }
 
@@ -569,6 +598,10 @@ check() {
   [ -r "$WD/env" ] && . "$WD/env"
   IDLE_ALERT_SECONDS="${IDLE_ALERT_SECONDS:-21600}"
   USAGE_RETRY_MODE="${USAGE_RETRY_MODE:-observe}"
+  USAGE_RETRY_INTERVAL="${USAGE_RETRY_INTERVAL:-1800}"
+  [[ "$USAGE_RETRY_INTERVAL" =~ ^[0-9]+$ ]] || { note "USAGE_RETRY_INTERVAL non-numeric; falling back to 1800"; USAGE_RETRY_INTERVAL=1800; }
+  USAGE_RETRY_INTERVAL=$(( 10#$USAGE_RETRY_INTERVAL ))   # normalize: leading-zero strings are invalid octal
+  USAGE_RETRY_CAP="${USAGE_RETRY_CAP:-12}"
 
   halted && exit 0                  # immediately before opening the lock (round-2 review)
   exec 9>>"$WD/lock"
@@ -580,9 +613,9 @@ check() {
   # HALT is re-checked before the marker is touched — HALT precedence survives the detection
   # window. The marker exists so the journal says each flip once, not once per tick; alert
   # delivery still retries, because standby pauses supervision, never observability. last-run is
-  # untouched — a standby tick is not a run. Detection happens before anything in the tick spawns
-  # claude itself (check_cli_version runs only past this point), so the watchdog never stands
-  # down for its own version probe. Because entry detection goes stale while the tick reads the
+  # untouched — a standby tick is not a run. The watchdog never invokes a model itself (it is
+  # zero-quota bash), so nothing in a tick can be mistaken for its own claude. Because entry
+  # detection goes stale while the tick reads the
   # ledger and state, every mutating action below re-checks presence and then re-verifies the
   # target session's identity as the LAST external read before it acts — and the action itself
   # is bound to the verified session id, which tmux never reuses within a server's lifetime, so
@@ -601,6 +634,24 @@ check() {
   elif [ -e "$WD/standby" ]; then
     rm -f "$WD/standby"
     note "standby cleared: no user claude session running; supervision resumed"
+  fi
+
+  # Checkout guard (requirement b): after standby, before any session action. A dirty tree or an
+  # off-branch HEAD in the shared $ROOT checkout parks supervision exactly as a live owner session
+  # does — the owner left work in progress there, and the auto-session must not launch on top of
+  # it. The marker keeps the journal to one line per flip; alert delivery still retries; last-run
+  # is untouched (a parked tick is not a run). Cleared automatically once the tree is clean again.
+  if ! checkout_clean; then
+    if [ ! -e "$WD/standdown-dirty" ]; then
+      put "$WD/standdown-dirty" "$(now)"
+      alert_raise checkout-dirty "the $ROOT checkout is not verifiably clean on ${ORCH_EXPECT_BRANCH:-main} (dirty tree, off-branch HEAD, or git unavailable); supervision paused until it is"
+      note "standdown: checkout not clean/on-branch; supervision paused until it is"
+    fi
+    alert_sweep
+    exit 0
+  elif [ -e "$WD/standdown-dirty" ]; then
+    rm -f "$WD/standdown-dirty"
+    note "standdown cleared: checkout clean and on ${ORCH_EXPECT_BRANCH:-main}; supervision resumed"
   fi
 
   local state_line state ids attempt
@@ -682,14 +733,28 @@ check() {
     if ! session_exists; then
       launch_new                                                 # (a)
     else
+      # The transcript is on disk whether or not the pane is still alive, so classify FIRST in both
+      # branches: a limit-then-exit (claude printed the banner, then quit) must arm the retry
+      # cadence before the dead-pane branch would otherwise respawn straight into a closed window
+      # (the R-item1 design-bug fix). The armed wait then brakes respawn until the cadence elapses.
+      scan_usage
       case "$(pane_probe)" in
-        dead)
+        dead)                                                    # (b) + brake
           if [ -e "$WD/rotation-requested" ]; then
             rotation_respawn "$ids"
           else
-            respawn "$ids"
-          fi ;;                                                 # (b)
-        alive) scan_usage; handle_usage_wait ;;                  # (c)
+            case "$(usage_wait_status)" in
+              brake)   note "usage limit cadence armed; respawn deferred until it elapses" ;;
+              expired) rm -f "$WD/usage-wait"; respawn "$ids" ;; # cadence up: ordinary --resume recovery
+              *)       respawn "$ids" ;;                         # no wait: ordinary crash recovery
+            esac
+          fi ;;
+        alive)                                                   # (c)
+          case "$(usage_wait_status)" in
+            brake)   note "usage limit cadence armed; holding (no input) until it elapses" ;;
+            expired) retry_usage_wait_alive ;;
+            *)       : ;;                                        # live claude, no usage wait: nothing to do
+          esac ;;
         *)     note "pane liveness indeterminate; taking no session action this tick" ;;
       esac
     fi
@@ -703,12 +768,13 @@ case "${1:-check}" in
   check) check ;;
   heartbeat)
     # Written by the resumed session when it begins/completes REAL work (advisory: suppresses
-    # false idle alerts; it can never create, authorize, or gate work). Also resets the
-    # respawn-storm counter: recorded activity means the relaunches are working.
+    # false idle alerts; it can never create, authorize, or gate work). Also resets the respawn
+    # storm and usage-retry counters: recorded activity means the relaunches/retries are working.
     halted && exit 0
     mkdir -p "$WD"; chmod 700 "$WD"
     put "$WD/activity" "$(now)"
     put "$WD/respawns" 0
+    put "$WD/usage-retries" 0
     ;;
   *) echo "usage: watchdog [check|heartbeat]" >&2; exit 2 ;;
 esac
