@@ -89,14 +89,18 @@ if [ -z "$KIMI_BIN" ] || ! sudo test -f "$KIMI_BIN"; then
 fi
 echo "dispatcher-vetted kimi binary: $KIMI_BIN"
 
-# Round-3 review (high): grading a probe's STDOUT (or a marker file) is forgeable by a concurrent
-# same-UID codex-worker — it can write /proc/<pid>/fd/1 or signal the probe. Two defenses:
-#   (a) QUIESCENCE — refuse to run unless the worker UID is idle, so no concurrent worker exists
-#       to inject or signal (this is an owner-operated activation gate, not a live-dispatch check).
-#   (b) Verdicts come from the EXACT process exit status, reported owner-side by systemd/PID1
-#       (svc) or sudo (wdeny) — a signalled/killed/abnormal probe yields a non-expected code and
-#       FAILS CLOSED; forging a specific exit needs ptrace, which quiescence + NoNewPrivileges deny.
-if pgrep -u "$WORKER" >/dev/null 2>&1; then
+# Round-3/4 review (high): grading a probe's STDOUT (or a marker file) is forgeable by a
+# concurrent same-UID codex-worker (write /proc/<pid>/fd/1 or signal the probe). Two defenses:
+#   (a) QUIESCENCE — refuse unless the worker UID is idle, so no concurrent worker exists to
+#       inject or signal. Checked as ROOT (round-4: an operator-run pgrep can miss another UID's
+#       processes under /proc hidepid). This is an owner-operated activation gate: the owner
+#       stops dispatch first, so the check-to-drill TOCTOU is closed by procedure, not by luck.
+#   (b) Verdicts come from the EXACT process exit status (svc: systemd/PID1; direct: bash $?).
+#       A signalled child reports 128+sig, and the deny classifier below treats ONLY a clean
+#       normal-exit denial as a denial — a signalled or abnormal probe FAILS CLOSED. Forging a
+#       specific exit needs ptrace, which quiescence (no attacker present) closes. (NoNewPrivileges
+#       is NOT a ptrace defense — it only blocks privilege gain through execve.)
+if sudo -n pgrep -u "$WORKER" >/dev/null 2>&1; then
   echo "SKIP: $WORKER has running processes — run this gate with the worker UID quiescent (stop dispatch first); $PROHIBIT"
   exit 77
 fi
@@ -104,28 +108,35 @@ fi
 fails=0
 ok(){ echo "ok   $*"; }
 bad(){ echo "FAIL $*"; fails=$((fails+1)); }
-# A worker-run command that MUST be denied: wrap so success exits 9 (LEAK), denial exits 0.
-# Any other code (signalled/abnormal) is vacuous → fail closed, never accepted as a denial.
-wdeny(){ local desc="$1" cmd="$2"
-  sudo -n -u "$WORKER" bash -c "$cmd >/dev/null 2>&1 && exit 9 || exit 0"; local rc=$?
+# Round-4 review (high): `cmd && exit 9 || exit 0` mapped EVERY nonzero — including a signalled
+# child (128+sig) — to "denied", so a same-UID signal forged a false denial. Instead run the
+# command, capture its OWN exit, and classify inside the probe: leak (rc 0) -> 9, signalled or
+# abnormal (rc>=128) -> 8, a clean access failure (rc 1..127) -> 0. The classifier then accepts
+# ONLY 0 as a denial; 9 is a leak; anything else (incl. an outer-shell signal, which systemd/bash
+# report as >=128) is vacuous and fails closed. DENY_WRAP is appended after the probed command.
+DENY_WRAP='rc=$?; if [ $rc -eq 0 ]; then exit 9; elif [ $rc -ge 128 ]; then exit 8; else exit 0; fi'
+classify_deny(){ local desc="$1" rc="$2"
   case "$rc" in
     0) ok "$desc — denied";;
     9) bad "$desc (SUCCEEDED — isolation broken)";;
-    *) bad "$desc — probe abnormal (exit $rc); vacuous, not a denial";;
+    *) bad "$desc — probe abnormal/signalled (exit $rc); vacuous, not a denial";;
   esac; }
 
-echo "== K0 harness: positive control — sudo executes commands as $WORKER"
-if [ "$(sudo -n -u "$WORKER" bash -c 'echo -n live')" = live ] \
-   && sudo -n -u "$WORKER" bash -c 'exit 0'; then
-  ok "sudo -u $WORKER runs commands and its exit status reaches the owner (verdicts are meaningful)"
+echo "== K0 harness: positive control — worker commands run AND the exit channel distinguishes codes"
+# Prove BOTH that units run and that a NON-zero code is faithfully distinguished (round-4: a
+# harness that only checks exit 0 cannot tell a real denial from a lost channel).
+sudo -n -u "$WORKER" bash -c 'exit 0'; pc0=$?
+sudo -n -u "$WORKER" bash -c 'exit 9'; pc9=$?
+if [ "$pc0" -eq 0 ] && [ "$pc9" -eq 9 ]; then
+  ok "worker exit status reaches the owner exactly (0->0, 9->9; verdicts are meaningful)"
 else
-  echo "FAIL positive control: cannot run commands as $WORKER — every denial would be vacuous; $PROHIBIT"
+  echo "FAIL positive control: worker exit channel is lossy (0->$pc0, 9->$pc9); $PROHIBIT"
   exit 1
 fi
 
 echo "== K1: codex-worker is denied the operator's kimi credential (DAC)"
-wdeny "read $OP_CRED" "cat '$OP_CRED'"
-wdeny "traverse $OPERATOR_HOME/.kimi-code" "ls '$OPERATOR_HOME/.kimi-code'"
+sudo -n -u "$WORKER" bash -c "cat '$OP_CRED' >/dev/null 2>&1; $DENY_WRAP"; classify_deny "read $OP_CRED" $?
+sudo -n -u "$WORKER" bash -c "ls '$OPERATOR_HOME/.kimi-code' >/dev/null 2>&1; $DENY_WRAP"; classify_deny "traverse $OPERATOR_HOME/.kimi-code" $?
 
 echo "== K2: the worker's provisioned kimi state is EXACTLY the required tree (no extra/foreign entries)"
 # %y is the type: d/f/l/... — anything but the four expected regular entries fails, INCLUDING a
@@ -168,12 +179,15 @@ expect(){ local unit="$1" want="$2" desc="$3"; shift 3
   svc "$unit" "$@"; local rc=$?
   if [ "$rc" -eq "$want" ]; then ok "$desc"; else bad "$desc (exit $rc, wanted $want)"; fi; }
 
-echo "== K3 harness: positive control — a hardened probe unit runs and its exit status reaches the owner"
-svc w0 true
-if [ $? -eq 0 ]; then
-  ok "hardened probe unit runs and propagates exit status (verdicts below are meaningful)"
+echo "== K3 harness: positive control — a hardened probe unit runs AND distinguishes exit codes"
+# Round-4 review (medium): exercise both a 0 and a non-0 code so a later nonzero verdict is
+# proven meaningful (systemd propagates ordinary exit codes exactly and maps signals distinctly).
+svc w0 bash -c 'exit 0'; sc0=$?
+svc w9 bash -c 'exit 9'; sc9=$?
+if [ "$sc0" -eq 0 ] && [ "$sc9" -eq 9 ]; then
+  ok "hardened probe unit runs and propagates exit status exactly (0->0, 9->9)"
 else
-  bad "positive control: probe unit did not run/propagate — every service verdict would be vacuous"
+  bad "positive control: service exit channel is lossy (0->$sc0, 9->$sc9) — service verdicts would be vacuous"
   echo; echo "FAIL: kimi isolation drills (harness broken; $fails failed); $PROHIBIT"; exit 1
 fi
 
@@ -186,13 +200,10 @@ expect k3 0 "worker kimi state readable and writable inside the service" \
 sudo rm -f "$WORKER_HOME/.kimi-code/.drill-write"
 
 echo "== K4: hardened service cannot reach the operator's kimi credential"
-# exit 0 = denied (cat failed); exit 9 = LEAK; anything else = abnormal → fail closed.
-svc k4 bash -c "cat '$OP_CRED' >/dev/null 2>&1 && exit 9 || exit 0"; rc=$?
-case "$rc" in
-  0) ok "service read of operator kimi credential — denied";;
-  9) bad "service read of operator kimi credential (SUCCEEDED — isolation broken)";;
-  *) bad "K4 probe abnormal (exit $rc); vacuous, not a denial";;
-esac
+# Same signal-safe classification as K1 (round-4): leak->9, signalled/abnormal->8, clean
+# denial->0; only a clean 0 is accepted as a denial.
+svc k4 bash -c "cat '$OP_CRED' >/dev/null 2>&1; $DENY_WRAP"
+classify_deny "service read of operator kimi credential" $?
 
 echo "== K5: the DISPATCHER-VETTED native kimi binary executes under service hardening"
 # The resolved real binary bind-mounted RO to /opt/kimi/kimi, argv execs the destination —
