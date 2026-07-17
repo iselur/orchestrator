@@ -15,7 +15,7 @@ Invariants (CLAUDE.md):
     needs_network hard-refused (residual risk 13-B).
   - Orchestrator commits the worktree state (decision G1-A/C): the worker never touches git.
   - Immutable evidence: new attempt = new dir, never overwrite. Atomic state via tmp+rename+flock.
-  - Structured error classes. MAX_PARALLEL=2 (Gate 3 part 3): unique branch/worktree per attempt,
+  - Structured error classes. MAX_PARALLEL=3 (Gate 3 part 3): unique branch/worktree per attempt,
     atomic slot claim; a base that moved while an attempt ran (a sibling integrated) is refused at
     push (stale_base) and re-run by the orchestrator as a fresh attempt. No auto-remediation.
   - Even a launch that crashes at startup leaves a durable record.
@@ -4308,7 +4308,7 @@ def cmd_merge(attempt_id: str) -> None:
 
     # PR state must match exactly what was reviewed.
     pv = run(["gh", "pr", "view", pr, "--json",
-              "state,isDraft,headRefOid,baseRefName,mergeable,mergeStateStatus,statusCheckRollup"])
+              "state,isDraft,headRefOid,baseRefName,statusCheckRollup"])
     if pv.returncode != 0:
         die(f"gh pr view {pr} failed: {pv.stderr.strip()}", 14)
     info = json.loads(pv.stdout)
