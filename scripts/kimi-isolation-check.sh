@@ -149,23 +149,39 @@ sudo -n -u "$WORKER" bash -c "ls '$OPERATOR_HOME/.kimi-code' >/dev/null 2>&1; $D
 echo "== K2: the worker's provisioned kimi state is EXACTLY the required tree (no extra/foreign entries)"
 # %y is the type: d/f/l/... — anything but the four expected regular entries fails, INCLUDING a
 # symlink (which the credential precheck's `test -f` would have followed — round-1 review, high 3).
-# `find` errors (permission/vanished) print to stderr and are turned into an explicit failure;
-# zero output is NOT silently treated as success.
+# Round-6 review (high): records are NUL-terminated and the path is the verbatim REMAINDER after
+# the three fixed metadata fields (not awk $4) — a planted name with embedded whitespace
+# ("config.toml attacker-suffix") is preserved intact and cannot collapse onto an expected entry.
+# `find` errors (permission/vanished) print to stderr and are an explicit failure; zero output is
+# NOT silently treated as success.
 k2_err="$(mktemp)"
-mapfile -t ST < <(sudo find "$WORKER_HOME/.kimi-code" -mindepth 0 \
-                    -printf '%y %m %u:%g %P\n' 2>"$k2_err"; echo "rc=$?")
-find_rc="${ST[-1]#rc=}"; unset 'ST[-1]'
+mapfile -d '' -t REC < <(sudo find "$WORKER_HOME/.kimi-code" -mindepth 0 \
+                           -printf '%y %m %u:%g %P\0' 2>"$k2_err")
+find_rc=$?
 if [ "$find_rc" != 0 ] || [ -s "$k2_err" ]; then
   bad "find over the worker kimi state errored (rc=$find_rc): $(cat "$k2_err" 2>/dev/null)"
 fi
 rm -f "$k2_err"
-# Exact membership: the root dir (empty %P), config.toml, credentials dir, and the credential.
+# Each NUL record is "TYPE MODE OWNER:GROUP <path>". TYPE (%y, one char), MODE (%m, octal), and
+# OWNER:GROUP contain no spaces, so parameter expansion peels the three fixed fields and keeps the
+# path as the VERBATIM remainder — including embedded spaces OR newlines (a `read` here-string
+# would truncate a newline-bearing name and re-open the false-PASS hole). Any unexpected byte in a
+# planted name yields a line that matches no expected entry, so the set compare fails closed.
+have_lines=()
+for r in "${REC[@]}"; do
+  ty="${r%% *}"; rest="${r#* }"
+  mo="${rest%% *}"; rest="${rest#* }"
+  og="${rest%% *}"; path="${rest#* }"
+  # The root entry has an empty %P: its record ends "OWNER:GROUP " so `path` peels to "".
+  [ "$r" = "$ty $mo $og " ] && path=""
+  have_lines+=("$ty $mo $og|$path")
+done
+have="$(printf '%s\n' "${have_lines[@]}" | LC_ALL=C sort)"
 want="$(printf '%s\n' \
-  "d 700 :$WORKER:$WORKER" \
-  "f 600 config.toml:$WORKER:$WORKER" \
-  "d 700 credentials:$WORKER:$WORKER" \
-  "f 600 credentials/kimi-code.json:$WORKER:$WORKER" | sort)"
-have="$(printf '%s\n' "${ST[@]}" | awk '{print $1" "$2" "$4":"$3}' | sort)"
+  "d 700 $WORKER:$WORKER|" \
+  "f 600 $WORKER:$WORKER|config.toml" \
+  "d 700 $WORKER:$WORKER|credentials" \
+  "f 600 $WORKER:$WORKER|credentials/kimi-code.json" | LC_ALL=C sort)"
 if [ "$have" = "$want" ]; then
   ok "worker kimi state is exactly {700 ., 600 config.toml, 700 credentials, 600 credential}, owned $WORKER"
 else
