@@ -300,9 +300,10 @@ class KimiWorker:
     top-level -p prompt (no exec subcommand), -m takes the CLI's provider alias — the one
     worker whose CLI does NOT accept the relay model id verbatim, so build_argv consumes the
     frozen cli_aliases (dispatch.py passes them in the owner-gated slice 3) — stream-json
-    output, and -y auto-approval (kimi has no inner sandbox and its permission model otherwise
-    blocks on interactive approval, probe F; the hardened systemd service is the sole
-    confinement). No effort flag: K3 supports only kimi's own "max". State home is fixed at
+    output, and NO approval flag: kimi 0.26.0 prompt mode auto-approves on its own and hard-errors
+    on -y/--auto beside -p ("Cannot combine --prompt with --yolo", SPEC-900-1 re-probe 2026-07-18,
+    superseding probe F; the hardened systemd service remains the sole confinement — kimi has no
+    inner sandbox). No effort flag: K3 supports only kimi's own "max". State home is fixed at
     $HOME/.kimi-code (no KIMI_HOME-style override exists, probe A), so the isolated service
     needs only that path writable and no extra environment. UNISOLATED runs are refused, fail
     closed: the CLI cannot set its own working directory (no --cd — the worker would run in
@@ -327,7 +328,7 @@ class KimiWorker:
                              f"never relay model ids); the frozen cli_aliases carries "
                              f"{model!r}; fail closed")
         return [*(argv_prefix or []), "-p", prompt,
-                "-m", model, "--output-format", "stream-json", "-y"]
+                "-m", model, "--output-format", "stream-json"]
 
     def worker_env(self, operator_home, operator_user):
         """Scrubbed environment for the UNISOLATED path, kept total because dispatch.py builds

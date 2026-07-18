@@ -178,16 +178,17 @@ for bad in ("main", "ready-for-main", "codex/SPEC-000-2", "codex/SPEC-000-1x",
 
 # ---- kimi worker adapter (kimi vendor, slice 2) --------------------------------------------
 # Mechanics per .orchestrator/evidence/kimi-probes.md: -p argv prompt (no exec subcommand),
-# -m takes the CLI provider alias from the frozen cli_aliases, stream-json output, -y
-# auto-approval (no inner sandbox; the hardened service is the sole confinement), no effort
+# -m takes the CLI provider alias from the frozen cli_aliases, stream-json output, NO
+# approval flag (0.26.0 prompt mode auto-approves and refuses -y/--auto beside -p —
+# SPEC-900-1 re-probe 2026-07-18; the hardened service is the sole confinement), no effort
 # flag (K3 carries kimi's own effort model), and NO unisolated mode at all.
 kw = va.get_worker_adapter("kimi")
 KPREFIX = ["/home/codex-worker/.kimi-code/bin/kimi"]
 KAL = {"kimi-k3": "kimi-code/k3"}
-check("kimi isolated argv: prefix, -p prompt, provider alias, stream-json, -y",
+check("kimi isolated argv: prefix, -p prompt, provider alias, stream-json, no approval flag",
       kw.build_argv("kimi-k3", "max", WT, PROMPT, isolated=True, argv_prefix=KPREFIX,
                     cli_aliases=KAL)
-      == [*KPREFIX, "-p", PROMPT, "-m", "kimi-code/k3", "--output-format", "stream-json", "-y"])
+      == [*KPREFIX, "-p", PROMPT, "-m", "kimi-code/k3", "--output-format", "stream-json"])
 kav = kw.build_argv("kimi-k3", "max", WT, PROMPT, isolated=True, argv_prefix=KPREFIX,
                     cli_aliases=KAL)
 check("kimi argv carries no codex flags (exec/--cd/--sandbox/--json/effort) and no worktree path",
