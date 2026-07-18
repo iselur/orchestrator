@@ -36,9 +36,9 @@ Run `./scripts/dispatch reconcile`; resume from state files, never ask the owner
 6. **Cross-checking earns its cost** on ideas, briefs, and plans — a plan leaves plan mode only
    after `scripts/review --author claude` completes and its findings are answered under rule 3;
    deterministic checks and tests outrank model agreement elsewhere — agreement is not evidence.
-7. **Maximal delegation:** the orchestrator delegates every delegable task to a worker or to parallel subagents — cheap subagents in isolated worktrees are the
-   default, several at once when the pieces are independent — and works directly only when none fits or the task is its own (dispatch, review, the trust boundary).
-   Nothing reviews its own work; the owner sets role models and vendors in scripts/models.json.
+7. **Maximal delegation:** the orchestrator delegates every delegable task to a worker by default; what a worker cannot take for architectural reasons (it needs the
+   orchestrator's harness) goes to parallel subagents in isolated worktrees, several at once when the pieces are independent; the orchestrator works directly only on
+   its own tasks (dispatch, review, the trust boundary). Nothing reviews its own work; the owner sets role models and vendors in scripts/models.json.
 8. **Code discipline:** the simplest, cleanest solution that works, held to a deletion test at brief and
    diff review: anything the approved outcome, existing external contracts, and named safety invariants
    can be met at least as simply without is omitted — tests, symmetry, or hypothetical future consumers
