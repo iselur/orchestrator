@@ -10,11 +10,11 @@ the role table here; machines read the key in each row's "set in" column — `ro
 |---|---|---|
 | owner | — | approves specs, merges `main` |
 | orchestrator | `~/.claude/settings.json` → `model` | Claude Code on this box; dispatches, reviews worker diffs and spec-author plans, reports |
-| utility subagent | `~/.claude/settings.json` → `env.CLAUDE_CODE_SUBAGENT_MODEL` | in-session search and exploration; the BUILD receipt records the harness pin and `dispatch continue` requires it |
-| spec author | `roles.spec_author` | writes briefs via `scripts/codex-plan`, which invokes codex and kimi only — a claude spec_author passes validation, then codex-plan refuses it |
+| utility_subagent | `~/.claude/settings.json` → `env.CLAUDE_CODE_SUBAGENT_MODEL` | in-session search and exploration; the BUILD receipt records the harness pin and `dispatch continue` requires it |
+| spec_author | `roles.spec_author` | writes briefs via `scripts/codex-plan`, which invokes codex and kimi only — a claude spec_author passes validation, then codex-plan refuses it |
 | worker | approval pin → `roles.worker` | BUILD phase: a detached external CLI, or an in-session Claude subagent graded by `dispatch continue` |
-| bound reviewer | approval pin → `roles.bound_reviewer` | reviews worker diffs, never its own work; a retired reviewer fails closed and the owner updates the default by hand (2026-07-17 — no automated failover) |
-| artifact reviewer | `roles.orchestrator_artifact_reviewer` | cross-checks orchestrator-authored artifacts via `scripts/review` |
+| bound_reviewer | approval pin → `roles.bound_reviewer` | reviews worker diffs, never its own work; a retired reviewer fails closed and the owner updates the default by hand (2026-07-17 — no automated failover) |
+| orchestrator_artifact_reviewer | `roles.orchestrator_artifact_reviewer` | cross-checks orchestrator-authored artifacts via `scripts/review`; not invoked by `dispatch.py` |
 | — dead keys — | `roles.orchestrator`, `roles.utility_subagent` | validated, never routed; the live values are the `settings.json` rows above. Deleting them fails config validation |
 
 ## What this repo is
