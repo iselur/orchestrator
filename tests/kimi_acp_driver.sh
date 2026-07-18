@@ -60,9 +60,10 @@ if MODE == "nojsonrpc":
     send({"id": m["id"], "result": {"protocolVersion": 1, "agentCapabilities": {}}})
     drain()
 send({"jsonrpc": "2.0", "id": True if MODE == "boolid" else m["id"],
-      "result": {"protocolVersion": 99 if MODE == "badversion" else 1,
+      "result": {"protocolVersion": 99 if MODE == "badversion" else
+                 (1.0 if MODE == "floatpv" else 1),
                  "agentCapabilities": {}}})
-if MODE == "badversion":
+if MODE in ("badversion", "floatpv"):
     drain()
 if MODE == "malformed":
     sys.stdout.write("this is not json\n"); sys.stdout.flush()
@@ -109,6 +110,9 @@ m = recv()  # session/set_model
 if MODE == "modelerr":
     send({"jsonrpc": "2.0", "id": m["id"],
           "error": {"code": -32603, "message": "model not configured"}})
+    drain()
+if MODE == "nullerr":
+    send({"jsonrpc": "2.0", "id": m["id"], "error": None})
     drain()
 send({"jsonrpc": "2.0", "id": m["id"], "result": {}})
 if MODE == "negecho":
@@ -208,6 +212,15 @@ case("JSON-RPC error on prompt fails closed", r["effective_status"] != 0
 r = run("modelerr")
 case("JSON-RPC error on set_model fails closed at that stage", r["effective_status"] != 0
      and r["failure"] == "jsonrpc_error" and r["stage"] == "session/set_model", r)
+
+r = run("nullerr")
+case("r4: null error object is malformed, never counted as a model rejection",
+     r["effective_status"] != 0 and r["failure"] == "malformed_frame"
+     and r["stage"] == "session/set_model", r)
+
+r = run("floatpv")
+case("r4: float protocolVersion 1.0 is rejected", r["effective_status"] != 0
+     and r["failure"] == "protocol_version", r)
 
 r = run("noconfirm")
 case("missing read-back no longer blocks, and the default stays visible as evidence",

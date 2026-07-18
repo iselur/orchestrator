@@ -191,7 +191,11 @@ class _Session:
             if msg.get("id") != rid:
                 raise ProtocolFailure("unexpected_response_id", repr(msg.get("id")))
             if "error" in msg:
-                raise ProtocolFailure("jsonrpc_error", json.dumps(msg["error"])[:300])
+                err = msg["error"]
+                if not (isinstance(err, dict) and type(err.get("code")) is int
+                        and isinstance(err.get("message"), str)):
+                    raise ProtocolFailure("malformed_frame", "malformed error object")
+                raise ProtocolFailure("jsonrpc_error", json.dumps(err)[:300])
             result = msg.get("result")
             if not isinstance(result, dict):
                 raise ProtocolFailure("malformed_frame", "non-object result")
@@ -230,7 +234,7 @@ def drive(proc, *, prompt_text, cwd, model_alias, frame_sink, deadline_s, mode_i
                                                         "writeTextFile": False}}},
                          deadline_ts)
         pv = init.get("protocolVersion")
-        if isinstance(pv, bool) or pv != PROTOCOL_VERSION:
+        if type(pv) is not int or pv != PROTOCOL_VERSION:
             raise ProtocolFailure("protocol_version", repr(pv))
         stage = "session/new"
         new = s.request("session/new", {"cwd": cwd, "mcpServers": []}, deadline_ts)
@@ -340,7 +344,8 @@ def _main():
         unit=f"kimiacp-{args.case}-{os.getpid()}", argv=[*argv_prefix, "acp"],
         cwd=args.workdir,
         rw_paths=[args.workdir, str(dispatch.WORKER_HOME / ".kimi-code")],
-        private_network=False, ceiling_s=args.ceiling, binds=binds)
+        private_network=False, ceiling_s=args.ceiling, binds=binds,
+        slice_name=dispatch.attempt_slice(f"acpcheck-{args.case}-{os.getpid()}"))
     (raw / "argv.json").write_text(json.dumps(cmd, indent=1))
     if any(tag in el for el in cmd):
         print("FAIL: prompt material leaked into argv")
