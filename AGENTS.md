@@ -1,20 +1,22 @@
 # AGENTS.md — conventions and commands
 
 Referenced by [CLAUDE.md](CLAUDE.md), which holds the operating rules in terms of ROLES. Humans read
-the role table here; machines read `scripts/models.json` (roles, CLI aliases, vendor map).
-A model swap is one edit there, never to the rulebook; a new model also adds its vendor_map line.
+the role table here; machines read the file in each row's "set in" column — never assume one file
+holds them all. A model swap is one edit there, never to the rulebook; a new model in
+`scripts/models.json` also adds its vendor_map line.
 
-## Who plays which role (today)
+## Who plays which role
 
-| Role | Today | Note |
+| Role | Set in | Note |
 |---|---|---|
-| owner | the human | approves specs, merges `main` |
-| orchestrator | Claude Code on this box (Fable 5 high; the owner flips settings.json to Opus 4.8 at Fable retirement) | dispatches, reviews worker diffs, reports |
-| worker | per `scripts/models.json`: Codex CLI (`gpt-5.6-luna`) detached, or a Claude subagent in-session | BUILD phase; a subagent BUILD is graded by `dispatch continue` |
-| reviewer | per `scripts/models.json` (bound reviewer) | never reviews its own work |
-
-Bound reviewer retirement: a retired reviewer model fails its review fail-closed; the owner flips
-`scripts/models.json` by hand (owner decision 2026-07-17 — no automated failover).
+| owner | — | approves specs, merges `main` |
+| orchestrator | `~/.claude/settings.json` → `model` | Claude Code on this box; dispatches, reviews worker diffs and Codex-authored plans, reports |
+| utility subagent | `~/.claude/settings.json` → `CLAUDE_CODE_SUBAGENT_MODEL` | in-session search and exploration; `dispatch continue` records the pin on a subagent BUILD |
+| spec author | `scripts/models.json` | writes briefs via `scripts/codex-plan`, which only implements codex and kimi invocation — any other vendor is settable but dies at launch |
+| worker | `scripts/models.json` | BUILD phase, Codex CLI detached or a Claude subagent in-session; a subagent BUILD is graded by `dispatch continue` |
+| bound reviewer | `scripts/models.json` | reviews worker diffs, never its own work; a retired model fails fail-closed and the owner flips the file by hand (2026-07-17 — no automated failover) |
+| artifact reviewer | `scripts/models.json` | reviews Claude-authored artifacts via `scripts/review` |
+| — dead keys — | `scripts/models.json` `roles.orchestrator`, `roles.utility_subagent` | validated, never routed; the live values are the `settings.json` rows above. Deleting them fails config validation |
 
 ## What this repo is
 
@@ -42,8 +44,7 @@ untouched → in scope → tests actually ran → bound review), and opens PRs t
 
 ## Codex on this box
 
-- Model split (from `scripts/models.json`): worker BUILD `gpt-5.6-luna`; plans and reviews `gpt-5.6-sol`.
-- Invocation: `codex exec -m <model per split above> -c model_reasoning_effort=high
+- Invocation: `codex exec -m <model per the role table> -c model_reasoning_effort=high
   --sandbox read-only --skip-git-repo-check - <prompt.txt` — prompt on stdin always (argv dies
   over 130KB). Web search: `-c tools.web_search=true`. Standard tier: never set `service_tier` (owner cost decision 2026-07-16).
 - Consultations run detached (background or `systemd-run --user`) and may legitimately take hours —
@@ -52,9 +53,8 @@ untouched → in scope → tests actually ran → bound review), and opens PRs t
   `bwrap: loopback: Failed RTM_NEWADDR`; proof: `tests/worker_userns.sh`). Inlining context is a
   choice now, not a requirement — the bound reviewer still gets spec + diff + evidence only, never
   a live checkout. The final answer is recoverable from the `--json` stream (last `agent_message`).
-- Reviews of **Claude-authored** work go through `scripts/review` (reviewer = Codex; needs
-  `--author`, refuses Codex-authored artifacts, counts rounds, refuses a sixth). Codex-authored work
-  is reviewed by Claude — worker diffs by the bound reviewer in the dispatcher, plans in-session —
-  under the same five-round cap.
+- Reviews of **Claude-authored** work go through `scripts/review` (needs `--author`, refuses
+  same-vendor artifacts, counts rounds, refuses a sixth). Codex-authored work is reviewed by Claude
+  per the role table, under the same five-round cap.
 - Plans go through `scripts/codex-plan --brief` (cap 400; refuses a brief missing any required
   section); the no-flag standard tier remains usable. Trigger: CLAUDE.md rule 5.
