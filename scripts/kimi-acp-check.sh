@@ -5,7 +5,7 @@
 # sudo systemd-run --pipe command the worker launch path executes), that:
 #   --smoke           a full ACP session works end to end: initialize → session/new →
 #                     set_model to the frozen kimi-k3 alias (config_option_update read-back
-#                     confirmed) → set_mode yolo → session/prompt → end_turn, AND the worker
+#                     asserted as evidence) → set_mode yolo → session/prompt → end_turn, AND the worker
 #                     actually wrote a file inside its confined workdir (yolo self-approval
 #                     works under the hardening).
 #   --prompt-bytes N  a prompt of ≥N bytes travels inside a stdin frame — never argv, so no
