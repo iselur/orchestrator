@@ -33,9 +33,11 @@ STUB
 chmod +x "$tmp/bin/codex"
 
 # Stub kimi: emits a valid stream-json response with an assistant content line. The content is
-# what the recovery logic extracts and writes to the round file.
+# what the recovery logic extracts and writes to the round file. When KIMI_INVOKED_MARKER is
+# set, creates that file so the byte-limit test can prove kimi was NOT called.
 cat >"$tmp/bin/kimi" <<'STUB'
 #!/usr/bin/env bash
+[[ -z ${KIMI_INVOKED_MARKER:-} ]] || : >"$KIMI_INVOKED_MARKER"
 # consume all flags; the real kimi accepts -p/-m/--output-format but we ignore them here
 printf '{"role":"user","content":"prompt"}\n'
 printf '{"role":"assistant","content":"stub kimi verdict"}\n'
@@ -111,17 +113,22 @@ grep -q 'stub kimi verdict' .orchestrator/reviews/kimi-dispatch-claude/round-1.m
   || bad "round output not from stub kimi (stream recovery failed or wrong binary)"
 
 # ---- (e) byte-limit refusal: prompt > 120000 bytes refused before kimi is invoked -----------
+# Arm the invocation marker: if the kimi stub runs, it creates this file.
+export KIMI_INVOKED_MARKER="$tmp/kimi_invoked"
+rm -f "$KIMI_INVOKED_MARKER"
 big_prompt=$(python3 -c "print('x' * 120001)")
-scripts/review --topic kimi-byte-limit --author claude \
-  --context claude-note.md "$big_prompt" >/dev/null 2>&1
+refusal_stderr=$(scripts/review --topic kimi-byte-limit --author claude \
+  --context claude-note.md "$big_prompt" 2>&1 >/dev/null)
 rc=$?
 [ "$rc" != 0 ] && ok "kimi reviewer refuses a prompt over 120000 bytes (exit $rc)" \
   || bad "kimi byte-limit refusal did not refuse an oversized prompt"
+echo "$refusal_stderr" | grep -q '120000' \
+  && ok "refusal diagnostic mentions the 120000-byte limit" \
+  || bad "refusal diagnostic does not mention 120000 (wrong exit path satisfied the rc check)"
 [ -f .orchestrator/reviews/kimi-byte-limit/round-1.md ] \
   && bad "byte-limit refusal still wrote a round file" \
   || ok "byte-limit refusal writes no round file"
-# Verify kimi was NOT invoked (the argv guard fires before any kimi call).
-[ -f "$tmp/kimi_invoked" ] \
+[ -f "$KIMI_INVOKED_MARKER" ] \
   && bad "kimi binary was invoked despite the byte-limit guard" \
   || ok "kimi binary not invoked (byte-limit guard fires first)"
 
