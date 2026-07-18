@@ -2817,7 +2817,10 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
                       f"(registered mode {worker_adapter.mode!r}) together with "
                       f"worker_mode=external-cli — corrupt launch record; fail closed — "
                       f"no worker was invoked")
-    with open(raw / "events.jsonl", "w") as ev, open(raw / "worker-stderr.txt", "w") as er:
+    # events.jsonl is opened BINARY: kimi_acp.drive() writes raw frame bytes to it (a
+    # text-mode sink killed the reader thread and hung SPEC-901 to its ceiling); every
+    # other use is fd-level subprocess stdout, where the mode is irrelevant.
+    with open(raw / "events.jsonl", "wb") as ev, open(raw / "worker-stderr.txt", "w") as er:
         if iso:
             # D5: worker runs as codex-worker in a hardened system service. Codex's own sandbox is
             # OFF (-s danger-full-access) because it won't construct under the bind-mounted UID;
