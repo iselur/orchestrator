@@ -72,11 +72,9 @@ r2 = d.resolve_launch_models({}, cfg2)
 check("codex worker freezes worker_mode=external-cli at resolution",
       r2["worker_vendor"] == "codex" and r2["worker_mode"] == "external-cli")
 cfg3 = json.loads(json.dumps(CFG)); cfg3["roles"]["worker"]["model"] = "claude-fable-5"
-try:
-    d.resolve_launch_models({}, cfg3)
-    check("claude worker == reviewer model still refuses (self-review)", False)
-except SystemExit:
-    check("claude worker == reviewer model still refuses (self-review)", True)
+r3 = d.resolve_launch_models({}, cfg3)
+check("claude worker == reviewer model resolves as subagent (owner decision 2026-07-18)",
+      r3["worker_mode"] == "subagent" and r3["reviewer_model"] == "claude-fable-5")
 
 # ---- status vocabulary -----------------------------------------------------------------------
 check("awaiting_build counts as a LIVE status (claim_slot concurrency, reconcile)",
