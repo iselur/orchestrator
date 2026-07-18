@@ -247,6 +247,12 @@ check("kimi recovery concatenates ACP agent_message_chunk text frames, skipping 
       and kw.recover_last_message(kraw, False) == "first KIMI-LAST")
 check("kimi recovery with no capture is empty, not an error",
       kw.recover_last_message(pathlib.Path(tempfile.mkdtemp()), True) == "")
+slraw = pathlib.Path(tempfile.mkdtemp())
+(slraw / "events.jsonl").write_text(
+    json.dumps({"role": "system", "content": "sys"}) + "\n"
+    + json.dumps({"role": "assistant", "content": "legacy-plan"}) + "\n")
+check("kimi recovery falls back to last stream-json assistant line when no ACP chunks (codex-plan -p path)",
+      kw.recover_last_message(slraw, True) == "legacy-plan")
 check("kimi zero exit classifies as completion (None)",
       kw.classify_error(0, "", kraw) is None)
 check("kimi 429/rate-limit classifies as quota (best-effort, probe E unobserved)",

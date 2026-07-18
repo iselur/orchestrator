@@ -355,36 +355,44 @@ class KimiWorker:
         return resolve_runtime()
 
     def recover_last_message(self, raw_dir, isolated):
-        """The worker's final message: concatenated text from ACP session/update
-        agent_message_chunk frames in the captured stream (events.jsonl), skipping malformed
-        lines — MESSAGE RECOVERY, not a gate. In the ACP transport the authoritative value
-        is drive()'s final_message; this fallback is kept for slice-3 cleanup."""
+        """The worker's final message from events.jsonl — MESSAGE RECOVERY, not a gate.
+        Primary: concatenate ACP session/update agent_message_chunk text frames (isolated
+        worker path via kimi_acp.drive; authoritative value is drive()'s final_message,
+        so this is a fallback kept for slice-3 cleanup).
+        Fallback: last line with role=="assistant" and string content (stream-json from
+        'kimi -p', used by scripts/codex-plan; dies with slice 3 once -p is removed)."""
         chunks = []
+        last_assistant = None
         try:
             for line in (raw_dir / "events.jsonl").read_text().splitlines():
                 try:
                     e = json.loads(line)
                 except Exception:
                     continue
-                if not isinstance(e, dict) or e.get("method") != "session/update":
+                if not isinstance(e, dict):
                     continue
-                params = e.get("params")
-                if not isinstance(params, dict):
-                    continue
-                update = params.get("update")
-                if not isinstance(update, dict):
-                    continue
-                if update.get("sessionUpdate") != "agent_message_chunk":
-                    continue
-                content = update.get("content")
-                if not isinstance(content, dict) or content.get("type") != "text":
-                    continue
-                text = content.get("text")
-                if isinstance(text, str):
-                    chunks.append(text)
+                # ACP path: session/update agent_message_chunk
+                if e.get("method") == "session/update":
+                    params = e.get("params")
+                    if not isinstance(params, dict):
+                        continue
+                    update = params.get("update")
+                    if not isinstance(update, dict):
+                        continue
+                    if update.get("sessionUpdate") != "agent_message_chunk":
+                        continue
+                    content = update.get("content")
+                    if not isinstance(content, dict) or content.get("type") != "text":
+                        continue
+                    text = content.get("text")
+                    if isinstance(text, str):
+                        chunks.append(text)
+                # Legacy stream-json path (codex-plan -p transport; dies with slice 3)
+                elif e.get("role") == "assistant" and isinstance(e.get("content"), str):
+                    last_assistant = e["content"]
         except Exception:
             pass
-        return "".join(chunks)
+        return "".join(chunks) if chunks else (last_assistant or "")
 
     def classify_error(self, exit_code, stderr, raw_dir):
         """A structured error class, or None when the worker ran to completion — the
