@@ -296,19 +296,15 @@ class ClaudeSubagentWorker:
 
 
 class KimiWorker:
-    """kimi-code worker CLI mechanics (probe evidence, .orchestrator/evidence/kimi-probes.md):
-    top-level -p prompt (no exec subcommand), -m takes the CLI's provider alias — the one
-    worker whose CLI does NOT accept the relay model id verbatim, so build_argv consumes the
-    frozen cli_aliases (dispatch.py passes them in the owner-gated slice 3) — stream-json
-    output, and NO approval flag: kimi 0.26.0 prompt mode auto-approves on its own and hard-errors
-    on -y/--auto beside -p ("Cannot combine --prompt with --yolo", SPEC-900-1 re-probe 2026-07-18,
-    superseding probe F; the hardened systemd service remains the sole confinement — kimi has no
-    inner sandbox). No effort flag: K3 supports only kimi's own "max". State home is fixed at
-    $HOME/.kimi-code (no KIMI_HOME-style override exists, probe A), so the isolated service
-    needs only that path writable and no extra environment. UNISOLATED runs are refused, fail
-    closed: the CLI cannot set its own working directory (no --cd — the worker would run in
-    the dispatcher's cwd, not the worktree) and has no inner sandbox to fall back on (codex's
-    unisolated fallback keeps bwrap ON; kimi would run with no confinement at all)."""
+    """kimi-code worker mechanics (PLAN-009 slice 2; probe evidence
+    .orchestrator/evidence/kimi-probes.md): isolated workers use the ACP transport —
+    dispatch drives `kimi acp` through the hardened systemd-run --pipe unit via
+    kimi_acp.drive; the prompt travels in-band, never in argv. Model selection is
+    in-band via session/set_model with the frozen cli_aliases provider alias (the kimi
+    CLI does not accept the relay model id verbatim). No effort flag: K3 supports only
+    kimi's own "max". State home is fixed at $HOME/.kimi-code (no KIMI_HOME-style
+    override exists, probe A). UNISOLATED runs are refused, fail closed: the CLI
+    cannot set its own working directory (no --cd) and has no inner sandbox."""
 
     mode = "external-cli"   # detached CLI process under the worker role envelope (D5)
 
@@ -318,17 +314,8 @@ class KimiWorker:
             raise ValueError("kimi worker has no unisolated mode: the CLI cannot set its own "
                              "working directory (no --cd) and has no inner sandbox (probes "
                              "B/F); the hardened service is the only confinement — fail closed")
-        model = cli_aliases.get(model_id) if isinstance(cli_aliases, dict) else None
-        # Round-2 review: truthiness alone accepted an identity alias (the raw relay id
-        # laundered through the map) and non-string values straight into argv — the alias
-        # must be a non-empty STRING distinct from the relay model id.
-        if not isinstance(model, str) or not model.strip() or model == model_id:
-            raise ValueError(f"kimi worker requires a distinct CLI provider alias for "
-                             f"{model_id!r} (probe A: the kimi CLI accepts its own aliases, "
-                             f"never relay model ids); the frozen cli_aliases carries "
-                             f"{model!r}; fail closed")
-        return [*(argv_prefix or []), "-p", prompt,
-                "-m", model, "--output-format", "stream-json"]
+        raise ValueError("kimi worker uses ACP transport for isolated runs (PLAN-009 slice 2); "
+                         "dispatch routes kimi through kimi_acp.drive, not build_argv")
 
     def worker_env(self, operator_home, operator_user):
         """Scrubbed environment for the UNISOLATED path, kept total because dispatch.py builds
@@ -356,11 +343,12 @@ class KimiWorker:
 
     def recover_last_message(self, raw_dir, isolated):
         """The worker's final message from events.jsonl — MESSAGE RECOVERY, not a gate.
-        Primary: concatenate ACP session/update agent_message_chunk text frames (isolated
-        worker path via kimi_acp.drive; authoritative value is drive()'s final_message,
-        so this is a fallback kept for slice-3 cleanup).
+        Primary: concatenate ACP session/update agent_message_chunk text frames (the
+        isolated worker path via kimi_acp.drive; authoritative value is drive()'s
+        final_message, so this path is a redundant fallback for the worker dispatch).
         Fallback: last line with role=="assistant" and string content (stream-json from
-        'kimi -p', used by scripts/codex-plan; dies with slice 3 once -p is removed)."""
+        'kimi -p'; serves scripts/codex-plan's -p invocation only — the worker dispatch
+        path is ACP-only)."""
         chunks = []
         last_assistant = None
         try:

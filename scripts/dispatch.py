@@ -2865,11 +2865,10 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
                                   f"no worker-launchable {vendors['worker_vendor']} runtime "
                                   f"(native ELF binary)")
                 argv_prefix, binds, _entry = runtime
-            # Kimi slice 2: isolated kimi invocations route through the ACP client (PLAN-009):
+            # Kimi isolated invocations route through the ACP client (PLAN-009 slice 2):
             # prompt travels in-band via drive(), never in argv, so it has no MAX_ARG_STRLEN
-            # ceiling. The alias is validated here with the same distinct-alias contract as
-            # build_argv (slice 3 removes the old -p path; build_argv stays until then).
-            # Codex and all other external-CLI vendors keep the existing build_argv path.
+            # ceiling. The alias is validated here with the same distinct-alias contract.
+            # Codex and all other external-CLI vendors use the standard build_argv path.
             if vendors["worker_vendor"] == "kimi":
                 if kimi_acp is None:
                     finish("failed_worker_error", ERR_WORKER,
@@ -2901,12 +2900,11 @@ def _run_pipeline(attempt_id, spec_id, n, att, lc, wt, raw, finish) -> None:
                 worker_exit = res["effective_status"]
                 acp_message = res["final_message"]
             else:
-                # Kimi slice 3: the frozen alias map rides to the worker adapter — kimi's CLI
-                # takes the provider alias, not the relay model id; codex ignores the keyword
-                # (verbatim contract, tests/dispatch_worker_adapter.sh). A kimi record whose
-                # frozen aliases lack the required entry is refused by the adapter (ValueError)
-                # and recorded TERMINALLY here — never invoked with a raw relay id
-                # (round-1 review, medium 4).
+                # Non-kimi external-CLI vendors (codex): the frozen alias map rides to
+                # the worker adapter for any vendor that needs CLI alias translation; codex
+                # ignores it (verbatim contract, tests/dispatch_worker_adapter.sh). A
+                # ValueError from the adapter is recorded TERMINALLY — the worker is never
+                # invoked with a bad id.
                 try:
                     argv = worker_adapter.build_argv(lc["worker_model"], lc["worker_effort"], wt,
                                                      prompt, isolated=True, argv_prefix=argv_prefix,
