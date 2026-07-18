@@ -17,7 +17,9 @@ killed only when still alive. Every raw stdout line reaches the frame sink BEFOR
 
 The model must be selected in-band: a fresh ACP session defaults to K2.7, so drive()
 issues session/set_model with the frozen alias and requires a config_option_update
-read-back echoing it — for that session, observed after set_model was issued — before any
+read-back echoing it — for that session, RECEIVED after a watermark taken when set_model
+is issued: the reader stamps every line with a receive-order seq before any sink I/O, so
+a stale pre-transaction update can never confirm — before any
 prompt is sent (amendment 2026-07-18 (2)). Session mode
 is set to yolo — the same self-approval the -p transport had built in; the hardened unit
 remains the sole confinement.
@@ -57,13 +59,18 @@ class _Session:
         self.chunks = []
         self.sid = None
         self.model_value = None
+        self.model_watermark = None
+        self.rx_seq = 0  # lines received, stamped BEFORE any sink I/O or queueing
+        self.cur_seq = 0
 
         def read():
             try:
                 for line in proc.stdout:
+                    self.rx_seq += 1
+                    seq = self.rx_seq
                     frame_sink.write(line)
                     frame_sink.flush()
-                    self.q.put(line)
+                    self.q.put((seq, line))
             except OSError:
                 pass
             self.q.put(None)
@@ -86,8 +93,9 @@ class _Session:
         update = params.get("update")
         if not isinstance(update, dict):
             raise ProtocolFailure("malformed_frame", "session/update update not an object")
-        if self.sid is None or params.get("sessionId") != self.sid:
-            return  # another or not-yet-created session: raw-recorded, never consumed
+        # shape is validated for EVERY session/update; the session filter below gates
+        # only consumption, so a malformed foreign-session frame still fails closed
+        mine = self.sid is not None and params.get("sessionId") == self.sid
         kind = update.get("sessionUpdate")
         if kind == "agent_message_chunk":
             content = update.get("content")
@@ -97,7 +105,8 @@ class _Session:
                 text = content.get("text")
                 if not isinstance(text, str):
                     raise ProtocolFailure("malformed_frame", "chunk text not a string")
-                self.chunks.append(text)
+                if mine:
+                    self.chunks.append(text)
         elif kind == "config_option_update":
             opts = update.get("configOptions")
             if not isinstance(opts, list):
@@ -105,14 +114,17 @@ class _Session:
             for opt in opts:
                 if not isinstance(opt, dict):
                     raise ProtocolFailure("malformed_frame", "configOption not an object")
-                if opt.get("id") == "model":
+                if opt.get("id") == "model" and mine and (
+                        self.model_watermark is None
+                        or self.cur_seq > self.model_watermark):
                     self.model_value = opt.get("currentValue")
 
-    def _handle(self, line):
-        """Parse and validate one raw line; notifications are processed for side effects.
-        Agent-to-client requests and every malformed shape fail closed."""
-        if line is None:
+    def _handle(self, item):
+        """Parse and validate one queued (seq, raw line) item; notifications are processed
+        for side effects. Agent-to-client requests and every malformed shape fail closed."""
+        if item is None:
             raise ProtocolFailure("eof")
+        self.cur_seq, line = item
         try:
             msg = json.loads(line)
         except ValueError:
@@ -120,6 +132,10 @@ class _Session:
         if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0":
             raise ProtocolFailure("malformed_frame", "not a jsonrpc-2.0 object")
         if "method" in msg:
+            if not isinstance(msg["method"], str):
+                raise ProtocolFailure("malformed_frame", "method not a string")
+            if "params" in msg and not isinstance(msg["params"], dict):
+                raise ProtocolFailure("malformed_frame", "params not an object")
             if "id" in msg:
                 # no fs/terminal/permission capability was offered; refuse and fail closed
                 # (skip the reply if the prompt writer still owns stdin)
@@ -141,22 +157,10 @@ class _Session:
                     raise ProtocolFailure("write_stall")
                 raise ProtocolFailure(timeout_reason)
             try:
-                line = self.q.get(timeout=remaining)
+                item = self.q.get(timeout=remaining)
             except queue.Empty:
                 continue
-            return self._handle(line)
-
-    def _drain_pending(self):
-        """Process every already-queued frame without blocking, so a stale notification
-        cannot satisfy a confirmation that follows. A response here has no open request."""
-        while True:
-            try:
-                line = self.q.get_nowait()
-            except queue.Empty:
-                return
-            msg = self._handle(line)
-            if "method" not in msg:
-                raise ProtocolFailure("unexpected_response_id", repr(msg.get("id")))
+            return self._handle(item)
 
     def request(self, method, params, until_ts, big=False):
         self.next_id += 1
@@ -219,8 +223,10 @@ def drive(proc, *, prompt_text, cwd, model_alias, frame_sink, deadline_s, mode_i
         if not isinstance(sid, str) or not sid:
             raise ProtocolFailure("no_session_id")
         s.sid = sid
-        # only a read-back for THIS session observed after set_model was issued confirms it
-        s._drain_pending()
+        # only a read-back for THIS session received after this watermark confirms it:
+        # the reader stamps rx_seq before any sink I/O, so a stale update held in a slow
+        # sink write still carries a pre-watermark seq and can never confirm
+        s.model_watermark = s.rx_seq
         s.model_value = None
         s.request("session/set_model", {"sessionId": sid, "modelId": model_alias}, deadline_ts)
         confirm_ts = min(deadline_ts, time.monotonic() + MODEL_CONFIRM_WINDOW_S)

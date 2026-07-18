@@ -6,10 +6,12 @@
 # model read-back enforcement, agent-request refusal, duplicate/unknown response ids, wrong
 # stop reason, JSON-RPC errors, deadline expiry, and a >MAX_ARG_STRLEN (131072) prompt
 # completing through real pipes without a write-side deadlock (N4; hardened-chain variant
-# is proven live by scripts/kimi-acp-check.sh). Review acp-slice-1 round 1 falsifiers are
-# pinned here: an end_turn reply to a never-read prompt, malformed-shape frames (string
-# params, non-object config option, missing jsonrpc member), and a stale other-session
-# model read-back must each fail closed.
+# is proven live by scripts/kimi-acp-check.sh). Review acp-slice-1 round 1 and 2
+# falsifiers are pinned here: an end_turn reply to a never-read prompt, malformed-shape
+# frames (non-string method, string params on any notification, non-object config option
+# even for a foreign session, missing jsonrpc member), a stale other-session model
+# read-back, and a same-session read-back held inside sink I/O across the set_model
+# watermark must each fail closed.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 PY="${ORCH_TEST_PY:-.venv/bin/python}"
@@ -73,6 +75,16 @@ note_model("kimi-code/kimi-for-coding")  # the real CLI's default: NOT the froze
 if MODE == "strparams":
     send({"jsonrpc": "2.0", "method": "session/update", "params": "bogus"})
     drain()
+# review r2 falsifiers: inject one malformed frame, then keep serving the session
+# normally — without the fix the session completes and grades 0
+if MODE == "nummethod":
+    send({"jsonrpc": "2.0", "method": 7})
+if MODE == "unkstrparams":
+    send({"jsonrpc": "2.0", "method": "weird/notification", "params": "bogus"})
+if MODE == "foreignbadopt":
+    send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "other",
+          "update": {"sessionUpdate": "config_option_update",
+                     "configOptions": ["not-an-object"]}}})
 if MODE == "badopts":
     send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1",
           "update": {"sessionUpdate": "config_option_update",
@@ -125,7 +137,7 @@ drain()
 PEER
 
 if TMP="$TMP" "$PY" - <<'PY'
-import importlib.util, json, os, subprocess, sys
+import importlib.util, json, os, subprocess, sys, threading, time
 
 spec = importlib.util.spec_from_file_location("kimi_acp", "scripts/kimi_acp.py")
 ka = importlib.util.module_from_spec(spec)
@@ -234,6 +246,60 @@ case("r1: non-object config option entry fails closed",
 r = run("stalemodel", deadline=3)
 case("r1: stale other-session read-back cannot confirm set_model",
      r["effective_status"] != 0 and r["failure"] == "model_unconfirmed", r)
+
+r = run("nummethod")
+case("r2: non-string method fails closed",
+     r["effective_status"] != 0 and r["failure"] == "malformed_frame", r)
+
+r = run("unkstrparams")
+case("r2: unknown notification with string params fails closed",
+     r["effective_status"] != 0 and r["failure"] == "malformed_frame", r)
+
+r = run("foreignbadopt")
+case("r2: foreign-session non-object config option fails closed",
+     r["effective_status"] != 0 and r["failure"] == "malformed_frame", r)
+
+# review r2 falsifier: a same-session read-back RECEIVED before set_model but held inside
+# a slow frame-sink write — so not yet queued when the watermark is taken — must not
+# confirm; the receive-order seq is stamped before sink I/O, so the watermark rejects it.
+class HoldSink:
+    def __init__(self):
+        self.in_sink = threading.Event()
+        self.release = threading.Event()
+    def write(self, line):
+        if b"HOLDME" in line:
+            self.in_sink.set()
+            self.release.wait(10)
+    def flush(self):
+        pass
+
+rfd, wfd = os.pipe()
+class FakeProc:
+    stdout = os.fdopen(rfd, "rb")
+    stdin = None
+
+sink = HoldSink()
+s = ka._Session(FakeProc(), sink)
+s.sid = "s1"
+stale = {"jsonrpc": "2.0", "method": "session/update",
+         "params": {"sessionId": "s1", "marker": "HOLDME",
+                    "update": {"sessionUpdate": "config_option_update",
+                               "configOptions": [{"id": "model", "currentValue": ALIAS}]}}}
+os.write(wfd, (json.dumps(stale) + "\n").encode())
+assert sink.in_sink.wait(10)  # the stale line is seq-stamped and held inside sink I/O
+s.model_watermark = s.rx_seq  # exactly what drive() records when issuing set_model
+s.model_value = None
+sink.release.set()
+msg = s._recv(time.monotonic() + 10, "model_unconfirmed")
+case("r2: sink-held pre-transaction same-session read-back cannot confirm",
+     msg.get("method") == "session/update" and s.model_value is None,
+     {"model_value": s.model_value, "cur_seq": s.cur_seq,
+      "watermark": s.model_watermark})
+os.write(wfd, (json.dumps(stale).replace("HOLDME", "FRESH") + "\n").encode())
+s._recv(time.monotonic() + 10, "model_unconfirmed")
+case("r2: post-watermark same-session read-back does confirm",
+     s.model_value == ALIAS, {"model_value": s.model_value})
+os.close(wfd)
 
 big = "x" * 140_000  # > MAX_ARG_STRLEN 131072
 r = run("bigecho", prompt=big)
