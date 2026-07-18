@@ -194,35 +194,25 @@ check("pinning an unmapped reviewer model refuses launch (exit 2)",
 r_kimi = d.resolve_launch_models({"worker_model": "kimi-k3"}, cfg)
 check("kimi worker pin resolves and freezes worker_vendor=kimi, worker_mode=external-cli",
       r_kimi["worker_vendor"] == "kimi" and r_kimi["worker_mode"] == "external-cli")
-# "Nothing reviews its own work" — the one hard limit (CLAUDE.md rule 7): the resolved
-# reviewer equal to the worker model refuses unconditionally.
-check("same-model reviewer==worker refuses launch (exit 2)",
-      resolve_result({"worker_model": cfg["roles"]["bound_reviewer"]["model"]}) == "exit2")
-check("same-model pinned both ways refuses launch (exit 2)",
-      resolve_result({"worker_model": "gpt-5.6-sol",
-                      "reviewer_model": "gpt-5.6-sol"}) == "exit2")
+# Owner decision 2026-07-18: "nothing reviews its own work" (CLAUDE.md rule 7) binds the AGENT,
+# not the weights — the reviewer is a separate process with its own prompt and only spec, diff
+# and evidence. Worker and reviewer on the same model resolve; model choice is the owner's.
+r_same = d.resolve_launch_models({"worker_model": "gpt-5.6-sol",
+                                  "reviewer_model": "gpt-5.6-sol"}, cfg)
+check("same-model reviewer==worker resolves (owner decision 2026-07-18)",
+      r_same["worker_model"] == "gpt-5.6-sol" and r_same["reviewer_model"] == "gpt-5.6-sol")
 check("same-vendor different-model pairing resolves (the falsifier shape)",
       d.resolve_launch_models({"worker_model": "gpt-5.6-luna",
                                "reviewer_model": "gpt-5.6-sol"}, cfg)
       ["reviewer_model"] == "gpt-5.6-sol")
 # R73 round-1 review (blocking): an alias targeting another declared model must refuse at
-# validation (alias masquerade), and resolution compares alias-resolved EFFECTIVE models.
+# validation — aliases map a model id to its vendor-CLI name, never to another model.
 mc_spec = importlib.util.spec_from_file_location("mc", "scripts/models_check.py")
 mc = importlib.util.module_from_spec(mc_spec); mc_spec.loader.exec_module(mc)
 masq = json.loads(json.dumps(good))
 masq["cli_aliases"]["gpt-5.6-sol"] = "gpt-5.6-luna"
 check("alias targeting another declared model refuses validation",
       any("targets another declared model" in e for e in mc.validate(masq)))
-alias_cfg = json.loads(json.dumps(cfg))
-alias_cfg["cli_aliases"] = {**alias_cfg.get("cli_aliases", {}), "gpt-5.6-sol": "gpt-5.6-luna"}
-def resolve_with(approval, c):
-    try:
-        d.resolve_launch_models(approval, c); return "ok"
-    except SystemExit as e:
-        return f"exit{e.code}"
-check("alias-resolved effective self-review refuses launch (exit 2)",
-      resolve_with({"worker_model": "gpt-5.6-luna", "reviewer_model": "gpt-5.6-sol"},
-                   alias_cfg) == "exit2")
 
 # Alias map semantics: exact translation for listed ids, pass-through for everything else.
 aliases = cfg["cli_aliases"]

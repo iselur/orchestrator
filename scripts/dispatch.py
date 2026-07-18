@@ -215,11 +215,14 @@ def resolve_launch_models(approval: dict, cfg: dict) -> dict:
     freeze directly rather than inferring it from a full launch.
 
     Owner decision 2026-07-16: vendor pairing is the owner's call, made in scripts/models.json —
-    nothing here polices same- vs cross-vendor. Two checks remain, both mechanical: every model
-    in a runnable pairing must be DECLARED in vendor_map (an unmapped pin cannot be
-    vendor-classified for authorship, so it is refused, not guessed), and the resolved reviewer
-    may never be the SAME MODEL as the resolved worker ("nothing reviews its own work", CLAUDE.md
-    rule 7 — a verdict from the weights that authored the diff is not a review)."""
+    nothing here polices same- vs cross-vendor. One check remains, mechanical: every model in a
+    runnable pairing must be DECLARED in vendor_map (an unmapped pin cannot be vendor-classified
+    for authorship, so it is refused, not guessed).
+
+    Owner decision 2026-07-18: worker and reviewer MAY resolve to the same model. "Nothing reviews
+    its own work" (CLAUDE.md rule 7) binds the agent, not the weights — the reviewer is invoked as
+    a separate process with its own prompt and only spec, diff, and evidence, so it is never the
+    session that authored the diff whatever model it runs. Model choice is the owner's."""
     resolved = {
         "worker_model": approval.get("worker_model") or cfg["roles"]["worker"]["model"],
         "worker_effort": (approval.get("worker_reasoning_effort")
@@ -231,15 +234,6 @@ def resolve_launch_models(approval: dict, cfg: dict) -> dict:
         "cli_aliases": cfg["cli_aliases"],
     }
     vm = cfg["vendor_map"]
-    # R73 round-1 review (blocking): compare EFFECTIVE (alias-resolved) models, not config ids —
-    # an alias pointing one model id at another would otherwise pass the distinct-id check while
-    # the CLI invokes the worker's own weights. models_check refuses model-targeting aliases at
-    # validation; this is the resolution-time backstop and also covers plain id equality.
-    _eff = lambda m: resolved["cli_aliases"].get(m, m)
-    if _eff(resolved["reviewer_model"]) == _eff(resolved["worker_model"]):
-        die(f"launch refused: {resolved['worker_model']!r} would review its own work "
-            f"(reviewer equals worker_model after alias resolution; nothing "
-            f"reviews its own work, CLAUDE.md rule 7)")
     checked = [("worker_model", resolved["worker_model"]),
                ("reviewer_model", resolved["reviewer_model"])]
     for key, model in checked:
