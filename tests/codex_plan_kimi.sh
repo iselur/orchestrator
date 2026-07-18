@@ -126,6 +126,8 @@ PY
 
 # Oversized prompt is refused before kimi is invoked.
 big_prompt="$(python3 -c "print('x' * 121000, end='')")"
+# Remove stub marker files so their absence after the run proves kimi was never called.
+rm -f "$prompt_file" "$args_file"
 if PATH="$tmp/bin:$PATH" KIMI_STUB_PROMPT="$prompt_file" KIMI_STUB_ARGS="$args_file" \
    KIMI_STUB_STDOUT="$valid_response" \
      "$tmp/scripts/codex-plan" --out "$run_dir" "$big_prompt" >/dev/null 2>&1; then
@@ -134,10 +136,9 @@ fi
 # Plan-002 was allocated for the ID claim but the .md must not exist (refusal before invocation).
 assert_file    "$run_dir/PLAN-002.stdout"
 assert_no_file "$run_dir/PLAN-002.md"
-# The args file must not have been updated by this run (kimi was not invoked).
-[[ ! -s "$args_file" ]] \
-  || [[ "$(stat -c %Y "$args_file")" -lt "$(date -d '2 seconds ago' +%s 2>/dev/null || echo 0)" ]] \
-  || true   # timing-based; the assert_no_file above is the reliable check
+# Kimi was never invoked: the stub marker files must still be absent.
+assert_no_file "$prompt_file"
+assert_no_file "$args_file"
 
 # Non-zero kimi exit retains provenance (stdout + stderr) but no plan is minted.
 if PATH="$tmp/bin:$PATH" KIMI_STUB_PROMPT="$prompt_file" KIMI_STUB_ARGS="$args_file" \

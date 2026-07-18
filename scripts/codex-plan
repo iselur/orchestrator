@@ -43,8 +43,9 @@ EFFORT=$(python3 "$SCRIPTS_DIR/models_check.py" "$MODELS_CFG" get roles.spec_aut
 VENDOR=$(python3 "$SCRIPTS_DIR/models_check.py" "$MODELS_CFG" vendor "$MODEL") \
   || die "models config invalid, or vendor for $MODEL unusable: $MODELS_CFG"
 case "$VENDOR" in
-  codex|kimi) ;;
-  *) die "spec_author vendor '$VENDOR' is not supported by codex-plan (known: codex, kimi)" ;;
+  codex) VENDOR_LABEL=Codex ;;
+  kimi)  VENDOR_LABEL=kimi  ;;
+  *)     die "spec_author vendor '$VENDOR' is not supported by codex-plan (known: codex, kimi)" ;;
 esac
 if [[ "$VENDOR" == "kimi" ]]; then
   CLI_ALIAS=$(python3 "$SCRIPTS_DIR/models_check.py" "$MODELS_CFG" get "cli_aliases.$MODEL") \
@@ -256,13 +257,13 @@ esac
 
 if ((vendor_status != 0)); then
   printf 'codex-plan: %s exited %d; provenance retained at %s and %s\n' \
-    "$VENDOR" "$vendor_status" "$stdout_path" "$stderr_path" >&2
+    "$VENDOR_LABEL" "$vendor_status" "$stdout_path" "$stderr_path" >&2
   exit "$vendor_status"
 fi
 
 if ! grep -q '[^[:space:]]' "$stdout_path"; then
   printf 'codex-plan: %s produced empty output; provenance retained at %s and %s\n' \
-    "$VENDOR" "$stdout_path" "$stderr_path" >&2
+    "$VENDOR_LABEL" "$stdout_path" "$stderr_path" >&2
   exit 1
 fi
 
