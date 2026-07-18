@@ -168,9 +168,9 @@ PEER = os.path.join(TMP, "peer.py")
 ALIAS = "kimi-code/k3"
 fails = []
 
-def run(mode, prompt="ping", alias=ALIAS, deadline=15):
+def run(mode, prompt="ping", alias=ALIAS, deadline=15, sink_mode="wb"):
     sink_path = os.path.join(TMP, mode + ".events.jsonl")
-    with open(sink_path, "wb") as sink:
+    with open(sink_path, sink_mode) as sink:
         proc = subprocess.Popen([sys.executable, PEER], stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                 env={**os.environ, "PEER_MODE": mode})
@@ -243,6 +243,14 @@ case("EOF mid-stream fails closed with chunks kept", r["effective_status"] != 0
 r = run("dupid")
 case("duplicate/unknown response id fails closed", r["effective_status"] != 0
      and r["failure"] == "unexpected_response_id", r)
+
+# SPEC-901 gate-7 regression: dispatch once passed a TEXT-mode events sink; the reader
+# thread died on the first frame without its EOF sentinel and drive() hung to the 1h
+# ceiling. The sentinel now posts from finally, so a crashed reader is a fast eof failure
+# at the stage in flight — never a silent wait to the deadline.
+r = run("ok", deadline=3, sink_mode="w")
+case("text-mode sink fails closed in seconds, not to deadline", r["effective_status"] != 0
+     and r["failure"] == "eof" and r["stage"] == "initialize", r)
 
 r = run("slow", deadline=3)
 case("deadline expiry fails closed and reaps the peer", r["effective_status"] != 0
