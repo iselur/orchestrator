@@ -163,6 +163,28 @@ for label, failure, px in [
     check(f"fail-closed {label} -> TERMINAL",
           rec.get("status") in d.TERMINAL)
 
+# ---- ACP transport regression: cancellation, timeout, stop reason (PLAN-009 slice 3) -------
+# Each failure mode must fail closed — nonzero effective_status, no false PASS.
+for label, drive_extra in [
+    # Cancellation: unit killed externally (SIGKILL); drive sees EOF then nonzero proc exit.
+    ("cancellation (proc_exit=-9)",
+     {"effective_status": -9, "proc_exit": -9, "stop_reason": None,
+      "failure": "eof", "detail": ""}),
+    # Deadline timeout: drive hit the ceiling before a terminal response arrived.
+    ("timeout (deadline)",
+     {"effective_status": 1, "proc_exit": 0, "stop_reason": None,
+      "failure": "deadline", "detail": ""}),
+    # Unsupported stop reason: session completed with a reason other than end_turn.
+    ("unsupported stop reason (max_tokens)",
+     {"effective_status": 1, "proc_exit": 0, "stop_reason": "max_tokens",
+      "failure": "stop_reason", "detail": "'max_tokens'"}),
+]:
+    rec, *_ = run(drive_res=drive_extra)
+    check(f"regression {label} -> failed_worker_error",
+          rec.get("status") == "failed_worker_error")
+    check(f"regression {label} -> TERMINAL (no false PASS)",
+          rec.get("status") in d.TERMINAL)
+
 sys.exit(0 if not fails else 1)
 PY
 
