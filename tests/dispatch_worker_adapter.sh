@@ -176,43 +176,10 @@ for bad in ("main", "ready-for-main", "codex/SPEC-000-2", "codex/SPEC-000-1x",
     check(f"corrupt/foreign branch value {bad!r} refuses deletion",
           not d.valid_attempt_branch(bad, "SPEC-000-1"))
 
-# ---- kimi worker adapter (kimi vendor, slice 2) --------------------------------------------
-# Mechanics per .orchestrator/evidence/kimi-probes.md: -p argv prompt (no exec subcommand),
-# -m takes the CLI provider alias from the frozen cli_aliases, stream-json output, NO
-# approval flag (0.26.0 prompt mode auto-approves and refuses -y/--auto beside -p —
-# SPEC-900-1 re-probe 2026-07-18; the hardened service is the sole confinement), no effort
-# flag (K3 carries kimi's own effort model), and NO unisolated mode at all.
+# ---- kimi worker adapter (kimi vendor, ACP transport) --------------------------------------
+# Isolated worker uses kimi_acp.drive (PLAN-009 slice 2); build_argv serves the unisolated
+# refusal only. All -p/stream-json worker tests removed in slice 3.
 kw = va.get_worker_adapter("kimi")
-KPREFIX = ["/home/codex-worker/.kimi-code/bin/kimi"]
-KAL = {"kimi-k3": "kimi-code/k3"}
-check("kimi isolated argv: prefix, -p prompt, provider alias, stream-json, no approval flag",
-      kw.build_argv("kimi-k3", "max", WT, PROMPT, isolated=True, argv_prefix=KPREFIX,
-                    cli_aliases=KAL)
-      == [*KPREFIX, "-p", PROMPT, "-m", "kimi-code/k3", "--output-format", "stream-json"])
-kav = kw.build_argv("kimi-k3", "max", WT, PROMPT, isolated=True, argv_prefix=KPREFIX,
-                    cli_aliases=KAL)
-check("kimi argv carries no codex flags (exec/--cd/--sandbox/--json/effort) and no worktree path",
-      not any(f in kav for f in ("exec", "--cd", "--sandbox", "--json", WT))
-      and not any("model_reasoning_effort" in a for a in kav))
-# Round-1 review of slice 3 (medium 4): kimi's CLI accepts only its provider aliases, so a
-# frozen alias map without the required entry REFUSES — the raw relay id must never reach
-# the CLI (deliberately flipping the slice-2 pass-through convention for kimi).
-try:
-    kw.build_argv("kimi-k3", "max", WT, PROMPT, isolated=True, argv_prefix=KPREFIX)
-    kimi_noalias_raises = False
-except ValueError:
-    kimi_noalias_raises = True
-check("kimi without its required alias entry refuses (fail closed, never the raw id)",
-      kimi_noalias_raises)
-# Round-2 review: an IDENTITY alias (raw id laundered through the map) and a non-string
-# alias value must refuse the same way — the alias is a non-empty string DISTINCT from the id.
-for bad_aliases in ({"kimi-k3": "kimi-k3"}, {"kimi-k3": 7}, {"kimi-k3": "  "}, "not-a-dict"):
-    try:
-        kw.build_argv("kimi-k3", "max", WT, PROMPT, isolated=True, argv_prefix=KPREFIX,
-                      cli_aliases=bad_aliases)
-        check(f"kimi refuses corrupt alias mapping {bad_aliases!r}", False)
-    except ValueError:
-        check(f"kimi refuses corrupt alias mapping {bad_aliases!r}", True)
 try:
     kw.build_argv("kimi-k3", "max", WT, PROMPT, isolated=False, last_message_path=LMP)
     kimi_uniso_raises = False
