@@ -17,10 +17,13 @@ killed only when still alive. Every raw stdout line reaches the frame sink BEFOR
 
 The model must be selected in-band: a fresh ACP session defaults to K2.7, so drive()
 issues session/set_model with the frozen alias and requires a config_option_update
-read-back echoing it — for that session, RECEIVED after a watermark taken when set_model
-is issued: the reader stamps every line with a receive-order seq before any sink I/O, so
-a stale pre-transaction update can never confirm — before any
-prompt is sent (amendment 2026-07-18 (2)). Session mode
+read-back echoing it — for that session, RECEIVED after the set_model response frame,
+the transaction fence: the peer emits that response only after fully reading set_model,
+the reader stamps every line with a receive-order seq before any sink I/O, and the fence
+seq is taken in the consuming thread, so no stale, sink-held, or written-while-pending
+update can ever confirm and no fresh one is racily rejected. The CLI emits its read-back
+before that response and again after set_mode, so the wait sits after set_mode — before
+any prompt is sent (amendment 2026-07-18 (2)). Session mode
 is set to yolo — the same self-approval the -p transport had built in; the hardened unit
 remains the sole confinement.
 """
@@ -32,8 +35,8 @@ import threading
 import time
 
 PROTOCOL_VERSION = 1
-# How long after set_model resolves to wait for the config_option_update read-back
-# (observed to arrive before the response; the window only bounds a misbehaving peer).
+# How long after set_mode resolves to wait for a post-fence config_option_update
+# read-back (observed with set_mode's update; the window only bounds a misbehaving peer).
 MODEL_CONFIRM_WINDOW_S = 30
 SHUTDOWN_WAIT_S = 30
 
@@ -59,7 +62,7 @@ class _Session:
         self.chunks = []
         self.sid = None
         self.model_value = None
-        self.model_watermark = None
+        self.model_watermark = float("inf")  # no read-back confirms before the fence
         self.rx_seq = 0  # lines received, stamped BEFORE any sink I/O or queueing
         self.cur_seq = 0
 
@@ -90,18 +93,26 @@ class _Session:
         params = msg.get("params")
         if not isinstance(params, dict):
             raise ProtocolFailure("malformed_frame", "session/update params not an object")
+        # every field this driver reads is type-validated per the ACP schema for EVERY
+        # session/update, before the session filter — consumption is gated, never validation
+        sid = params.get("sessionId")
+        if not isinstance(sid, str):
+            raise ProtocolFailure("malformed_frame", "sessionId not a string")
         update = params.get("update")
         if not isinstance(update, dict):
             raise ProtocolFailure("malformed_frame", "session/update update not an object")
-        # shape is validated for EVERY session/update; the session filter below gates
-        # only consumption, so a malformed foreign-session frame still fails closed
-        mine = self.sid is not None and params.get("sessionId") == self.sid
         kind = update.get("sessionUpdate")
+        if not isinstance(kind, str):
+            raise ProtocolFailure("malformed_frame", "sessionUpdate not a string")
+        mine = self.sid is not None and sid == self.sid
         if kind == "agent_message_chunk":
             content = update.get("content")
             if not isinstance(content, dict):
                 raise ProtocolFailure("malformed_frame", "chunk content not an object")
-            if content.get("type") == "text":
+            ctype = content.get("type")
+            if not isinstance(ctype, str):
+                raise ProtocolFailure("malformed_frame", "chunk content type not a string")
+            if ctype == "text":
                 text = content.get("text")
                 if not isinstance(text, str):
                     raise ProtocolFailure("malformed_frame", "chunk text not a string")
@@ -112,12 +123,15 @@ class _Session:
             if not isinstance(opts, list):
                 raise ProtocolFailure("malformed_frame", "configOptions not a list")
             for opt in opts:
-                if not isinstance(opt, dict):
-                    raise ProtocolFailure("malformed_frame", "configOption not an object")
-                if opt.get("id") == "model" and mine and (
-                        self.model_watermark is None
-                        or self.cur_seq > self.model_watermark):
-                    self.model_value = opt.get("currentValue")
+                if not isinstance(opt, dict) or not isinstance(opt.get("id"), str):
+                    raise ProtocolFailure("malformed_frame", "configOption id not a string")
+                if opt["id"] == "model":
+                    value = opt.get("currentValue")
+                    if not isinstance(value, str):
+                        raise ProtocolFailure("malformed_frame",
+                                              "model currentValue not a string")
+                    if mine and self.cur_seq > self.model_watermark:
+                        self.model_value = value
 
     def _handle(self, item):
         """Parse and validate one queued (seq, raw line) item; notifications are processed
@@ -145,6 +159,12 @@ class _Session:
                                           "message": "client capability not offered"}})
                 raise ProtocolFailure("agent_request", str(msg.get("method")))
             self._note(msg)
+        else:
+            # JSON-RPC response ids are strings, numbers, or null — never booleans, which
+            # Python would otherwise equate with our integer ids (True == 1)
+            rid = msg.get("id")
+            if isinstance(rid, bool) or not isinstance(rid, (str, int, float, type(None))):
+                raise ProtocolFailure("malformed_frame", "invalid response id type")
         return msg
 
     def _recv(self, until_ts, timeout_reason):
@@ -162,7 +182,7 @@ class _Session:
                 continue
             return self._handle(item)
 
-    def request(self, method, params, until_ts, big=False):
+    def request(self, method, params, until_ts, big=False, arm_model=False):
         self.next_id += 1
         rid = self.next_id
         frame = {"jsonrpc": "2.0", "id": rid, "method": method, "params": params}
@@ -192,6 +212,13 @@ class _Session:
                     raise ProtocolFailure("write_stall")
                 if self.writer_failure is not None:
                     raise self.writer_failure
+            if arm_model:
+                # this response is the transaction fence: the peer emits it only after
+                # fully reading set_model, so only frames received after it can reflect
+                # the new model — anything earlier (stale, sink-held, or received while
+                # the write was pending) carries a smaller seq and cannot confirm, and
+                # the fence seq is this thread's cur_seq, so no sampling race either way
+                self.model_watermark = self.cur_seq
             return result
 
     def _send_quiet(self, frame):
@@ -216,25 +243,25 @@ def drive(proc, *, prompt_text, cwd, model_alias, frame_sink, deadline_s, mode_i
                           "clientCapabilities": {"fs": {"readTextFile": False,
                                                         "writeTextFile": False}}},
                          deadline_ts)
-        if init.get("protocolVersion") != PROTOCOL_VERSION:
-            raise ProtocolFailure("protocol_version", repr(init.get("protocolVersion")))
+        pv = init.get("protocolVersion")
+        if isinstance(pv, bool) or pv != PROTOCOL_VERSION:
+            raise ProtocolFailure("protocol_version", repr(pv))
         new = s.request("session/new", {"cwd": cwd, "mcpServers": []}, deadline_ts)
         sid = new.get("sessionId")
         if not isinstance(sid, str) or not sid:
             raise ProtocolFailure("no_session_id")
         s.sid = sid
-        # only a read-back for THIS session received after this watermark confirms it:
-        # the reader stamps rx_seq before any sink I/O, so a stale update held in a slow
-        # sink write still carries a pre-watermark seq and can never confirm
-        s.model_watermark = s.rx_seq
-        s.model_value = None
-        s.request("session/set_model", {"sessionId": sid, "modelId": model_alias}, deadline_ts)
+        # only a read-back for THIS session received after the set_model response frame
+        # confirms it (arm_model); the CLI emits its read-back before that response and
+        # again after set_mode, so the confirmation wait sits after set_mode
+        s.request("session/set_model", {"sessionId": sid, "modelId": model_alias},
+                  deadline_ts, arm_model=True)
+        s.request("session/set_mode", {"sessionId": sid, "modeId": mode_id}, deadline_ts)
         confirm_ts = min(deadline_ts, time.monotonic() + MODEL_CONFIRM_WINDOW_S)
         while s.model_value != model_alias:
             msg = s._recv(confirm_ts, "model_unconfirmed")
             if "method" not in msg:
                 raise ProtocolFailure("unexpected_response_id", repr(msg.get("id")))
-        s.request("session/set_mode", {"sessionId": sid, "modeId": mode_id}, deadline_ts)
         result = s.request("session/prompt",
                            {"sessionId": sid,
                             "prompt": [{"type": "text", "text": prompt_text}]},
@@ -351,7 +378,10 @@ def _main():
     print(f"final_message: {res['final_message'][:400]}")
 
     if args.case == "negative":
-        ok = res["effective_status"] != 0 and res["failure"] == "jsonrpc_error"
+        # model_value None proves the error predates any confirmed model: the prompt is
+        # only ever sent after confirmation, so this error cannot be a prompt error
+        ok = (res["effective_status"] != 0 and res["failure"] == "jsonrpc_error"
+              and res["model_value"] is None and res["stop_reason"] is None)
     elif args.case == "big":
         ok = (res["effective_status"] == 0 and f"{tag} OK" in res["final_message"]
               and res["prompt_bytes"] >= args.prompt_bytes
