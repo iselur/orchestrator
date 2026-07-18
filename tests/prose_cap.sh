@@ -62,7 +62,7 @@ fi
 # 1. Every tracked markdown file must be on the allowlist with a line cap. A new standing document
 #    is a reviewed decision: add it here AND give it a cap, in the same PR.
 declare -A cap=(
-  [CLAUDE.md]=70  # 65→70 on 2026-07-16, owner-approved: rule 8 (code discipline) + brief slices
+  [CLAUDE.md]=80  # 70→80 on 2026-07-18, owner-approved: rule 5 probe-first (dated probe for external-tool assumptions)
   [AGENTS.md]=60   # raised from 45 with the role→vendor table: the rulebook now speaks in roles,
                    # and this is the one place a model name may appear, so swapping a vendor is an
                    # edit here and nowhere else.
@@ -70,6 +70,7 @@ declare -A cap=(
   [BOOTSTRAP.md]=80
   [SECURITY.md]=110
   [.orchestrator/BACKLOG.md]=45
+  [.orchestrator/REVIEW-FRAMING.md]=45  # added 2026-07-18, owner-approved: binding review framing (CLAUDE.md rule 3)
 )
 total_lines=0
 total_bytes=0
