@@ -68,7 +68,10 @@ class _Session:
                     self.q.put(line)
             except OSError:
                 pass
-            self.q.put(None)
+            finally:
+                # the EOF sentinel must survive ANY reader crash: without it drive() waits
+                # on an empty queue until its deadline (SPEC-901 gate-7, text-mode sink)
+                self.q.put(None)
 
         threading.Thread(target=read, daemon=True).start()
 
