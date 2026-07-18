@@ -8,14 +8,17 @@ MAX_ARG_STRLEN ceiling (R97).
 
 Fail-closed contract (PLAN-009 amendment 2026-07-18): the EFFECTIVE status is nonzero
 whenever the session lacked a validated stopReason:end_turn terminal response — malformed
-frame, JSON-RPC error, unexpected response id, agent-to-client request, unconfirmed model
-read-back, wrong stop reason, EOF, write stall, deadline — regardless of the child's own
-exit code, so a zero-exit incomplete session can never grade as success. The child is
+frame (anything but a jsonrpc-2.0 object of valid shape), JSON-RPC error, unexpected
+response id, agent-to-client request, unconfirmed model read-back, wrong stop reason, EOF,
+write stall, deadline — regardless of the child's own exit code, so a zero-exit incomplete
+session can never grade as success. A prompt response only counts once the prompt frame
+was fully written — a peer answering a prompt it never read fails closed. The child is
 killed only when still alive. Every raw stdout line reaches the frame sink BEFORE parsing.
 
 The model must be selected in-band: a fresh ACP session defaults to K2.7, so drive()
 issues session/set_model with the frozen alias and requires a config_option_update
-read-back echoing it before any prompt is sent (amendment 2026-07-18 (2)). Session mode
+read-back echoing it — for that session, observed after set_model was issued — before any
+prompt is sent (amendment 2026-07-18 (2)). Session mode
 is set to yolo — the same self-approval the -p transport had built in; the hardened unit
 remains the sole confinement.
 """
@@ -49,8 +52,10 @@ class _Session:
         self.proc = proc
         self.q = queue.SimpleQueue()
         self.writer = None
+        self.writer_failure = None
         self.next_id = 0
         self.chunks = []
+        self.sid = None
         self.model_value = None
 
         def read():
@@ -75,20 +80,60 @@ class _Session:
     def _note(self, msg):
         if msg.get("method") != "session/update":
             return  # unknown notification: raw-recorded by the reader, otherwise ignored
-        update = (msg.get("params") or {}).get("update") or {}
+        params = msg.get("params")
+        if not isinstance(params, dict):
+            raise ProtocolFailure("malformed_frame", "session/update params not an object")
+        update = params.get("update")
+        if not isinstance(update, dict):
+            raise ProtocolFailure("malformed_frame", "session/update update not an object")
+        if self.sid is None or params.get("sessionId") != self.sid:
+            return  # another or not-yet-created session: raw-recorded, never consumed
         kind = update.get("sessionUpdate")
         if kind == "agent_message_chunk":
-            content = update.get("content") or {}
+            content = update.get("content")
+            if not isinstance(content, dict):
+                raise ProtocolFailure("malformed_frame", "chunk content not an object")
             if content.get("type") == "text":
-                self.chunks.append(content.get("text") or "")
+                text = content.get("text")
+                if not isinstance(text, str):
+                    raise ProtocolFailure("malformed_frame", "chunk text not a string")
+                self.chunks.append(text)
         elif kind == "config_option_update":
-            for opt in update.get("configOptions") or []:
+            opts = update.get("configOptions")
+            if not isinstance(opts, list):
+                raise ProtocolFailure("malformed_frame", "configOptions not a list")
+            for opt in opts:
+                if not isinstance(opt, dict):
+                    raise ProtocolFailure("malformed_frame", "configOption not an object")
                 if opt.get("id") == "model":
                     self.model_value = opt.get("currentValue")
 
+    def _handle(self, line):
+        """Parse and validate one raw line; notifications are processed for side effects.
+        Agent-to-client requests and every malformed shape fail closed."""
+        if line is None:
+            raise ProtocolFailure("eof")
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            raise ProtocolFailure("malformed_frame", line[:200].decode("utf-8", "replace"))
+        if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0":
+            raise ProtocolFailure("malformed_frame", "not a jsonrpc-2.0 object")
+        if "method" in msg:
+            if "id" in msg:
+                # no fs/terminal/permission capability was offered; refuse and fail closed
+                # (skip the reply if the prompt writer still owns stdin)
+                if self.writer is None or not self.writer.is_alive():
+                    self._send({"jsonrpc": "2.0", "id": msg["id"],
+                                "error": {"code": -32601,
+                                          "message": "client capability not offered"}})
+                raise ProtocolFailure("agent_request", str(msg.get("method")))
+            self._note(msg)
+        return msg
+
     def _recv(self, until_ts, timeout_reason):
         """Return the next parsed frame; notifications are processed for side effects and
-        returned too (callers skip or await them). Agent-to-client requests fail closed."""
+        returned too (callers skip or await them)."""
         while True:
             remaining = until_ts - time.monotonic()
             if remaining <= 0:
@@ -99,25 +144,19 @@ class _Session:
                 line = self.q.get(timeout=remaining)
             except queue.Empty:
                 continue
-            if line is None:
-                raise ProtocolFailure("eof")
+            return self._handle(line)
+
+    def _drain_pending(self):
+        """Process every already-queued frame without blocking, so a stale notification
+        cannot satisfy a confirmation that follows. A response here has no open request."""
+        while True:
             try:
-                msg = json.loads(line)
-            except ValueError:
-                raise ProtocolFailure("malformed_frame", line[:200].decode("utf-8", "replace"))
-            if not isinstance(msg, dict):
-                raise ProtocolFailure("malformed_frame", "non-object frame")
-            if "method" in msg:
-                if "id" in msg:
-                    # no fs/terminal/permission capability was offered; refuse and fail closed
-                    # (skip the reply if the prompt writer still owns stdin)
-                    if self.writer is None or not self.writer.is_alive():
-                        self._send({"jsonrpc": "2.0", "id": msg["id"],
-                                    "error": {"code": -32601,
-                                              "message": "client capability not offered"}})
-                    raise ProtocolFailure("agent_request", str(msg.get("method")))
-                self._note(msg)
-            return msg
+                line = self.q.get_nowait()
+            except queue.Empty:
+                return
+            msg = self._handle(line)
+            if "method" not in msg:
+                raise ProtocolFailure("unexpected_response_id", repr(msg.get("id")))
 
     def request(self, method, params, until_ts, big=False):
         self.next_id += 1
@@ -141,13 +180,21 @@ class _Session:
             result = msg.get("result")
             if not isinstance(result, dict):
                 raise ProtocolFailure("malformed_frame", "non-object result")
+            if big:
+                # a response is only valid once the request actually reached the peer:
+                # a peer answering a prompt it never finished reading fails closed
+                self.writer.join(max(0.0, until_ts - time.monotonic()))
+                if self.writer.is_alive():
+                    raise ProtocolFailure("write_stall")
+                if self.writer_failure is not None:
+                    raise self.writer_failure
             return result
 
     def _send_quiet(self, frame):
         try:
             self._send(frame)
-        except ProtocolFailure:
-            pass  # the peer's silence surfaces as eof/deadline in the read loop
+        except ProtocolFailure as e:
+            self.writer_failure = e  # surfaces via the post-response writer check
 
 
 def drive(proc, *, prompt_text, cwd, model_alias, frame_sink, deadline_s, mode_id="yolo"):
@@ -171,6 +218,10 @@ def drive(proc, *, prompt_text, cwd, model_alias, frame_sink, deadline_s, mode_i
         sid = new.get("sessionId")
         if not isinstance(sid, str) or not sid:
             raise ProtocolFailure("no_session_id")
+        s.sid = sid
+        # only a read-back for THIS session observed after set_model was issued confirms it
+        s._drain_pending()
+        s.model_value = None
         s.request("session/set_model", {"sessionId": sid, "modelId": model_alias}, deadline_ts)
         confirm_ts = min(deadline_ts, time.monotonic() + MODEL_CONFIRM_WINDOW_S)
         while s.model_value != model_alias:

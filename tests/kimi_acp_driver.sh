@@ -6,7 +6,10 @@
 # model read-back enforcement, agent-request refusal, duplicate/unknown response ids, wrong
 # stop reason, JSON-RPC errors, deadline expiry, and a >MAX_ARG_STRLEN (131072) prompt
 # completing through real pipes without a write-side deadlock (N4; hardened-chain variant
-# is proven live by scripts/kimi-acp-check.sh).
+# is proven live by scripts/kimi-acp-check.sh). Review acp-slice-1 round 1 falsifiers are
+# pinned here: an end_turn reply to a never-read prompt, malformed-shape frames (string
+# params, non-object config option, missing jsonrpc member), and a stale other-session
+# model read-back must each fail closed.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 PY="${ORCH_TEST_PY:-.venv/bin/python}"
@@ -30,8 +33,8 @@ def recv():
         sys.exit(0)
     return json.loads(line)
 
-def note_model(value):
-    send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1",
+def note_model(value, sid="s1"):
+    send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": sid,
           "update": {"sessionUpdate": "config_option_update",
                      "configOptions": [{"id": "model", "currentValue": value}]}}})
 
@@ -46,6 +49,11 @@ def drain():
     sys.exit(0)
 
 m = recv()  # initialize
+if MODE == "stalemodel":
+    note_model(ALIAS, sid="stale-old")  # review r1 falsifier: pre-session, other session
+if MODE == "nojsonrpc":
+    send({"id": m["id"], "result": {"protocolVersion": 1, "agentCapabilities": {}}})
+    drain()
 send({"jsonrpc": "2.0", "id": m["id"],
       "result": {"protocolVersion": 99 if MODE == "badversion" else 1,
                  "agentCapabilities": {}}})
@@ -62,6 +70,14 @@ if MODE == "agentreq":
     drain()
 send({"jsonrpc": "2.0", "id": m["id"], "result": {"sessionId": "s1"}})
 note_model("kimi-code/kimi-for-coding")  # the real CLI's default: NOT the frozen alias
+if MODE == "strparams":
+    send({"jsonrpc": "2.0", "method": "session/update", "params": "bogus"})
+    drain()
+if MODE == "badopts":
+    send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1",
+          "update": {"sessionUpdate": "config_option_update",
+                     "configOptions": ["not-an-object"]}}})
+    drain()
 
 m = recv()  # session/set_model
 if MODE == "modelerr":
@@ -69,11 +85,17 @@ if MODE == "modelerr":
           "error": {"code": -32603, "message": "model not configured"}})
     drain()
 send({"jsonrpc": "2.0", "id": m["id"], "result": {}})
-if MODE != "noconfirm":
+if MODE not in ("noconfirm", "stalemodel"):
     note_model(ALIAS)
 
 m = recv()  # session/set_mode
 send({"jsonrpc": "2.0", "id": m["id"], "result": {}})
+if MODE in ("noread", "noreadhang"):
+    # answer the prompt request (next id) WITHOUT ever reading it — review r1 falsifier
+    send({"jsonrpc": "2.0", "id": m["id"] + 1, "result": {"stopReason": "end_turn"}})
+    if MODE == "noread":
+        sys.exit(0)
+    time.sleep(60)
 
 m = recv()  # session/prompt
 ptext = m["params"]["prompt"][0]["text"]
@@ -188,6 +210,30 @@ case("deadline expiry fails closed and reaps the peer", r["effective_status"] !=
 r = run("agentreq")
 case("agent-to-client request is refused and fails closed",
      r["effective_status"] != 0 and r["failure"] == "agent_request", r)
+
+r = run("noread", prompt="y" * 200_000)
+case("r1: end_turn for a never-read prompt fails closed",
+     r["effective_status"] != 0 and r["failure"] == "write_failed", r)
+
+r = run("noreadhang", prompt="y" * 200_000, deadline=3)
+case("r1: unread prompt held open is a write stall",
+     r["effective_status"] != 0 and r["failure"] == "write_stall", r)
+
+r = run("nojsonrpc")
+case("r1: frame missing the jsonrpc member fails closed",
+     r["effective_status"] != 0 and r["failure"] == "malformed_frame", r)
+
+r = run("strparams")
+case("r1: session/update with string params fails closed",
+     r["effective_status"] != 0 and r["failure"] == "malformed_frame", r)
+
+r = run("badopts")
+case("r1: non-object config option entry fails closed",
+     r["effective_status"] != 0 and r["failure"] == "malformed_frame", r)
+
+r = run("stalemodel", deadline=3)
+case("r1: stale other-session read-back cannot confirm set_model",
+     r["effective_status"] != 0 and r["failure"] == "model_unconfirmed", r)
 
 big = "x" * 140_000  # > MAX_ARG_STRLEN 131072
 r = run("bigecho", prompt=big)
